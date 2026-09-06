@@ -101,6 +101,10 @@ impl Desktop {
             .unwrap_or_else(|| "未分类".into())
     }
     pub fn begin_folder(&mut self, id: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.page, Page::Library | Page::New) {
+            self.folder_filter = None;
+            self.navigate(Page::Library, cx);
+        }
         let name = id
             .and_then(|id| self.library.folders.get(&id))
             .cloned()
