@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import tomllib
 
+from dmg import build_install_dmg
+
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT.parent
 
@@ -23,6 +25,16 @@ def main():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
+    system = platform.system()
+    # Fail before expensive builds if the platform's packaging tools are absent.
+    try:
+        if system == "Darwin":
+            import dmgbuild  # noqa: F401
+        elif system == "Windows":
+            from verify_windows_icon import verify_windows_icon
+    except ImportError as error:
+        raise SystemExit("Install packaging tools: python -m pip install -r "
+                         "desktop/scripts/requirements-packaging.txt") from error
     profile = "debug" if args.debug else "release"
     flags = [] if args.debug else ["--release", "--locked"]
     revisions = {
@@ -41,7 +53,6 @@ def main():
         run("cargo", "build", *flags)
         run("cargo", "build", "--manifest-path", str(ROOT / "Cargo.toml"), *flags)
     version = tomllib.loads((PROJECT / "Cargo.toml").read_text())["package"]["version"]
-    system = platform.system()
     suffix = ".exe" if system == "Windows" else ""
     package_name = f"course2md-desktop-{system.lower()}-{platform.machine()}"
     base = ROOT / "target" / "packages" / package_name
@@ -82,6 +93,8 @@ def main():
             shutil.copy2(ROOT / "assets/icon.png", base / "course2md.png")
     shutil.copy2(PROJECT / "target" / profile / f"course2md{suffix}", binaries / f"course2md{suffix}")
     shutil.copy2(ROOT / "target" / profile / f"course2md-desktop{suffix}", binaries / f"course2md-desktop{suffix}")
+    if system == "Windows":
+        verify_windows_icon(binaries / "course2md-desktop.exe")
     shutil.copy2(PROJECT / "LICENSE", base / "LICENSE")
     shutil.copy2(ROOT / "assets/material/LICENSE", base / "LICENSE-material-icons")
     shutil.copy2(ROOT / "README.md", base / "README.md")
@@ -89,7 +102,9 @@ def main():
     # revisions. Release builds have already checked this snapshot against the lock.
     (base / "sources.lock.json").write_text(json.dumps(revisions, indent=2) + "\n")
     if system == "Darwin":
+        shutil.copy2(PROJECT / "LICENSE", resources / "LICENSE")
         shutil.copy2(ROOT / "assets/material/LICENSE", resources / "LICENSE-material-icons")
+        shutil.copy2(base / "sources.lock.json", resources / "sources.lock.json")
         identity = os.environ.get("APPLE_SIGNING_IDENTITY", "-")
         signing = ["--force", "--sign", identity]
         if identity != "-":
@@ -109,18 +124,7 @@ def main():
         dmg = base.parent / f"course2md-gui-macos-{platform.machine()}.dmg"
         if dmg.exists():
             dmg.unlink()
-        applications = base / "Applications"
-        applications.symlink_to("/Applications")
-        # Size the volume from logical file bytes, not host allocation/cloning.
-        # Reserve 64 MiB for filesystem metadata and block rounding. Empty space
-        # compresses in UDZO, so this does not inflate the download by 64 MiB.
-        payload_bytes = sum(path.stat().st_size for path in base.rglob("*")
-                            if not path.is_symlink() and path.is_file())
-        image_mib = (payload_bytes + 1024 * 1024 - 1) // (1024 * 1024) + 64
-        print(f"Creating {image_mib} MiB HFS+ image for {payload_bytes} bytes of files", flush=True)
-        run("hdiutil", "create", "-volname", "course2md", "-srcfolder", str(base),
-            "-fs", "HFS+", "-size", f"{image_mib}m", "-ov", "-format", "UDZO", str(dmg))
-        applications.unlink()
+        build_install_dmg(bundle, dmg)
         if identity != "-":
             run("codesign", "--force", "--sign", identity, "--timestamp", str(dmg))
         if identity != "-" and all(notarization):

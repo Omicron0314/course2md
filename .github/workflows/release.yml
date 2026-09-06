@@ -132,6 +132,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Native packaging tools
+        run: python -m pip install -r desktop/scripts/requirements-packaging.txt
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: |

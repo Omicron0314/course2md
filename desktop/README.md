@@ -29,10 +29,15 @@ COURSE2MD_BIN="$PWD/target/debug/course2md" cargo run --manifest-path desktop/Ca
 ## 本机打包
 
 ```sh
+python3 -m pip install -r desktop/scripts/requirements-packaging.txt
 python3 desktop/scripts/package.py --debug
 ```
 
 产物位于 `desktop/target/packages/`。macOS 为包含 CLI 和 MLX Metal 库的 `.app`；Windows 为两份 `.exe`；Linux 为两份可执行文件以及桌面入口。Windows/Linux 解压后保留两份程序在同一目录。本机默认 ad-hoc 签名；发布 CI 使用已有 Developer ID 与 Apple API 凭据签名、公证并生成 DMG。macOS ZIP 使用 ditto 保留签名所需的符号链接。
+
+macOS DMG 使用 dmgbuild 固定 Finder 窗口、Retina 背景和拖动位置，窗口只显示应用与 Applications 快捷方式；许可证与源码版本信息保存在应用的 Resources 内。打包后自动挂载检查布局、图标、快捷方式与应用签名，不依赖 Finder GUI。设计与实机预览见 [安装界面](assets/dmg/README.md)。
+
+Windows 构建将多尺寸 ICO 嵌入 GUI 程序的资源编号 `1`，与 GPUI 读取的编号一致。打包会检查成品 `.exe` 的每个图标尺寸及内容；缺失或过期会直接失败。应用图标的 Icon Composer 源文件与导出方式见 [图标设计](assets/icon-design/README.md)。
 
 ## 发布
 

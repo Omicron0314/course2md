@@ -1371,6 +1371,7 @@ version = "1.7.0"
 dependencies = [
  "anyhow",
  "course2md",
+ "embed-resource",
  "gpui",
  "gpui-base",
  "gpui-component",
