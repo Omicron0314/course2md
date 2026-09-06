@@ -1,42 +1,65 @@
 # course2md
 
-把 YouTube、Bilibili 或本地视频转换成带截图的 Markdown / HTML 笔记，用桌面应用完成转换、整理和阅读。
+把 **YouTube、Bilibili 或本地视频**转换成带截图的 Markdown / HTML 笔记。在桌面应用里添加视频、生成笔记，再用课程库整理和阅读。
 
-[English](readme.md) · **中文** · [文档 Wiki](https://github.com/mizorewww/course2md/wiki)
+[English](readme.md) · **中文** · [GitHub Wiki](https://github.com/mizorewww/course2md/wiki)
 
-## 安装桌面应用
+## 安装桌面应用（GUI）
 
-### macOS（Apple Silicon，macOS 15+）
+按你的系统选择下面的一种安装方式。**GUI 已自带转换引擎，无需另装 CLI。**
+
+### macOS：M 系列芯片，macOS 15 及以上
+
+**已安装 Homebrew：**在终端运行以下命令，它会安装应用及视频工具 `ffmpeg`、`yt-dlp`：
 
 ```sh
 brew install --cask mizorewww/tap/course2md-gui
 ```
 
-自动安装视频工具。也可[下载 DMG](https://github.com/mizorewww/course2md/releases/latest/download/course2md-gui-macos-arm64.dmg)，打开后拖入「应用程序」。
+装完后，从「访达 → 应用程序」打开 **course2md**。
 
-### Arch Linux / CachyOS（x86_64）
+**手动安装：**[下载 macOS 安装包（DMG）](https://github.com/mizorewww/course2md/releases/latest/download/course2md-gui-macos-arm64.dmg)，打开后将 **course2md.app** 拖入「应用程序」。这种方式只安装应用，视频工具需按 [macOS 安装指南](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8#macos-apple-silicon)另行安装。
+
+### Arch Linux / CachyOS：x86_64
+
+已安装 `yay` 的用户运行以下命令；它会安装桌面应用、视频工具和所需图形库：
 
 ```sh
 yay -S course2md-gui-bin
 ```
 
-安装后从应用菜单打开 **course2md**。也可用 `paru -S course2md-gui-bin`。
+使用 `paru` 时运行 `paru -S course2md-gui-bin`。装完后从应用菜单打开 **course2md**。显卡需有可用的 Vulkan 驱动，详见 [Linux 安装指南](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8#arch-linux--cachyos)。
 
-### Windows / 其他 Linux
+### Windows：x64
 
-| 系统 | 下载 | 启动 |
-| --- | --- | --- |
-| Windows x64 | [便携 ZIP](https://github.com/mizorewww/course2md/releases/latest/download/course2md-desktop-windows-AMD64.zip) | 完整解压，打开 `course2md-desktop.exe` |
-| Linux x64 | [tar.gz](https://github.com/mizorewww/course2md/releases/latest/download/course2md-desktop-linux-x86_64.tar.gz) | 完整解压，运行 `./course2md-desktop` |
+1. [下载 Windows 便携包（ZIP）](https://github.com/mizorewww/course2md/releases/latest/download/course2md-desktop-windows-AMD64.zip)，**完整解压**到固定文件夹。
+2. 在 PowerShell 中安装视频工具：
 
-手动下载的包需另装视频工具，见 [GUI 安装指南](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8)。请保留包内配套文件。
+   ```powershell
+   winget install --id Gyan.FFmpeg -e
+   winget install --id yt-dlp.yt-dlp -e
+   ```
 
-## 开始使用
+3. 打开解压目录中的 **course2md-desktop.exe**。旁边的 `course2md.exe` 是配套引擎，请保留在同一目录。如果应用已打开，安装工具后退出并重新打开。
 
-打开应用，按向导选择笔记目录和识别方式，然后添加视频链接或本地文件并生成笔记。GUI 已包含转换引擎，无需再安装 CLI。首次本地识别需要下载模型。
+### Ubuntu / 其他 Linux：x86_64
 
-[GUI 使用与升级](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8) · [独立 CLI 指南](https://github.com/mizorewww/course2md/wiki/CLI-%E6%8C%87%E5%8D%97) · [故障排查](https://github.com/mizorewww/course2md/wiki/%E6%95%85%E9%9A%9C%E6%8E%92%E6%9F%A5)
+[下载 Linux 桌面包（tar.gz）](https://github.com/mizorewww/course2md/releases/latest/download/course2md-desktop-linux-x86_64.tar.gz)，按 [Linux 安装指南](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8#其他-linux-x64)安装视频工具和图形运行库，再完整解压。进入解压目录，运行 `./course2md-desktop`，保留同目录的 `course2md` 引擎。
 
-## 帮助与贡献
+预编译包基于 Ubuntu 24.04。**Intel Mac 和 Linux ARM64 暂无预编译 GUI**，可使用 [CLI 版本](https://github.com/mizorewww/course2md/wiki/CLI-%E6%8C%87%E5%8D%97)。GitHub 的 **Source code** 压缩包是开发源码，不是应用安装包。
 
-问题和建议请提交 [Issue](https://github.com/mizorewww/course2md/issues)。开发与贡献见[开发指南](desktop/README.md)。[更新记录](CHANGELOG.md) · [MIT 许可证](LICENSE)
+## 第一次使用
+
+1. 打开 **course2md**，按向导选择笔记保存目录和语音识别方式。
+2. 在「设置 → 运行环境」确认工具可用。`ffmpeg`（包含 `ffprobe`）用于处理视频；`yt-dlp` 用于在线视频。
+3. 添加视频链接或本地文件，开始生成，完成后在课程库打开笔记。
+
+本地识别首次使用需要下载模型；选择 GPU / CPU 识别还需安装 `llama-server`；选择云端识别需要填写自己的 API 配置。应用提供设置入口，详细步骤见 [首次使用指南](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8#首次启动)。
+
+## 文档与帮助
+
+终端和脚本用户请看 [独立 CLI 安装与使用指南](https://github.com/mizorewww/course2md/wiki/CLI-%E6%8C%87%E5%8D%97)。CLI 的安装步骤、命令和参数都在该指南中。
+
+[全部文档（GitHub Wiki）](https://github.com/mizorewww/course2md/wiki) · [升级与卸载](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8#升级与卸载) · [故障排查](https://github.com/mizorewww/course2md/wiki/%E6%95%85%E9%9A%9C%E6%8E%92%E6%9F%A5) · [反馈问题](https://github.com/mizorewww/course2md/issues)
+
+[开发指南](desktop/README.md) · [更新记录](CHANGELOG.md) · [MIT 许可证](LICENSE)
