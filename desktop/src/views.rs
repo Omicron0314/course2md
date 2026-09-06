@@ -783,21 +783,34 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.setup_open && self.page == Page::Settings && self.settings_tab == 4 {
-            self.blur_fields(
-                &[
-                    Field::Output,
-                    Field::AsrUrl,
-                    Field::AsrModel,
-                    Field::AsrKey,
-                    Field::LlmUrl,
-                    Field::LlmModel,
-                    Field::LlmKey,
-                ],
-                window,
-                cx,
-            );
-        }
+        let hidden_fields: Vec<_> = self
+            .inputs
+            .keys()
+            .copied()
+            .filter(|field| {
+                let visible = match field {
+                    Field::Source => !self.setup_open && self.page == Page::New && self.online,
+                    Field::Search => !self.setup_open && self.page == Page::Library,
+                    Field::FolderName => !self.setup_open && self.folder_editor.is_some(),
+                    Field::Output => {
+                        self.setup_open || (self.page == Page::Settings && self.settings_tab == 0)
+                    }
+                    Field::AsrUrl | Field::AsrKey | Field::AsrModel => {
+                        (self.setup_open || (self.page == Page::Settings && self.settings_tab == 1))
+                            && self.settings_options.provider == 5
+                            && self.settings_options.source_mode != 1
+                    }
+                    Field::LlmUrl | Field::LlmKey | Field::LlmModel => {
+                        !self.setup_open
+                            && self.page == Page::Settings
+                            && self.settings_tab == 2
+                            && self.settings_options.llm
+                    }
+                };
+                !visible
+            })
+            .collect();
+        self.blur_fields(&hidden_fields, window, cx);
         // Compare drafts once per render; only actual changes restart the debounce.
         let draft = self.edited_settings(cx);
         if !self.setup_open && draft != self.settings_snapshot {
@@ -812,6 +825,43 @@ impl Render for Desktop {
             Page::Settings => self.settings_page(window, cx),
             Page::Result => self.result_page(cx),
         };
+        let content = v_flex()
+            .gap_4()
+            .when(self.reading, |v| {
+                v.child(div().text_color(rgb(MUTED)).child("正在打开笔记…"))
+            })
+            .when_some(
+                self.library_error
+                    .as_ref()
+                    .filter(|_| matches!(self.page, Page::Library | Page::New)),
+                |v, _| {
+                    v.child(
+                        v_flex()
+                            .gap_2()
+                            .p_4()
+                            .bg(rgb(0xfff0db))
+                            .rounded_md()
+                            .child("文件夹信息无法读取，课程笔记仍可打开。")
+                            .child(
+                                h_flex()
+                                    .gap_3()
+                                    .child(
+                                        Button::new("library-repair-location")
+                                            .label("打开保存位置")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                cx.reveal_path(&this.library_root)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("library-retry").label("重新读取").on_click(
+                                            cx.listener(|this, _, _, cx| this.refresh_library(cx)),
+                                        ),
+                                    ),
+                            ),
+                    )
+                },
+            )
+            .child(content);
         let settings_problem = self.config_error
             || self.settings_status.starts_with("未保存：")
             || self.settings_status.starts_with("保存失败");

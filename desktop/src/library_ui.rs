@@ -35,13 +35,28 @@ impl Desktop {
         self.preview_generation += 1;
         self.source_preview = None;
         self.preview_error = None;
+        self.source_validation = None;
     }
     pub fn inspect_source(&mut self, cx: &mut Context<Self>) {
         self.invalidate_source();
         let input = self.value(Field::Source, cx);
         self.last_source_input = input.clone();
         if input.is_empty() {
-            self.preview_error = Some("请先粘贴视频链接或选择视频".into());
+            self.source_validation = Some(
+                if self.online {
+                    "请粘贴视频链接"
+                } else {
+                    "请选择视频文件"
+                }
+                .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.online
+            && let Err(error) = source::validate_url(&input)
+        {
+            self.source_validation = Some(error.to_string());
             cx.notify();
             return;
         }
@@ -76,6 +91,9 @@ impl Desktop {
         cx.notify();
     }
     fn folder_name(&self, id: Option<u64>) -> String {
+        if self.library_error.is_some() {
+            return "归属暂不可用".into();
+        }
         id.and_then(|id| self.library.folders.get(&id))
             .cloned()
             .unwrap_or_else(|| "未分类".into())
@@ -86,6 +104,7 @@ impl Desktop {
             .cloned()
             .unwrap_or_default();
         self.folder_editor = Some(id);
+        self.folder_error = None;
         self.delete_folder = None;
         self.inputs[&Field::FolderName].update(cx, |state, cx| {
             state.set_value(name, window, cx);
@@ -106,7 +125,7 @@ impl Desktop {
             Ok(library) => {
                 self.library = library;
                 self.folder_editor = None;
-                self.message = None;
+                self.folder_error = None;
                 if self.page == Page::New {
                     self.target_folder = saved;
                 } else {
@@ -114,7 +133,7 @@ impl Desktop {
                     self.page = Page::Library;
                 }
             }
-            Err(e) => self.message = Some(format!("无法保存文件夹：{e:#}")),
+            Err(e) => self.folder_error = Some(format!("{e:#}")),
         }
         cx.notify();
     }
@@ -132,21 +151,44 @@ impl Desktop {
                 } else {
                     "新建文件夹"
                 })
-                .child(Input::new(&self.inputs[&Field::FolderName]).aria_label("文件夹名称"))
+                .child(
+                    Input::new(&self.inputs[&Field::FolderName])
+                        .aria_label("文件夹名称")
+                        .min_h(px(36.))
+                        .max_h(px(36.))
+                        .when(self.folder_error.is_some(), |v| {
+                            v.border_color(rgb(0xa32626))
+                        }),
+                )
+                .when_some(self.folder_error.clone(), |v, error| {
+                    v.child(div().text_sm().text_color(rgb(0xa32626)).child(error))
+                })
                 .child(
                     h_flex()
                         .gap_2()
                         .justify_end()
-                        .child(Button::new("cancel-folder").ghost().label("取消").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.folder_editor = None;
-                                cx.notify();
-                            }),
-                        ))
+                        .child(
+                            Button::new("cancel-folder")
+                                .h(px(36.))
+                                .min_h(px(36.))
+                                .ghost()
+                                .label("取消")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.folder_editor = None;
+                                    this.folder_error = None;
+                                    cx.notify();
+                                })),
+                        )
                         .child(
                             Button::new("save-folder")
+                                .h(px(36.))
+                                .min_h(px(36.))
                                 .primary()
-                                .label("保存文件夹")
+                                .label(if id.is_some() {
+                                    "保存名称"
+                                } else {
+                                    "创建文件夹"
+                                })
                                 .on_click(cx.listener(|this, _, _, cx| this.save_folder(cx))),
                         ),
                 );
@@ -204,6 +246,14 @@ impl Desktop {
         view
     }
     pub fn folder_sidebar(&self, cx: &mut Context<Self>) -> Div {
+        if self.library_error.is_some() {
+            return v_flex().px_2().child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child("文件夹暂不可用"),
+            );
+        }
         let mut entries = vec![(Some(0), "未分类".to_owned())];
         entries.extend(
             self.library
@@ -294,6 +344,7 @@ impl Desktop {
         let folders = self.library.folders.clone();
         let entity = cx.entity().downgrade();
         Button::new(("folder-picker", index))
+            .disabled(self.library_error.is_some())
             .icon(IconName::Folder)
             .label(label)
             .dropdown_menu(move |menu, _, _| {
@@ -358,7 +409,11 @@ impl Desktop {
                                 div().flex_1().min_w_0().child(
                                     Input::new(&self.inputs[&Field::Source])
                                         .aria_label("视频链接")
-                                        .h(px(36.)),
+                                        .min_h(px(36.))
+                                        .max_h(px(36.))
+                                        .when(self.source_validation.is_some(), |v| {
+                                            v.border_color(rgb(0xa32626))
+                                        }),
                                 ),
                             )
                             .child(
@@ -423,6 +478,14 @@ impl Desktop {
                                 .child(self.value(Field::Source, cx)),
                         )
                     }),
+            );
+        }
+        if let Some(error) = &self.source_validation {
+            view = view.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xa32626))
+                    .child(error.clone()),
             );
         }
         if self.preview_cancel.is_some() {
@@ -520,6 +583,7 @@ impl Desktop {
                         .child(self.folder_picker(None, 0, cx))
                         .child(
                             Button::new("add-destination")
+                                .disabled(self.library_error.is_some())
                                 .ghost()
                                 .icon(IconName::Plus)
                                 .label("新建")

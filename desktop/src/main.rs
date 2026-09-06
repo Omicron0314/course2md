@@ -126,11 +126,14 @@ struct Desktop {
     preview_generation: u64,
     preview_workers: usize,
     preview_error: Option<String>,
+    source_validation: Option<String>,
     library: organize::Library,
     library_root: PathBuf,
+    library_error: Option<String>,
     folder_filter: Option<u64>, // None = all; 0 = unfiled
     target_folder: Option<u64>,
     folder_editor: Option<Option<u64>>,
+    folder_error: Option<String>,
     delete_folder: Option<u64>,
     task_destination: Option<(PathBuf, Option<u64>, source::Source)>,
     page: Page,
@@ -169,6 +172,8 @@ struct Desktop {
     courses: Vec<Course>,
     loading: bool,
     preview: Option<backend::Preview>,
+    read_generation: u64,
+    reading: bool,
     message: Option<String>,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
@@ -304,6 +309,10 @@ impl Desktop {
         subscriptions.push(cx.subscribe(
             &inputs[&Field::FolderName],
             |this: &mut Self, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.folder_error = None;
+                    cx.notify();
+                }
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.save_folder(cx);
                 }
@@ -340,11 +349,14 @@ impl Desktop {
             preview_generation: 0,
             preview_workers: 0,
             preview_error: None,
+            source_validation: None,
             library: Default::default(),
             library_root: output,
+            library_error: None,
             folder_filter: None,
             target_folder: None,
             folder_editor: None,
+            folder_error: None,
             delete_folder: None,
             task_destination: None,
             result_origin: Page::Library,
@@ -382,6 +394,8 @@ impl Desktop {
             courses: vec![],
             loading: false,
             preview: None,
+            read_generation: 0,
+            reading: false,
             message,
             _subscriptions: subscriptions,
             _poll: poll,
@@ -418,6 +432,8 @@ impl Desktop {
         .detach();
     }
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.read_generation = self.read_generation.wrapping_add(1);
+        self.reading = false;
         if page == Page::New && self.page == Page::Library {
             self.target_folder = self.folder_filter.filter(|id| *id != 0);
         }
@@ -760,6 +776,7 @@ impl Desktop {
         if self.library_root != root {
             self.library_root = root.clone();
             self.library = Default::default();
+            self.library_error = None;
             self.courses.clear();
             self.folder_filter = None;
             self.target_folder = None;
@@ -774,7 +791,7 @@ impl Desktop {
         let task = cx.background_executor().spawn(async move {
             Ok::<_, anyhow::Error>((
                 backend::library(&task_root)?,
-                organize::Library::load(&task_root)?,
+                organize::Library::load(&task_root),
             ))
         });
         cx.spawn(async move |this, cx| {
@@ -793,7 +810,20 @@ impl Desktop {
                         }
                         this.library_root = root;
                         this.courses = courses;
-                        this.library = library;
+                        match library {
+                            Ok(library) => {
+                                this.library = library;
+                                this.library_error = None;
+                            }
+                            Err(error) => {
+                                this.library = Default::default();
+                                this.library_error = Some(error.to_string());
+                                this.folder_filter = None;
+                                this.target_folder = None;
+                                this.folder_editor = None;
+                                this.delete_folder = None;
+                            }
+                        }
                     }
                     Err(error) => this.message = Some(format!("{error:#}")),
                 }
@@ -803,15 +833,22 @@ impl Desktop {
         .detach();
     }
     fn open_course(&mut self, course: Course, cx: &mut Context<Self>) {
-        self.loading = true;
-        self.result_origin = self.page;
+        cx.notify();
+        self.reading = true;
+        self.read_generation = self.read_generation.wrapping_add(1);
+        let generation = self.read_generation;
+        let origin = self.page;
+        self.result_origin = origin;
         let task = cx
             .background_executor()
             .spawn(async move { backend::read_preview(course) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.loading = false;
+                if this.read_generation != generation || this.page != origin {
+                    return;
+                }
+                this.reading = false;
                 match result {
                     Ok(preview) => {
                         this.result_tab = if preview.has_markdown { 0 } else { 2 };

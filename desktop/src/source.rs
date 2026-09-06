@@ -99,6 +99,16 @@ fn command(name: &str, args: &[&str], cancel: &AtomicBool) -> Result<Vec<u8>> {
     read(stdout)
 }
 
+pub fn validate_url(input: &str) -> Result<url::Url> {
+    let url =
+        url::Url::parse(input).context("请输入完整的视频链接，以 https:// 或 http:// 开头")?;
+    ensure!(
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+        "请输入完整的视频链接，以 https:// 或 http:// 开头"
+    );
+    Ok(url)
+}
+
 pub fn inspect(input: String, online: bool, cancel: Arc<AtomicBool>) -> Result<Source> {
     let cache = course2md::config::cache_dir().join("covers");
     std::fs::create_dir_all(&cache)?;
@@ -111,12 +121,7 @@ pub fn inspect(input: String, online: bool, cancel: Arc<AtomicBool>) -> Result<S
         cover_error: None,
     };
     if online {
-        let url = url::Url::parse(&input)
-            .context("请输入完整的视频链接，例如 https://www.youtube.com/watch?v=…")?;
-        ensure!(
-            matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
-            "请输入 http 或 https 视频链接"
-        );
+        let url = validate_url(&input)?;
         #[derive(Deserialize)]
         struct Meta {
             title: String,
