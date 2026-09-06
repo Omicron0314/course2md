@@ -492,6 +492,9 @@ impl Desktop {
                     }),
             );
         }
+        if self.online && course2md::auth::is_bilibili_url(&self.value(Field::Source, cx)) {
+            view = view.child(self.source_account_row(cx));
+        }
         if let Some(error) = &self.source_validation {
             view = view.child(
                 div()

@@ -477,6 +477,7 @@ impl Desktop {
                 "AI 整理",
                 "运行环境",
                 "关于",
+                "连接账号",
             ]
         } else {
             vec!["文稿", "截图", "文件"]
@@ -533,6 +534,9 @@ impl Desktop {
                         );
                         if this.page == Page::Settings {
                             this.settings_tab = index;
+                            if index == 5 {
+                                this.refresh_account(cx);
+                            }
                         } else {
                             this.result_tab = index;
                         }

@@ -75,6 +75,9 @@ impl Desktop {
             })
     }
     pub fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.settings_tab == 5 {
+            return self.account_settings_page(cx);
+        }
         if self.settings_tab == 4 {
             return self.about_page(cx);
         }

@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod about;
+mod account_ui;
 mod activity;
 mod backend;
 mod course_library;
@@ -119,6 +120,7 @@ impl ConversionOptions {
 }
 
 struct Desktop {
+    account: account_ui::AccountUi,
     collapsed_folders: std::collections::BTreeSet<u64>,
     online: bool,
     last_source_input: String,
@@ -354,6 +356,7 @@ impl Desktop {
             preview_error: None,
             source_validation: None,
             show_preview_details: false,
+            account: account_ui::AccountUi::default(),
             collapsed_folders: Default::default(),
             library: Default::default(),
             library_root: output,
@@ -407,6 +410,7 @@ impl Desktop {
         };
         this.settings_snapshot = this.edited_settings(cx);
         cx.set_reduce_motion(this.desktop_settings.reduce_motion);
+        this.refresh_account(cx);
         this.refresh_environment(cx);
         this.refresh_library(cx);
         this
