@@ -113,7 +113,11 @@ impl Desktop {
                         .ghost()
                         .w_full()
                         .justify_start()
-                        .accessibility_label(format!("{name}，{} 门课程", entries.len()))
+                        .accessibility_label(format!(
+                            "{} {name}，{} 门课程",
+                            if collapsed { "展开" } else { "收起" },
+                            entries.len()
+                        ))
                         .child(
                             h_flex()
                                 .w_full()

@@ -504,6 +504,8 @@ impl Desktop {
             .children(tabs.into_iter().map(|(index, label)| {
                 control(("tab", index))
                     .ghost()
+                    .selected(selected == index)
+                    .toggled(selected == index)
                     .label(label)
                     .w(px(84.))
                     .text_color(rgb(if selected == index { BLUE } else { MUTED }))
