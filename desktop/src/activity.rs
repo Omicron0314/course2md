@@ -113,6 +113,21 @@ pub fn failure_message(message: &str) -> &'static str {
     }
 }
 
+pub fn stage_order(stage: &str) -> usize {
+    match stage {
+        "fetch" => 0,
+        "download" => 1,
+        "audio" => 2,
+        s if s.starts_with("model/") => 3,
+        "model-load" => 4,
+        "scenes" => 5,
+        "transcribe" => 6,
+        "llm" => 7,
+        "render" => 8,
+        _ => 9,
+    }
+}
+
 pub fn title(stage: &str) -> String {
     if let Some(file) = stage.strip_prefix("model/") {
         return if file == "apple" {

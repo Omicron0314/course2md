@@ -38,6 +38,7 @@ impl Desktop {
         self.source_validation = None;
     }
     pub fn inspect_source(&mut self, cx: &mut Context<Self>) {
+        self.completed_source = None;
         self.invalidate_source();
         let input = self.value(Field::Source, cx);
         self.last_source_input = input.clone();

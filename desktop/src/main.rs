@@ -135,7 +135,7 @@ struct Desktop {
     folder_editor: Option<Option<u64>>,
     folder_error: Option<String>,
     delete_folder: Option<u64>,
-    task_destination: Option<(PathBuf, Option<u64>, source::Source)>,
+    task_destination: Option<(PathBuf, Option<u64>, source::Source, u64)>,
     page: Page,
     result_origin: Page,
     result_tab: usize,
@@ -388,7 +388,7 @@ impl Desktop {
             cancelling: false,
             closing: false,
             task_error: None,
-            task_status: "尚无运行中的任务".into(),
+            task_status: String::new(),
             progress: BTreeMap::new(),
             logs: VecDeque::new(),
             pending_done: None,
@@ -592,6 +592,11 @@ impl Desktop {
                     self.message = Some("请选择笔记保存目录。".into());
                     return;
                 }
+                if self.task_options.llm && course2md::llm::validate(&self.config.llm).is_err() {
+                    self.show_options = true;
+                    self.message = Some("请先配置 AI 服务，或关闭本次 AI 整理。".into());
+                    return;
+                }
                 let formats = ["md", "html", "json"]
                     .into_iter()
                     .zip(self.task_options.formats)
@@ -644,10 +649,14 @@ impl Desktop {
         match Job::start(args) {
             Ok(job) => {
                 if kind == Kind::Convert {
-                    self.task_destination = self
-                        .source_preview
-                        .clone()
-                        .map(|source| (self.output(cx), self.target_folder, source));
+                    self.task_destination = self.source_preview.clone().map(|source| {
+                        (
+                            self.output(cx),
+                            self.target_folder,
+                            source,
+                            self.preview_generation,
+                        )
+                    });
                 }
                 self.job = Some(job);
                 self.kind = kind;
@@ -736,10 +745,12 @@ impl Desktop {
                     {
                         self.task_status = "已完成".into();
                         self.completed = self.pending_done.take();
-                        if let (Some(done), Some((root, folder, source))) =
+                        if let (Some(done), Some((root, folder, source, generation))) =
                             (&self.completed, self.task_destination.take())
                         {
-                            self.completed_source = Some(source.input.clone());
+                            if self.preview_generation == generation {
+                                self.completed_source = Some(source.input.clone());
+                            }
                             if let Err(e) = source::save_cover(&source, &done.out_dir) {
                                 self.message = Some(format!("笔记已完成，但封面保存失败：{e:#}"));
                             }

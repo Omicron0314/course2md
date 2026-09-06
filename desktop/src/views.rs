@@ -109,6 +109,24 @@ impl Desktop {
                                 }),
                             ),
                         ))
+                        .when(
+                            self.task_options.llm
+                                && course2md::llm::validate(&self.config.llm).is_err(),
+                            |v| {
+                                v.child(
+                                    Button::new("configure-task-ai")
+                                        .self_start()
+                                        .h(px(32.))
+                                        .min_h(px(32.))
+                                        .label("配置 AI 服务")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.settings_options.llm = true;
+                                            this.settings_tab = 2;
+                                            this.navigate(Page::Settings, cx);
+                                        })),
+                                )
+                            },
+                        )
                         .child(crate::settings_ui::preference(
                             "继续上次未完成的转换",
                             "",
@@ -178,7 +196,12 @@ impl Desktop {
         }
     }
     fn task_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if self.progress.is_empty() && self.job.is_none() && self.logs.is_empty() {
+        if self.progress.is_empty()
+            && self.job.is_none()
+            && self.logs.is_empty()
+            && self.task_status.is_empty()
+            && self.task_error.is_none()
+        {
             return self.empty_state("暂无任务", "", cx);
         }
         let active = self.active_work();
@@ -199,16 +222,20 @@ impl Desktop {
                     .child(self.task_status.clone()),
             );
         }
-        if self.job.is_some() {
+        if self.job.is_some() && (active.len() != 1 || self.cancelling) {
             content = content.child(div().font_weight(FontWeight::MEDIUM).child(
-                if active.len() > 1 {
+                if self.cancelling {
+                    "正在取消…".into()
+                } else if active.len() > 1 {
                     format!("{} 项并行处理中", active.len())
                 } else {
                     self.task_summary()
                 },
             ));
         }
-        for (index, (id, item)) in self.progress.iter().enumerate() {
+        let mut stages: Vec<_> = self.progress.iter().collect();
+        stages.sort_by_key(|(id, _)| activity::stage_order(id));
+        for (index, (id, item)) in stages.into_iter().enumerate() {
             let running = active_ids.contains(&id.as_str());
             let waiting = self.job.is_some() && !item.done && !running;
             content = content.child(
@@ -268,6 +295,9 @@ impl Desktop {
                             })),
                     ),
             );
+        }
+        if self.logs.is_empty() {
+            return content.into_any_element();
         }
         content =
             content.child(
@@ -766,7 +796,8 @@ impl Desktop {
             );
         } else if self.page == Page::Task
             && self.completed.is_none()
-            && (self.task_error.is_some() || (self.kind == Kind::Convert && !self.logs.is_empty()))
+            && (self.task_error.is_some()
+                || (self.kind == Kind::Convert && !self.task_status.is_empty()))
         {
             row = row.child(
                 Button::new("retry")
@@ -1087,7 +1118,7 @@ impl Render for Desktop {
                     .child(sidebar)
                     .child(body),
             )
-            .when(self.job.is_some(), |v| {
+            .when(self.job.is_some() && self.page != Page::Task, |v| {
                 v.child(
                     h_flex()
                         .h(px(36.))
