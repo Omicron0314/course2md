@@ -42,6 +42,8 @@ course2md ./lecture.mp4
 
 ## Bilibili Login and Video Quality
 
+In the desktop app, open Settings → Connected accounts to scan a login QR code. Pasting a Bilibili link also shows an account entry. Public courses can be added without signing in.
+
 ```bash
 course2md --login bilibili  # Scan and confirm with the Bilibili mobile app
 course2md https://www.bilibili.com/video/BV1pb8o6yE8f --max-height 1080
@@ -56,7 +58,7 @@ Login may reduce Bilibili HTTP 412 rejections, but cannot guarantee their remova
 
 ## Desktop App (GUI)
 
-The native desktop app in [`desktop/`](desktop/README.md) uses GPUI and GPUI Component. It includes a focused conversion form, progress and cancellation, a searchable library, document / screenshot / file views, and shared CLI settings. The Tauri client has been replaced.
+The native desktop app in [`desktop/`](desktop/README.md) uses GPUI and GPUI Component. It includes a focused conversion form, progress and cancellation, a searchable library with logical folders, list/card views and folder grouping, document / screenshot / file views, and shared CLI settings. The Tauri client has been replaced.
 
 Download from [GitHub Releases](https://github.com/mizorewww/course2md/releases): macOS DMG, Windows portable ZIP, or Linux tar.gz. The packages include the matching CLI; install ffmpeg/ffprobe separately, plus yt-dlp for online videos. macOS release builds use Developer ID signing and notarization when the repository credentials are available.
 

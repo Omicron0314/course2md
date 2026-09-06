@@ -42,6 +42,8 @@ course2md ./lecture.mp4
 
 ## Bilibili 登录与清晰度
 
+桌面端可在「设置 → 连接账号」扫码登录；粘贴 Bilibili 链接后也会显示账号入口。公开课程无需先登录。
+
 ```bash
 course2md --login bilibili  # 用哔哩哔哩 App 扫码并确认
 course2md https://www.bilibili.com/video/BV1pb8o6yE8f --max-height 1080
@@ -56,7 +58,7 @@ Bilibili HTTP 412 是平台请求限制，登录可能缓解但不能保证消�
 
 ## 桌面客户端（GUI）
 
-原生客户端位于 [`desktop/`](desktop/README.md)，基于 GPUI 与 GPUI Component，已替代 Tauri。包含简洁的新建流程、进度与取消、课程搜索、文稿 / 截图 / 文件视图，以及与 CLI 共享的配置。
+原生客户端位于 [`desktop/`](desktop/README.md)，基于 GPUI 与 GPUI Component，已替代 Tauri。包含简洁的新建流程、进度与取消、课程搜索、逻辑文件夹、列表 / 卡片与文件夹分组、文稿 / 截图 / 文件视图，以及与 CLI 共享的配置。
 
 从 [GitHub Releases](https://github.com/mizorewww/course2md/releases) 下载 macOS DMG、Windows 便携 ZIP 或 Linux tar.gz。包内包含匹配的 CLI；需要另行安装 ffmpeg/ffprobe，在线视频还需要 yt-dlp。macOS 发布流程在仓库签名凭据可用时执行 Developer ID 签名与公证。
 
