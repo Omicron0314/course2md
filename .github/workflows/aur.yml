@@ -35,6 +35,9 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Test release resolution
+        run: python3 -m unittest discover -s packaging -p 'test_*.py'
+
       - name: Resolve published release
         id: release
         env:

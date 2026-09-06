@@ -8,7 +8,7 @@ cask "course2md-gui" do
   homepage "https://github.com/mizorewww/course2md"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :sequoia"
+  depends_on macos: :sequoia
   depends_on formula: "ffmpeg"
   depends_on formula: "yt-dlp"
 
