@@ -13,6 +13,7 @@ pub(crate) struct AccountUi {
     modules: Option<Arc<Vec<Vec<bool>>>>,
     status: Option<AccountStatus>,
     checking: bool,
+    has_saved_login: bool,
     status_error: Option<String>,
     retry_source: Option<(u64, String)>,
 }
@@ -51,6 +52,7 @@ impl Desktop {
     pub fn refresh_account(&mut self, cx: &mut Context<Self>) {
         self.account.status_generation = self.account.status_generation.wrapping_add(1);
         let generation = self.account.status_generation;
+        self.account.has_saved_login = course2md::auth::cookie_path().is_file();
         self.account.checking = true;
         self.account.status_error = None;
         let task = cx
@@ -88,20 +90,11 @@ impl Desktop {
             }
         };
         let connected = matches!(self.account.status, Some(AccountStatus::Connected(_)));
-        let saved = matches!(
-            self.account.status,
-            Some(AccountStatus::Connected(_) | AccountStatus::Expired)
-        );
+        let saved = self.account.has_saved_login;
         v_flex()
             .w_full()
             .max_w(px(760.))
             .gap_4()
-            .child(
-                div()
-                    .text_size(px(18.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("连接账号"),
-            )
             .child(
                 v_flex()
                     .w_full()
@@ -115,18 +108,6 @@ impl Desktop {
                         h_flex()
                             .items_center()
                             .gap_3()
-                            .child(
-                                Icon::new(if connected {
-                                    IconName::CircleCheck
-                                } else {
-                                    IconName::Info
-                                })
-                                .text_color(rgb(if connected {
-                                    SUCCESS
-                                } else {
-                                    MUTED
-                                })),
-                            )
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -254,6 +235,7 @@ impl Desktop {
         self.account.checking = false;
         match course2md::auth::clear_bilibili_login() {
             Ok(()) => {
+                self.account.has_saved_login = false;
                 self.account.status = Some(AccountStatus::Disconnected);
                 self.account.status_error = None;
             }
@@ -362,6 +344,7 @@ impl Desktop {
                                 Ok(profile) => {
                                     this.account.status_generation = this.account.status_generation.wrapping_add(1);
                                     this.account.checking = false;
+                                    this.account.has_saved_login = true;
                                     this.account.status = Some(AccountStatus::Connected(profile.clone()));
                                     this.account.status_error = None;
                                     (QrDialogState::Success(profile), false)
@@ -479,12 +462,6 @@ impl Desktop {
             .child(visual)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(message))
             .child(div().text_sm().text_color(rgb(MUTED)).child(hint))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child("请仅在本人手机上确认。关闭窗口会取消本次等待。"),
-            )
             .child(
                 h_flex()
                     .w_full()

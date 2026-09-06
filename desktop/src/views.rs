@@ -1,7 +1,9 @@
 //! Native pages: stable navigation and actions surround independently scrolling content.
 use super::*;
 use crate::theme::*;
-use gpui_component::{button::*, progress::Progress, switch::Switch, text::TextView};
+use gpui_component::{
+    button::*, checkbox::Checkbox, progress::Progress, switch::Switch, text::TextView,
+};
 
 fn muted(text: impl Into<SharedString>) -> Div {
     div().text_sm().text_color(rgb(MUTED)).child(text.into())
@@ -32,27 +34,18 @@ fn card() -> Div {
 
 impl Desktop {
     pub fn format_choices(&self, cx: &mut Context<Self>) -> Div {
-        h_flex().gap_3().flex_wrap().children(
+        h_flex().gap_4().flex_wrap().children(
             ["Markdown", "HTML", "JSON"]
                 .into_iter()
                 .enumerate()
                 .map(|(index, label)| {
-                    let checked = self.editing_options().formats[index];
-                    choice(control(("format", index)), checked)
+                    Checkbox::new(("format", index))
+                        .label(label)
+                        .checked(self.editing_options().formats[index])
+                        .h(px(36.))
                         .min_w(px(108.))
-                        .accessibility_label(label)
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(Icon::new(IconName::Check).size_4().opacity(if checked {
-                                    1.
-                                } else {
-                                    0.
-                                }))
-                                .child(label),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.editing_options_mut().formats[index] = !checked;
+                        .on_click(cx.listener(move |this, value, _, cx| {
+                            this.editing_options_mut().formats[index] = *value;
                             cx.notify();
                         }))
                 }),
