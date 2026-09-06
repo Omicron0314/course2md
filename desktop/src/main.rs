@@ -565,6 +565,10 @@ impl Desktop {
                     .to_string(),
             ],
             Kind::Convert => {
+                if !self.task_options.formats.iter().any(|selected| *selected) {
+                    self.show_options = true;
+                    return;
+                }
                 if self
                     .source_preview
                     .as_ref()

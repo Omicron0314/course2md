@@ -34,7 +34,7 @@ fn card() -> Div {
 
 impl Desktop {
     pub fn format_choices(&self, cx: &mut Context<Self>) -> Div {
-        h_flex().gap_4().flex_wrap().children(
+        let choices = h_flex().gap_4().flex_wrap().children(
             ["Markdown", "HTML", "JSON"]
                 .into_iter()
                 .enumerate()
@@ -49,6 +49,20 @@ impl Desktop {
                             cx.notify();
                         }))
                 }),
+        );
+        v_flex().gap_1().child(choices).child(
+            div()
+                .min_h(px(20.))
+                .text_sm()
+                .text_color(rgb(0xa32626))
+                .when(
+                    !self
+                        .editing_options()
+                        .formats
+                        .iter()
+                        .any(|selected| *selected),
+                    |hint| hint.child("请至少选择一种导出格式"),
+                ),
         )
     }
     fn new_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -909,6 +923,11 @@ impl Render for Desktop {
                 self.page == Page::Settings
                     && self.settings_tab != 4
                     && self.invalid_setting(cx).is_none()
+                    && self
+                        .settings_options
+                        .formats
+                        .iter()
+                        .any(|selected| *selected)
                     && (self.settings_status.starts_with("未保存：")
                         || self.settings_status.starts_with("保存失败")
                         || self.config_error),
