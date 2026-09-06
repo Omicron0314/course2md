@@ -82,6 +82,15 @@ fn configure_with_path(
     Ok(Some(file))
 }
 
+/// Remove the saved session without CLI output.
+pub fn clear_bilibili_login() -> Result<()> {
+    match std::fs::remove_file(cookie_path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => bail!("清除 Bilibili 登录状态失败"),
+    }
+}
+
 pub fn logout_bilibili() -> Result<()> {
     match std::fs::remove_file(cookie_path()) {
         Ok(()) => println!("已清除 Bilibili 本地登录状态。"),
@@ -188,7 +197,11 @@ fn trusted_ticket_url(raw: &str) -> Result<url::Url> {
     Ok(url)
 }
 
-fn finish_login(agent: &ureq::Agent, login: &Value, cookies: &mut Cookies) -> Result<()> {
+fn finish_login(
+    agent: &ureq::Agent,
+    login: &Value,
+    cookies: &mut Cookies,
+) -> Result<AccountProfile> {
     finish_with(login, cookies, |url, cookies| request(agent, url, cookies))
 }
 
@@ -196,7 +209,7 @@ fn finish_with(
     login: &Value,
     cookies: &mut Cookies,
     mut fetch: impl FnMut(&str, &Cookies) -> Result<ureq::Response>,
-) -> Result<()> {
+) -> Result<AccountProfile> {
     if let Some(raw) = login["url"].as_str().filter(|s| !s.is_empty()) {
         // Older responses embed cookies in the callback query; newer responses
         // provide a crossDomain ticket whose response sets the real cookies.
@@ -239,7 +252,12 @@ fn finish_with(
         profile["isLogin"].as_bool() == Some(true),
         "Bilibili 未确认登录，请重新扫码"
     );
-    Ok(())
+    Ok(AccountProfile {
+        name: profile["uname"]
+            .as_str()
+            .unwrap_or("Bilibili 用户")
+            .to_owned(),
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -259,54 +277,193 @@ fn qr_state(value: &Value) -> Result<QrState> {
     }
 }
 
-pub fn login_bilibili() -> Result<()> {
-    let agent = ureq::AgentBuilder::new()
+/// Verified public account information. Credentials are never exposed or Debug-printed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountProfile {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountStatus {
+    Disconnected,
+    Connected(AccountProfile),
+    Expired,
+}
+
+fn login_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(12))
         .redirects(0)
         .user_agent(USER_AGENT)
-        .build();
+        .build()
+}
+
+/// Check saved credentials against Bilibili. A network failure is an error, not logout.
+pub fn bilibili_account_status() -> Result<AccountStatus> {
+    let text = match std::fs::read_to_string(cookie_path()) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AccountStatus::Disconnected);
+        }
+        Err(_) => bail!("无法读取本地登录状态，请重新登录"),
+    };
     let mut cookies = Cookies::new();
-    let response = request(&agent, &format!("{PASSPORT}/generate"), &cookies)?;
-    read_cookies(&response, &mut cookies);
-    let qr = data(response)?;
-    let key = qr["qrcode_key"].as_str().context("二维码响应缺少 key")?;
-    let link = qr["url"].as_str().context("二维码响应缺少 url")?;
-    let code = qrcode::QrCode::new(link.as_bytes()).context("生成二维码失败")?;
+    for line in text.lines().filter(|line| !line.starts_with('#')) {
+        let columns: Vec<_> = line.split('\t').collect();
+        if columns.len() == 7 && columns[0] == ".bilibili.com" {
+            insert_cookie(&mut cookies, columns[5], columns[6]);
+        }
+    }
+    if !complete(&cookies) {
+        return Ok(AccountStatus::Expired);
+    }
+    let response = request(
+        &login_agent(),
+        "https://api.bilibili.com/x/web-interface/nav",
+        &cookies,
+    )?;
+    let value: Value = response
+        .into_json()
+        .map_err(|_| anyhow::anyhow!("无法解析账号状态"))?;
+    if value["code"].as_i64() == Some(-101) {
+        return Ok(AccountStatus::Expired);
+    }
+    ensure!(
+        value["code"].as_i64() == Some(0),
+        "无法验证账号状态，请稍后重试"
+    );
+    let profile = &value["data"];
+    match profile["isLogin"].as_bool() {
+        Some(true) => {}
+        Some(false) => return Ok(AccountStatus::Expired),
+        None => bail!("账号状态响应不完整，请稍后重试"),
+    }
+    Ok(AccountStatus::Connected(AccountProfile {
+        name: profile["uname"]
+            .as_str()
+            .unwrap_or("Bilibili 用户")
+            .to_owned(),
+    }))
+}
+
+/// A successful poll returns credentials in memory. The caller explicitly commits
+/// only after checking that its GUI session is still current.
+pub struct VerifiedLogin {
+    cookies: Cookies,
+    pub profile: AccountProfile,
+}
+impl VerifiedLogin {
+    pub fn save(self) -> Result<AccountProfile> {
+        save_cookies(&cookie_path(), &self.cookies)?;
+        Ok(self.profile)
+    }
+}
+
+pub enum QrPoll {
+    Waiting,
+    AwaitingConfirmation,
+    Expired,
+    Authenticated(VerifiedLogin),
+}
+
+/// Blocking, reusable session API. Run generation and polling off the UI thread.
+/// Intentionally does not implement Debug: it owns one-use login tickets.
+pub struct QrSession {
+    agent: ureq::Agent,
+    cookies: Cookies,
+    poll_url: url::Url,
+    code: qrcode::QrCode,
+    started: Instant,
+}
+impl QrSession {
+    pub fn generate() -> Result<Self> {
+        let agent = login_agent();
+        let mut cookies = Cookies::new();
+        let response = request(&agent, &format!("{PASSPORT}/generate"), &cookies)?;
+        read_cookies(&response, &mut cookies);
+        let qr = data(response)?;
+        let key = qr["qrcode_key"].as_str().context("二维码响应缺少 key")?;
+        let link = qr["url"].as_str().context("二维码响应缺少 url")?;
+        let code = qrcode::QrCode::new(link.as_bytes()).context("生成二维码失败")?;
+        let mut poll_url = url::Url::parse(&format!("{PASSPORT}/poll"))?;
+        poll_url.query_pairs_mut().append_pair("qrcode_key", key);
+        Ok(Self {
+            agent,
+            cookies,
+            poll_url,
+            code,
+            started: Instant::now(),
+        })
+    }
+
+    /// Renderable QR modules only; callers must add a four-module white quiet zone.
+    pub fn modules(&self) -> Vec<Vec<bool>> {
+        (0..self.code.width())
+            .map(|y| {
+                (0..self.code.width())
+                    .map(|x| self.code[(x, y)] == qrcode::Color::Dark)
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub fn remaining(&self) -> Duration {
+        Duration::from_secs(180).saturating_sub(self.started.elapsed())
+    }
+
+    pub fn poll(&mut self) -> Result<QrPoll> {
+        if self.remaining().is_zero() {
+            return Ok(QrPoll::Expired);
+        }
+        let response = request(&self.agent, self.poll_url.as_str(), &self.cookies)?;
+        read_cookies(&response, &mut self.cookies);
+        let login = data(response)?;
+        match qr_state(&login)? {
+            QrState::Waiting => Ok(QrPoll::Waiting),
+            QrState::Confirm => Ok(QrPoll::AwaitingConfirmation),
+            QrState::Expired => Ok(QrPoll::Expired),
+            QrState::Done => {
+                let profile = finish_login(&self.agent, &login, &mut self.cookies)?;
+                Ok(QrPoll::Authenticated(VerifiedLogin {
+                    cookies: std::mem::take(&mut self.cookies),
+                    profile,
+                }))
+            }
+        }
+    }
+}
+
+pub fn login_bilibili() -> Result<()> {
+    let mut session = QrSession::generate()?;
     println!("请用哔哩哔哩 App 扫描二维码，并在手机上确认登录（Ctrl+C 取消）：");
     println!(
         "{}",
-        code.render::<qrcode::render::unicode::Dense1x2>()
+        session
+            .code
+            .render::<qrcode::render::unicode::Dense1x2>()
             .dark_color(qrcode::render::unicode::Dense1x2::Light)
             .light_color(qrcode::render::unicode::Dense1x2::Dark)
             .build()
     );
-    let mut poll = url::Url::parse(&format!("{PASSPORT}/poll"))?;
-    poll.query_pairs_mut().append_pair("qrcode_key", key);
-    let start = Instant::now();
     let mut confirmed = false;
-    while start.elapsed() < Duration::from_secs(180) {
+    loop {
         std::thread::sleep(Duration::from_secs(2));
-        let response = request(&agent, poll.as_str(), &cookies)?;
-        read_cookies(&response, &mut cookies);
-        let login = data(response)?;
-        match qr_state(&login)? {
-            QrState::Waiting => {}
-            QrState::Confirm => {
+        match session.poll()? {
+            QrPoll::Waiting => {}
+            QrPoll::AwaitingConfirmation => {
                 if !confirmed {
                     println!("已扫码，请在手机上确认登录。");
                     confirmed = true;
                 }
             }
-            QrState::Expired => break,
-            QrState::Done => {
-                finish_login(&agent, &login, &mut cookies)?;
-                save_cookies(&cookie_path(), &cookies)?;
+            QrPoll::Expired => bail!("二维码已过期，请重新运行 course2md --login bilibili"),
+            QrPoll::Authenticated(login) => {
+                login.save()?;
                 println!("Bilibili 登录成功。预览、字幕和视频下载将自动使用此登录状态。");
                 return Ok(());
             }
         }
     }
-    bail!("二维码已过期，请重新运行 course2md --login bilibili")
 }
 
 #[cfg(test)]
@@ -459,19 +616,14 @@ mod tests {
     #[test]
     #[ignore = "requires Bilibili network access; generates a QR session without logging in"]
     fn live_qr_generation_and_waiting_state() {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(12))
-            .user_agent(USER_AGENT)
-            .build();
-        let cookies = Cookies::new();
-        let qr = data(request(&agent, &format!("{PASSPORT}/generate"), &cookies).unwrap()).unwrap();
-        let key = qr["qrcode_key"].as_str().unwrap();
-        let link = qr["url"].as_str().unwrap();
-        assert!(qrcode::QrCode::new(link.as_bytes()).is_ok());
-        let mut url = url::Url::parse(&format!("{PASSPORT}/poll")).unwrap();
-        url.query_pairs_mut().append_pair("qrcode_key", key);
-        let poll = data(request(&agent, url.as_str(), &cookies).unwrap()).unwrap();
-        assert_eq!(qr_state(&poll).unwrap(), QrState::Waiting);
+        let mut session = QrSession::generate().unwrap();
+        let modules = session.modules();
+        assert!(!modules.is_empty());
+        assert!(modules.iter().all(|row| row.len() == modules.len()));
+        assert!(matches!(session.poll().unwrap(), QrPoll::Waiting));
+        // Local deadline terminates without a further network request.
+        session.started = Instant::now() - Duration::from_secs(181);
+        assert!(matches!(session.poll().unwrap(), QrPoll::Expired));
     }
 
     #[test]
