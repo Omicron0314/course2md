@@ -38,6 +38,13 @@ impl Library {
         let name = name.trim();
         ensure!(!name.is_empty(), "请输入文件夹名称");
         ensure!(name.chars().count() <= 60, "文件夹名称最多 60 个字符");
+        ensure!(
+            name != "未分类"
+                || id
+                    .and_then(|id| self.folders.get(&id))
+                    .is_some_and(|existing| existing == name),
+            "「未分类」是系统分类，请使用其他文件夹名称"
+        );
         ensure!(!self.folders.iter().any(|(key, value)| Some(*key) != id && value.to_lowercase() == name.to_lowercase()), "已有同名文件夹");
         let id = match id {
             Some(id) => {
@@ -90,6 +97,58 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reserved_name_edits_leave_saved_folders_and_assignments_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let course = root.path().join("lecture");
+        let mut id = 0;
+        Library::edit(root.path(), |library| {
+            id = library.rename(None, "数学")?;
+            library.assign(root.path(), &course, Some(id))
+        })
+        .unwrap();
+        let path = root.path().join(".course2md-library.json");
+        let before = std::fs::read(&path).unwrap();
+        for target in [None, Some(id)] {
+            let error = Library::edit(root.path(), |library| {
+                library.rename(target, "  未分类  ")?;
+                Ok(())
+            })
+            .err()
+            .expect("system category names must be rejected");
+            assert!(error.to_string().contains("系统分类"));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        let reopened = Library::load(root.path()).unwrap();
+        assert_eq!(reopened.folders[&id], "数学");
+        assert_eq!(reopened.folder(root.path(), &course), Some(id));
+    }
+
+    #[test]
+    fn legacy_reserved_name_can_be_loaded_saved_unchanged_and_renamed() {
+        let root = tempfile::tempdir().unwrap();
+        let course = root.path().join("lecture");
+        std::fs::write(
+            root.path().join(".course2md-library.json"),
+            r#"{"folders":{"1":"未分类"},"courses":{"lecture":1},"next_id":1}"#,
+        )
+        .unwrap();
+        let reopened = Library::load(root.path()).unwrap();
+        assert_eq!(reopened.folder(root.path(), &course), Some(1));
+        Library::edit(root.path(), |library| {
+            assert_eq!(library.rename(Some(1), "未分类")?, 1);
+            Ok(())
+        })
+        .unwrap();
+        let renamed = Library::edit(root.path(), |library| {
+            library.rename(Some(1), "历史课程")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(renamed.folders[&1], "历史课程");
+        assert_eq!(renamed.folder(root.path(), &course), Some(1));
+    }
+
     #[test]
     fn folders_survive_rename_restart_and_deletion_keeps_notes() {
         let root = tempfile::tempdir().unwrap();
