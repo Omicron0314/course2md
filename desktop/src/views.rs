@@ -463,17 +463,17 @@ impl Desktop {
         }
     }
     fn tabs(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let tabs: Vec<&str> = if self.page == Page::Settings {
+        let tabs: Vec<(usize, &str)> = if self.page == Page::Settings {
             vec![
-                "通用",
-                "语音识别",
-                "AI 整理",
-                "运行环境",
-                "关于",
-                "连接账号",
+                (0, "通用"),
+                (1, "语音识别"),
+                (2, "AI 整理"),
+                (5, "连接账号"),
+                (3, "运行环境"),
+                (4, "关于"),
             ]
         } else {
-            vec!["文稿", "截图", "文件"]
+            vec![(0, "文稿"), (1, "截图"), (2, "文件")]
         };
         let selected = if self.page == Page::Settings {
             self.settings_tab
@@ -482,7 +482,7 @@ impl Desktop {
         };
         let position = gpui_base::transition(
             gpui::ElementId::from(("page-tab-indicator", self.page as usize)),
-            selected as f32,
+            tabs.iter().position(|(id, _)| *id == selected).unwrap_or(0) as f32,
             gpui_base::Transition::new(Duration::from_millis(180))
                 .ease(gpui_component::animation::cubic_bezier(0.2, 0., 0., 1.)),
             window,
@@ -501,7 +501,7 @@ impl Desktop {
                     .h(px(2.))
                     .bg(rgb(BLUE)),
             )
-            .children(tabs.into_iter().enumerate().map(|(index, label)| {
+            .children(tabs.into_iter().map(|(index, label)| {
                 control(("tab", index))
                     .ghost()
                     .label(label)
