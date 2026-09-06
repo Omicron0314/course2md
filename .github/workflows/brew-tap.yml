@@ -11,18 +11,31 @@ on:
         description: "要发布的版本（不带 v 前缀，如 0.5.0）"
         required: true
 
+concurrency:
+  group: brew-tap-publish
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
 jobs:
   update-tap:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success') }}
     steps:
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y jq coreutils
 
       - uses: actions/checkout@v4
+
+      - name: Resolve published release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 packaging/release-version.py
 
       - name: Setup GitHub SSH
         env:
@@ -33,9 +46,9 @@ jobs:
           chmod 600 ~/.ssh/gh_key
           printf 'Host github.com\n  User git\n  IdentityFile ~/.ssh/gh_key\n  StrictHostKeyChecking accept-new\n' > ~/.ssh/config
 
-      - name: Update tap formula
+      - name: Update CLI formula and GUI cask
         env:
-          VERSION: ${{ inputs.version || github.event.workflow_run.head_branch }}
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
           V="${VERSION#v}"
           REPO=mizorewww/course2md
@@ -47,6 +60,8 @@ jobs:
           SHA_MLX=$(sha "${BASE}/mlx-macos-arm64.metallib")
           SHA_LINUX_X86=$(sha "${BASE}/course2md-linux-x86_64")
           SHA_LINUX_ARM=$(sha "${BASE}/course2md-linux-aarch64")
+
+          SHA_DMG=$(sha "${BASE}/course2md-gui-macos-arm64.dmg")
 
           git config --global user.name "mizorewww (ci)"
           git config --global user.email "mizorewww@users.noreply.github.com"
@@ -81,6 +96,10 @@ jobs:
           src = re.sub(r'version "[0-9.]+"', f'version "{v}"', src)
           open(f, "w").write(src)
           PY
+          mkdir -p tap/Casks
+          sed -e "s/@VERSION@/${V}/g" -e "s/@SHA_DMG@/${SHA_DMG}/g" \
+            packaging/homebrew/course2md-gui.rb.template > tap/Casks/course2md-gui.rb
+          ruby -c tap/Casks/course2md-gui.rb
           cd tap
           if git diff --quiet; then echo "tap 已是 ${V}"; exit 0; fi
           git add -A && git commit -qm "course2md ${V}"

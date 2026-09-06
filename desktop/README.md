@@ -4,17 +4,9 @@
 
 ## 安装与首次使用
 
-普通用户请从 [GitHub Releases](https://github.com/mizorewww/course2md/releases/latest) 下载已编译应用，无需安装 Rust 或执行下面的开发命令。
+普通用户请阅读 [GUI 安装指南](../docs/wiki/GUI.zh.md)（[English](../docs/wiki/GUI.md)）。Homebrew GUI 使用 `brew install --cask mizorewww/tap/course2md-gui`；AUR GUI 使用 `yay -S course2md-gui-bin`。首次启动按向导完成设置。
 
-- macOS Apple Silicon：打开 DMG，将 course2md.app 拖入「应用程序」后启动。
-- Windows x64：完整解压 ZIP，运行 course2md-desktop.exe，保留同目录 course2md.exe。
-- Linux x64：完整解压 tar.gz，在目录中运行 ./course2md-desktop，保留同目录 course2md。
-
-GUI 已包含匹配的 CLI 引擎，但不添加终端命令。Homebrew、AUR 和 install.sh 安装的是独立 CLI。两者都需 ffmpeg/ffprobe，在线视频另需 yt-dlp；安装后重启应用。按首次设置向导选择目录和识别方式，并在「设置 → 运行环境」检查工具。升级时退出旧应用并替换整个包，保留配置、笔记和模型缓存。
-
-English: download a prebuilt GUI from Releases, extract the whole archive (or drag the macOS app to Applications), and keep the bundled CLI. Install ffmpeg/ffprobe and yt-dlp separately, restart the app, then follow first-run setup. Homebrew/AUR/install.sh install only the standalone CLI. Replace the complete app/package when upgrading; preserve your settings, notes and model caches.
-
-完整的[双语安装与升级指南](../docs/releases/v1.7.0.md)包含下载选择、独立 CLI 安装和后端依赖。
+本页其余内容面向开发者，无需为使用应用安装 Rust 或执行构建命令。所有用户文档见 [Wiki](../docs/wiki/Home.zh.md)。
 
 ## 开发
 
