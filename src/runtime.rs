@@ -169,9 +169,23 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
-/// Hold an OS file lock for the lifetime of the returned file. The lock file
+/// Own an OS lock separately from the lifetime of duplicated file descriptors.
+pub struct FileLock {
+    file: std::fs::File,
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Unix flock locks belong to the open file description. A concurrently
+        // forked child may still hold that description until exec, so closing
+        // our descriptor alone need not release the lock at the end of its scope.
+        let _ = self.file.unlock();
+    }
+}
+
+/// Hold an OS file lock until the returned guard is dropped. The lock file
 /// remains in place so another process cannot open a different inode at its path.
-pub fn lock_file(path: &Path) -> Result<std::fs::File> {
+pub fn lock_file(path: &Path) -> Result<FileLock> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -184,7 +198,7 @@ pub fn lock_file(path: &Path) -> Result<std::fs::File> {
             path.display()
         )
     })?;
-    Ok(file)
+    Ok(FileLock { file })
 }
 
 /// 让 OS 分配一个空闲端口。
@@ -225,6 +239,28 @@ mod tests {
         let first = lock_file(&path).unwrap();
         assert!(lock_file(&path).is_err());
         drop(first);
+        assert!(lock_file(&path).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_lock_releases_while_an_inherited_descriptor_remains_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".lock");
+        let first = lock_file(&path).unwrap();
+        // dup and fork both retain the same open file description. Keeping a
+        // duplicate makes the fork-before-exec window deterministic, without
+        // forking the multithreaded test runner or depending on scheduler timing.
+        let inherited = first.file.try_clone().unwrap();
+        assert!(lock_file(&path).is_err());
+        drop(first);
+        let second = lock_file(&path).expect("scope exit must release the original lock");
+        drop(inherited);
+        assert!(
+            lock_file(&path).is_err(),
+            "the new owner must keep its lock"
+        );
+        drop(second);
         assert!(lock_file(&path).is_ok());
     }
 
