@@ -2,6 +2,7 @@
 mod about;
 mod activity;
 mod backend;
+mod course_library;
 mod icons;
 mod library_ui;
 mod onboarding;
@@ -118,6 +119,7 @@ impl ConversionOptions {
 }
 
 struct Desktop {
+    collapsed_folders: std::collections::BTreeSet<u64>,
     online: bool,
     last_source_input: String,
     completed_source: Option<String>,
@@ -127,6 +129,7 @@ struct Desktop {
     preview_workers: usize,
     preview_error: Option<String>,
     source_validation: Option<String>,
+    show_preview_details: bool,
     library: organize::Library,
     library_root: PathBuf,
     library_error: Option<String>,
@@ -140,7 +143,6 @@ struct Desktop {
     result_origin: Page,
     result_tab: usize,
     settings_tab: usize,
-    settings_transition: usize,
     show_options: bool,
     show_logs: bool,
     setup_open: bool,
@@ -351,6 +353,8 @@ impl Desktop {
             preview_workers: 0,
             preview_error: None,
             source_validation: None,
+            show_preview_details: false,
+            collapsed_folders: Default::default(),
             library: Default::default(),
             library_root: output,
             library_error: None,
@@ -363,7 +367,6 @@ impl Desktop {
             result_origin: Page::Library,
             result_tab: 0,
             settings_tab: 0,
-            settings_transition: 0,
             show_options: false,
             show_logs: false,
             setup_open: false,
@@ -787,6 +790,7 @@ impl Desktop {
     fn refresh_library(&mut self, cx: &mut Context<Self>) {
         let root = self.output(cx);
         if self.library_root != root {
+            self.collapsed_folders.clear();
             self.library_root = root.clone();
             self.library = Default::default();
             self.library_error = None;
@@ -991,13 +995,16 @@ impl Desktop {
         config.llm.disable_hint = true;
         match course2md::settings::save(&config) {
             Ok(_) => {
+                let library_changed = self.config.defaults.out != config.defaults.out;
                 self.config = config;
                 if self.source_preview.is_none() {
                     self.task_options = ConversionOptions::from_config(&self.config);
                 }
                 self.settings_snapshot = self.edited_settings(cx);
                 cx.set_reduce_motion(self.desktop_settings.reduce_motion);
-                self.refresh_library(cx);
+                if library_changed {
+                    self.refresh_library(cx);
+                }
                 self.settings_status = "已自动保存".into();
             }
             Err(error) => self.settings_status = format!("保存失败：{error:#}"),

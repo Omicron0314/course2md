@@ -1,7 +1,6 @@
 //! Product identity and build provenance, kept separate from operational settings.
 use super::*;
-use crate::theme::{INK, LINE, MUTED};
-use gpui_component::button::Button;
+use crate::theme::{INK, LINE, MUTED, control};
 
 impl Desktop {
     pub fn about_page(&self, _: &mut Context<Self>) -> AnyElement {
@@ -35,8 +34,8 @@ impl Desktop {
                     .gap_3()
                     .flex_wrap()
                     .child(
-                        Button::new("about-project")
-                            .h(px(32.)).min_h(px(32.))
+                        control("about-project")
+                            .h(px(36.)).min_h(px(36.))
                             .label("项目主页")
                             .icon(IconName::ExternalLink)
                             .on_click(|_, _, cx| {
@@ -44,8 +43,8 @@ impl Desktop {
                             }),
                     )
                     .child(
-                        Button::new("about-issue")
-                            .h(px(32.)).min_h(px(32.))
+                        control("about-issue")
+                            .h(px(36.)).min_h(px(36.))
                             .label("反馈问题")
                             .icon(IconName::ExternalLink)
                             .on_click(|_, _, cx| {
@@ -65,8 +64,8 @@ impl Desktop {
                             .gap_3()
                             .flex_wrap()
                             .child(
-                                Button::new("about-license")
-                                    .h(px(32.)).min_h(px(32.))
+                                control("about-license")
+                                    .h(px(36.)).min_h(px(36.))
                                     .label("course2md · MIT")
                             .icon(IconName::ExternalLink)
                                     .on_click(|_, _, cx| {
@@ -74,8 +73,8 @@ impl Desktop {
                                     }),
                             )
                             .child(
-                                Button::new("about-icons-license")
-                                    .h(px(32.)).min_h(px(32.))
+                                control("about-icons-license")
+                                    .h(px(36.)).min_h(px(36.))
                                     .label("Material Icons · Apache 2.0")
                             .icon(IconName::ExternalLink)
                                     .on_click(|_, _, cx| {

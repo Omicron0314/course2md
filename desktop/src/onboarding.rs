@@ -217,7 +217,7 @@ impl Desktop {
                             .child(choice.detail),
                     );
                 if choice.selectable {
-                    Button::new(("engine-choice", row))
+                    control(("engine-choice", row))
                         .w_full()
                         .h_auto()
                         .p_3()
@@ -292,7 +292,7 @@ impl Desktop {
                 }
             }))
             .child(
-                Button::new("engine-details")
+                control("engine-details")
                     .ghost()
                     .self_start()
                     .label(if self.show_engine_details {
@@ -312,7 +312,7 @@ impl Desktop {
             )
             .when(self.show_engine_details, |v| {
                 v.child(
-                    Button::new("engine-help")
+                    control("engine-help")
                         .self_start()
                         .h(px(36.))
                         .min_h(px(36.))
@@ -503,7 +503,7 @@ impl Desktop {
                                 }),
                                 |v| {
                                     v.child(
-                                        Button::new("setup-repair-ai")
+                                        control("setup-repair-ai")
                                             .h(px(36.))
                                             .min_h(px(36.))
                                             .label("前往 AI 设置")
@@ -530,7 +530,7 @@ impl Desktop {
                     .justify_between()
                     .gap_3()
                     .child(
-                        Button::new("setup-later")
+                        control("setup-later")
                             .h(px(36.))
                             .min_h(px(36.))
                             .label("稍后设置")
@@ -541,7 +541,7 @@ impl Desktop {
                             })),
                     )
                     .child(
-                        Button::new("setup-done")
+                        control("setup-done")
                             .h(px(36.))
                             .min_h(px(36.))
                             .primary()

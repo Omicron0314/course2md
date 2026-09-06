@@ -60,7 +60,7 @@ impl Desktop {
                         ),
                     )
                     .child(
-                        Button::new(id)
+                        control(id)
                             .h(px(36.))
                             .min_h(px(36.))
                             .flex_shrink_0()
@@ -140,7 +140,7 @@ impl Desktop {
                             )),
                     )
                     .child(
-                        Button::new("reopen-setup")
+                        control("reopen-setup")
                             .h(px(36.))
                             .min_h(px(36.))
                             .self_start()
@@ -170,7 +170,7 @@ impl Desktop {
                             .child(h_flex().gap_3().flex_wrap().children(
                                 SOURCES.iter().enumerate().map(|(index, (_, label))| {
                                     choice(
-                                        Button::new(("default-source", index)).label(*label),
+                                        control(("default-source", index)).label(*label),
                                         self.settings_options.source_mode == index,
                                     )
                                     .on_click(cx.listener(
@@ -250,16 +250,7 @@ impl Desktop {
                 view = view.child(self.environment_page(window, cx));
             }
         }
-        if cx.reduce_motion() || self.settings_transition == 0 {
-            return view.into_any_element();
-        }
-        view.with_animation(
-            ("settings-content", self.settings_transition),
-            Animation::new(Duration::from_millis(140))
-                .with_easing(gpui_component::animation::cubic_bezier(0.2, 0., 0., 1.)),
-            |view, t| view.opacity(0.75 + 0.25 * t),
-        )
-        .into_any_element()
+        view.into_any_element()
     }
 
     fn environment_page(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -317,7 +308,7 @@ impl Desktop {
             capabilities = capabilities.child("正在检查这台电脑…");
         }
         capabilities = capabilities.child(
-            Button::new("refresh-environment")
+            control("refresh-environment")
                 .h(px(36.))
                 .min_h(px(36.))
                 .self_start()
@@ -358,7 +349,7 @@ impl Desktop {
                         .gap_2()
                         .child("转换程序无法运行，请重新安装完整应用。")
                         .child(
-                            Button::new("repair-app")
+                            control("repair-app")
                                 .h(px(36.))
                                 .min_h(px(36.))
                                 .self_start()
@@ -372,9 +363,9 @@ impl Desktop {
             if !(env.apple || env.llama || env.npu) {
                 details=details.child(v_flex().gap_3().child("本机识别尚未配置。可以使用云端服务，或安装本机识别工具。")
                     .child(h_flex().gap_3().flex_wrap()
-                        .child(Button::new("use-cloud").h(px(36.)).min_h(px(36.)).label("配置云端识别")
-                            .on_click(cx.listener(|this,_,_,cx| { this.settings_options.provider=5;this.settings_options.source_mode=0;this.settings_tab=1;this.settings_transition=this.settings_transition.wrapping_add(1);cx.notify(); })))
-                        .child(Button::new("local-help").h(px(36.)).min_h(px(36.)).label("本机识别安装说明")
+                        .child(control("use-cloud").h(px(36.)).min_h(px(36.)).label("配置云端识别")
+                            .on_click(cx.listener(|this,_,_,cx| { this.settings_options.provider=5;this.settings_options.source_mode=0;this.settings_tab=1;cx.notify(); })))
+                        .child(control("local-help").h(px(36.)).min_h(px(36.)).label("本机识别安装说明")
                             .on_click(|_,_,cx| cx.open_url("https://github.com/mizorewww/course2md/blob/main/readme.zh.md")))));
             }
             if !env.ffmpeg || !env.ffprobe || !env.ytdlp {
@@ -396,7 +387,7 @@ impl Desktop {
                         })
                         .child(div().text_sm().child(command))
                         .child(
-                            Button::new("copy-install")
+                            control("copy-install")
                                 .h(px(36.))
                                 .min_h(px(36.))
                                 .self_start()
@@ -414,7 +405,7 @@ impl Desktop {
                     .gap_3()
                     .flex_wrap()
                     .child(
-                        Button::new("doctor")
+                        control("doctor")
                             .h(px(36.))
                             .min_h(px(36.))
                             .label("运行完整诊断")
@@ -423,7 +414,7 @@ impl Desktop {
                     )
                     .when(self.environment.as_ref().is_some_and(|e| e.llama), |v| {
                         v.child(
-                            Button::new("models")
+                            control("models")
                                 .h(px(36.))
                                 .min_h(px(36.))
                                 .label("下载 GPU / CPU 模型")
@@ -439,7 +430,7 @@ impl Desktop {
                     .gap_3()
                     .flex_wrap()
                     .child(
-                        Button::new("open-config")
+                        control("open-config")
                             .h(px(36.))
                             .min_h(px(36.))
                             .label("打开配置文件")
@@ -448,7 +439,7 @@ impl Desktop {
                             }),
                     )
                     .child(
-                        Button::new("reload-config")
+                        control("reload-config")
                             .h(px(36.))
                             .min_h(px(36.))
                             .label("重新加载配置")
@@ -483,7 +474,7 @@ impl Desktop {
             })
             .gap_0()
             .child(
-                Button::new("toggle-diagnostics")
+                control("toggle-diagnostics")
                     .ghost()
                     .h(px(36.))
                     .min_h(px(36.))

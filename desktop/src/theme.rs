@@ -94,25 +94,34 @@ pub fn choice(
         .selected(selected)
         .toggled(selected)
         .h(px(36.))
+        .min_h(px(36.))
         .bg(rgb(if selected { BLUE } else { SURFACE }))
         .text_color(rgb(if selected { SURFACE } else { INK }))
         .border_color(rgb(if selected { BLUE } else { CONTROL }))
         .when(selected, |b| b.font_weight(gpui::FontWeight::SEMIBOLD))
 }
 
-/// Retargetable, critically damped expansion: opening and closing share measured geometry.
+/// Retargetable expansion keeps the content and neighboring groups spatially connected.
 pub fn disclosure(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     open: bool,
     content: gpui::Div,
     window: &mut gpui::Window,
     cx: &mut App,
 ) -> gpui::AnyElement {
     use gpui::{IntoElement, Styled};
-    let progress = gpui_base::spring(
-        id,
+    let id = id.into();
+    let progress = gpui_base::transition(
+        id.clone(),
         if open { 1_f32 } else { 0_f32 },
-        gpui_base::Spring::new(std::time::Duration::from_millis(280)),
+        gpui_base::Transition::new(std::time::Duration::from_millis(200)).easing(
+            gpui_base::Easing::CubicBezier {
+                x1: 0.2,
+                y1: 0.,
+                x2: 0.,
+                y2: 1.,
+            },
+        ),
         window,
         cx,
     );
@@ -121,4 +130,14 @@ pub fn disclosure(
     }
     gpui_base::MotionReveal::new(id, progress, content.w_full().pb(px(4.)).into_any_element())
         .into_any_element()
+}
+
+/// One baseline for ordinary actions; content buttons explicitly opt into auto height.
+pub fn control(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
+    use gpui::Styled;
+    gpui_component::button::Button::new(id)
+        .h(px(36.))
+        .min_h(px(36.))
+        .flex_shrink_0()
+        .text_size(px(14.))
 }

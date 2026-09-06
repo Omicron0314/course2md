@@ -36,6 +36,7 @@ impl Desktop {
         self.source_preview = None;
         self.preview_error = None;
         self.source_validation = None;
+        self.show_preview_details = false;
     }
     pub fn inspect_source(&mut self, cx: &mut Context<Self>) {
         self.completed_source = None;
@@ -169,7 +170,7 @@ impl Desktop {
                         .gap_2()
                         .justify_end()
                         .child(
-                            Button::new("cancel-folder")
+                            control("cancel-folder")
                                 .h(px(36.))
                                 .min_h(px(36.))
                                 .ghost()
@@ -181,7 +182,7 @@ impl Desktop {
                                 })),
                         )
                         .child(
-                            Button::new("save-folder")
+                            control("save-folder")
                                 .h(px(36.))
                                 .min_h(px(36.))
                                 .primary()
@@ -211,14 +212,16 @@ impl Desktop {
                     h_flex()
                         .gap_2()
                         .justify_end()
-                        .child(Button::new("keep-folder").label("保留文件夹").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.delete_folder = None;
-                                cx.notify();
-                            }),
-                        ))
                         .child(
-                            Button::new("delete-folder")
+                            control("keep-folder")
+                                .label("保留文件夹")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.delete_folder = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            control("delete-folder")
                                 .label("删除文件夹，保留课程")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     match organize::Library::edit(&this.library_root, |library| {
@@ -280,7 +283,7 @@ impl Desktop {
                     .px_2()
                     .child(div().text_xs().text_color(rgb(MUTED)).child("文件夹"))
                     .child(
-                        Button::new("new-folder")
+                        control("new-folder")
                             .ghost()
                             .icon(IconName::Plus)
                             .accessibility_label("新建文件夹")
@@ -292,11 +295,11 @@ impl Desktop {
             .children(entries.into_iter().map(|(id, name)| {
                 let count = counts.get(&id.unwrap_or(0)).copied().unwrap_or(0);
                 navigation(
-                    Button::new(("folder-nav", id.unwrap_or(0) as usize)),
+                    control(("folder-nav", id.unwrap_or(0) as usize)),
                     self.page == Page::Library && self.folder_filter == id,
                 )
                 .w_full()
-                .h(px(32.))
+                .h(px(36.))
                 .accessibility_label(name.clone())
                 .selected(self.page == Page::Library && self.folder_filter == id)
                 .child(
@@ -344,12 +347,17 @@ impl Desktop {
         let label = self.folder_name(folder);
         let folders = self.library.folders.clone();
         let entity = cx.entity().downgrade();
-        Button::new(("folder-picker", index))
-            .h(px(32.))
-            .min_h(px(32.))
+        control(("folder-picker", index))
+            .w_full()
+            .min_w_0()
+            .when(course.is_some(), |button| button.ghost())
+            .h(px(36.))
+            .min_h(px(36.))
             .disabled(self.library_error.is_some())
             .icon(IconName::Folder)
-            .label(label)
+            .accessibility_label(format!("移动到文件夹：{label}"))
+            .child(div().flex_1().min_w_0().text_ellipsis().child(label))
+            .child(Icon::new(IconName::ChevronDown).size_4())
             .dropdown_menu(move |menu, _, _| {
                 let mut entries = vec![(None, "未分类".to_owned())];
                 entries.extend(folders.iter().map(|(id, name)| (Some(*id), name.clone())));
@@ -386,7 +394,7 @@ impl Desktop {
                 .gap_2()
                 .children([(true, "在线链接"), (false, "本地视频")].into_iter().map(
                     |(online, label)| {
-                        choice(Button::new(label).label(label), self.online == online).on_click(
+                        choice(control(label).label(label), self.online == online).on_click(
                             cx.listener(move |this, _, window, cx| {
                                 if this.online != online {
                                     this.online = online;
@@ -420,7 +428,8 @@ impl Desktop {
                                 ),
                             )
                             .child(
-                                Button::new("preview-source")
+                                control("preview-source")
+                                    .w(px(112.))
                                     .primary()
                                     .when(self.source_preview.is_some(), |button| {
                                         button.with_variant(ButtonVariant::Default)
@@ -465,7 +474,7 @@ impl Desktop {
                             .child("同名 SRT / VTT 字幕会自动读取"),
                     )
                     .child(
-                        Button::new("choose-video")
+                        control("choose-video")
                             .primary()
                             .label("选择视频")
                             .on_click(
@@ -497,7 +506,7 @@ impl Desktop {
                     .gap_3()
                     .child(div().flex_1().child("正在读取标题、作者和封面…"))
                     .child(
-                        Button::new("cancel-preview")
+                        control("cancel-preview")
                             .ghost()
                             .label("取消预览")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -514,10 +523,42 @@ impl Desktop {
                     .p_4()
                     .rounded_lg()
                     .bg(rgb(0xffefeb))
-                    .child(error.clone())
+                    .child(if self.online {
+                        "未能读取课程，请检查链接和网络后重试。"
+                    } else {
+                        "未能读取视频，请确认文件仍可访问，或更换视频。"
+                    })
+                    .child(
+                        control("preview-error-details")
+                            .ghost()
+                            .self_start()
+                            .label("详细原因")
+                            .icon(if self.show_preview_details {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_preview_details = !this.show_preview_details;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.show_preview_details, |view| {
+                        view.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_sm()
+                                .whitespace_normal()
+                                .child(gpui_base::SelectableText::new(
+                                    "preview-error-text",
+                                    error.clone(),
+                                )),
+                        )
+                    })
                     .when(!self.online, |view| {
                         view.child(
-                            Button::new("retry-preview")
+                            control("retry-preview")
                                 .label("重新预览")
                                 .on_click(cx.listener(|this, _, _, cx| this.inspect_source(cx))),
                         )
@@ -566,10 +607,10 @@ impl Desktop {
                                 .child(div().text_color(rgb(MUTED)).child(source.detail()))
                                 .when(!self.online, |view| {
                                     view.child(
-                                        Button::new("choose-video")
+                                        control("choose-video")
                                             .self_start()
-                                            .h(px(32.))
-                                            .min_h(px(32.))
+                                            .h(px(36.))
+                                            .min_h(px(36.))
                                             .ghost()
                                             .label("更换视频")
                                             .on_click(cx.listener(|this, _, window, cx| {
@@ -588,9 +629,14 @@ impl Desktop {
                     h_flex()
                         .gap_3()
                         .child("归入文件夹")
-                        .child(self.folder_picker(None, 0, cx))
                         .child(
-                            Button::new("add-destination")
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(self.folder_picker(None, 0, cx)),
+                        )
+                        .child(
+                            control("add-destination")
                                 .disabled(self.library_error.is_some())
                                 .ghost()
                                 .icon(IconName::Plus)
