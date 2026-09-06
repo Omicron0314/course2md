@@ -1,6 +1,6 @@
-# Documentation
+# Development records
 
-User guides: [English wiki](wiki/Home.md) · [中文 Wiki](wiki/Home.zh.md).
+User documentation: [GitHub Wiki](https://github.com/mizorewww/course2md/wiki).
 
 ## Development
 

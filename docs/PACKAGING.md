@@ -1,6 +1,6 @@
 # Package channels and release automation
 
-[User wiki](wiki/Home.md) · [中文 Wiki](wiki/Home.zh.md)
+[GitHub Wiki](https://github.com/mizorewww/course2md/wiki)
 
 | Channel | GUI | CLI |
 | --- | --- | --- |
@@ -36,4 +36,10 @@ The GUI package installs its application and engine under `/usr/lib/course2md-de
 
 ## Documentation
 
-`docs/wiki/` is the versioned source of user documentation. Keep both languages in sync and link new topics from `Home.md` / `Home.zh.md`. READMEs should describe the product, install the GUI, and link to the wiki; detailed CLI usage belongs in the CLI guide. Design audits and historical acceptance records remain under `docs/` and are indexed separately.
+User documentation is maintained in the [GitHub Wiki](https://github.com/mizorewww/course2md/wiki). Edit pages there or clone the separate wiki repository:
+
+```sh
+git clone git@github.com:mizorewww/course2md.wiki.git
+```
+
+Keep the Chinese and English guides and the wiki sidebar aligned. README links must point to published Wiki pages. The main repository keeps development and historical acceptance records under `docs/`; it does not keep a second copy of the user guides.

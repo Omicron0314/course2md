@@ -4,9 +4,9 @@
 
 ## 安装与首次使用
 
-普通用户请阅读 [GUI 安装指南](../docs/wiki/GUI.zh.md)（[English](../docs/wiki/GUI.md)）。Homebrew GUI 使用 `brew install --cask mizorewww/tap/course2md-gui`；AUR GUI 使用 `yay -S course2md-gui-bin`。首次启动按向导完成设置。
+普通用户请阅读 [GUI 安装指南](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8)（[English](https://github.com/mizorewww/course2md/wiki/GUI-Installation)）。Homebrew GUI 使用 `brew install --cask mizorewww/tap/course2md-gui`；AUR GUI 使用 `yay -S course2md-gui-bin`。首次启动按向导完成设置。
 
-本页其余内容面向开发者，无需为使用应用安装 Rust 或执行构建命令。所有用户文档见 [Wiki](../docs/wiki/Home.zh.md)。
+本页其余内容面向开发者，无需为使用应用安装 Rust 或执行构建命令。所有用户文档见 [Wiki](https://github.com/mizorewww/course2md/wiki)。
 
 ## 开发
 
