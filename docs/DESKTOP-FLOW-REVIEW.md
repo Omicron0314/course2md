@@ -42,3 +42,7 @@
 实机操作仅在 macOS 完成。笔记读取速度较快，未强制复现异步读取乱序；请求代次及导航判断由独立代码审查确认。未强制制造零输出退出，也未捕捉到长任务中途的数值 ETA 或最终版本运行时底栏画面，因此不声称这些分支已完成逐帧实机验证。它们分别由状态分支审查、既有速率/ETA 测试和渲染条件复核补充。
 
 本轮使用 GPUI 5a9b9558db01a6b906cec2fb70a797affdc58cdd 与 GPUI Component bd4a9c0aa3bd6ff3901272459b3c53e9e5427d03 主线源码；两者使用前已拉取更新，未增加开发版本锁定。
+
+验收结束后回到[常规课程库](images/flow-review/flow-final-library.jpeg)，关闭展开的诊断视图。课程封面取自实际样本画面（白色课件及灰色视频帧），不是 UI 填充图。
+
+最终源码 729f38419bad32f0603d5337a44ab37b745bf35e 的 [三平台 CI](https://github.com/mizorewww/course2md/actions/runs/34013900598) 全部成功：Windows、Ubuntu 24.04、macOS 26 的桌面测试、构建与开发包生成通过。后续提交仅更新验收文档和截图。
