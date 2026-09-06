@@ -992,7 +992,9 @@ impl Desktop {
         match course2md::settings::save(&config) {
             Ok(_) => {
                 self.config = config;
-                self.task_options = ConversionOptions::from_config(&self.config);
+                if self.source_preview.is_none() {
+                    self.task_options = ConversionOptions::from_config(&self.config);
+                }
                 self.settings_snapshot = self.edited_settings(cx);
                 cx.set_reduce_motion(self.desktop_settings.reduce_motion);
                 self.refresh_library(cx);
@@ -1026,7 +1028,9 @@ impl Desktop {
         {
             self.settings_options.provider = choice.index;
         }
-        self.task_options = self.settings_options.clone();
+        if self.source_preview.is_none() {
+            self.task_options = self.settings_options.clone();
+        }
         let output = cfg
             .defaults
             .out
