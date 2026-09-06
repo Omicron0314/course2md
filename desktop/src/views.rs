@@ -306,6 +306,11 @@ impl Desktop {
                     .child(
                         Button::new("toggle-logs")
                             .ghost()
+                            .icon(if self.show_logs {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
                             .label(if self.show_logs {
                                 "收起日志"
                             } else {
