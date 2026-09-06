@@ -80,7 +80,16 @@ pub fn run() -> Result<()> {
     #[cfg(not(apple_native))]
     out.push("- coreml  本构建不包含 Apple 原生后端 / Apple native backend is not included in this build".into());
     match crate::runtime::which("llama-server") {
-        Some(path) => check(&mut out, true, "gpu/cpu", &format!("  {}", path.display())),
+        Some(path) => {
+            check(&mut out, true, "gpu/cpu", &format!("  {}", path.display()));
+            match crate::asr::gpu_devices(&path) {
+                Ok(devices) if !devices.is_empty() => {
+                    check(&mut out, true, "GPU", &format!("  {}", devices.join(", ")))
+                }
+                Ok(_) => out.push(format!("- GPU  未检测到 GPU / No GPU detected. {}", crate::asr::GPU_SETUP_HINT)),
+                Err(error) => out.push(format!("! GPU  无法检查设备 / Device check failed: {error:#}")),
+            }
+        }
         None => out.push("- gpu/cpu  缺少 llama-server / llama-server missing. 安装 llama.cpp 后重试 / Install llama.cpp to use these backends.".into()),
     }
     if cfg!(target_os = "linux") {

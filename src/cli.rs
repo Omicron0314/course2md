@@ -13,6 +13,8 @@ pub const QUICK_START: &str = "快速开始 / Quick start:
   --transcript-source asr       强制语音识别 / Speech recognition only
 
 下一步 / Next steps:
+  course2md --login bilibili   扫码登录 / Log in with a QR code
+  course2md --logout bilibili  清除登录 / Remove saved login
   course2md doctor          检查依赖与配置 / Check dependencies and settings
   course2md config init     生成配置模板 / Create a configuration template
   course2md llm setup       配置可选的 AI 润色 / Set up optional AI proofreading
@@ -32,6 +34,14 @@ First conversion in a terminal offers setup; scripts should pass options explici
     after_help = QUICK_START
 )]
 pub struct Cli {
+    /// 扫码登录，可接视频地址继续转换 / Log in with a QR code, optionally then process a video
+    #[arg(long, value_enum, conflicts_with_all = ["logout", "json"])]
+    pub login: Option<LoginPlatform>,
+
+    /// 清除保存的登录凭据 / Remove saved login credentials
+    #[arg(long, value_enum, conflicts_with_all = ["login", "source", "json"])]
+    pub logout: Option<LoginPlatform>,
+
     /// 视频链接或本地文件 / Video URL or local file
     pub source: Option<String>,
 
@@ -40,6 +50,11 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum LoginPlatform {
+    Bilibili,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -124,6 +139,21 @@ pub struct RunOpts {
     #[arg(long, value_enum)]
     #[arg(help_heading = "输入与输出 / Input and output")]
     pub transcript_source: Option<crate::config::TranscriptSource>,
+
+    /// GPU 卸载层数（0–99）；核显不稳定时可降低 / GPU offload layers; lower on unstable integrated GPUs
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=99))]
+    #[arg(help_heading = "语音识别 / Speech recognition")]
+    pub gpu_layers: Option<u32>,
+
+    /// 将多模态 projector 放到 GPU / Offload the multimodal projector to GPU
+    #[arg(long)]
+    #[arg(help_heading = "语音识别 / Speech recognition")]
+    pub mmproj_offload: bool,
+
+    /// 将多模态 projector 留在 CPU / Keep the multimodal projector on CPU
+    #[arg(long, conflicts_with = "mmproj_offload")]
+    #[arg(help_heading = "语音识别 / Speech recognition")]
+    pub no_mmproj_offload: bool,
 
     /// 每段语音最长秒数 (1–600) / Maximum speech segment length in seconds
     #[arg(long)]

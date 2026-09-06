@@ -40,6 +40,20 @@ course2md ./lecture.mp4
 
 ---
 
+## Bilibili Login and Video Quality
+
+```bash
+course2md --login bilibili  # Scan and confirm with the Bilibili mobile app
+course2md https://www.bilibili.com/video/BV1pb8o6yE8f --max-height 1080
+course2md --logout bilibili # Remove the locally saved session
+```
+
+The CLI and desktop preview automatically reuse the session for metadata, subtitles, and downloads. Use `course2md --login bilibili <video URL>` to log in and then process a video. The default height limit is 1080p; use `--max-height 2160` for higher resolutions when available. Quality depends on the source and your account's existing permissions.
+
+Credentials are stored separately from course output at `auth/bilibili.cookies.txt` inside the configuration directory (0600 permissions on Unix). Do not share this file. Each yt-dlp process uses a private temporary copy to avoid concurrent writes. Log in again when the session expires. Logout removes the local session; it does not revoke downloads already running.
+
+Login may reduce Bilibili HTTP 412 rejections, but cannot guarantee their removal. Preview, metadata, and subtitle extraction retry these errors twice with a delay. Persistent failures show guidance to log in again, update yt-dlp, or retry later.
+
 ## Desktop App (GUI)
 
 The native desktop app in [`desktop/`](desktop/README.md) uses GPUI and GPUI Component. It includes a focused conversion form, progress and cancellation, a searchable library, document / screenshot / file views, and shared CLI settings. The Tauri client has been replaced.
@@ -103,6 +117,9 @@ yay -S course2md-bin
 ```bash
 # 1. Install dependencies
 sudo pacman -S ffmpeg yt-dlp llama-cpp
+# GPU ASR also needs a backend and GPU driver (Intel example)
+sudo pacman -S ggml-vulkan vulkan-intel
+llama-server --list-devices
 
 # 2. Install course2md
 curl -fsSL https://raw.githubusercontent.com/mizorewww/course2md/main/install.sh | bash
@@ -188,9 +205,30 @@ cargo build --release
 >
 > **Automatic Fallback**: On macOS, if the `coreml` backend fails during initialization or runtime, `course2md` automatically logs a warning and falls back to the `gpu` / `llama-server` pipeline to ensure task completion.
 
----
+### GPU Offload Controls (`gpu` / `cpu` backends)
 
----
+`--provider gpu` requests up to 99 offloaded layers and enables GPU offload for the audio encoder (mmproj) by default. Before starting, course2md checks `llama-server --list-devices`; missing devices produce setup guidance instead of silently using the CPU. On Arch/CachyOS, install a GPU backend such as `ggml-vulkan` and the matching graphics driver alongside `llama-cpp`. Use `course2md doctor` to check detection.
+
+```bash
+# Limit GPU layers and keep the audio encoder on CPU
+course2md lecture.mp4 --provider gpu --gpu-layers 8 --no-mmproj-offload --transcript-source asr
+# Disable GPU offload for the main model, audio encoder, and operators
+course2md lecture.mp4 --provider cpu --transcript-source asr
+```
+
+Persistent settings are shared by the CLI and desktop app; explicit CLI arguments take precedence:
+
+```toml
+[defaults]
+gpu_layers = 8          # 0–99; default 99
+mmproj_offload = false  # Default true; --mmproj-offload enables it for one run
+```
+
+`--gpu-layers 0` alone is not CPU-only mode. With a supported llama.cpp, `--provider cpu` adds `-ngl 0 --device none --no-op-offload --no-mmproj-offload`. If an older build lacks these controls, it proceeds only when no GPU devices are detected; otherwise it asks for an updated or CPU-only build. Explicitly requesting `--no-mmproj-offload` also fails if the installed version cannot honor it.
+
+[Issue #12](https://github.com/mizorewww/course2md/issues/12) reports GPU hangs/resets on Fedora with Radeon 780M/ROCm. Reducing layers or disabling mmproj offload may help, but neither guarantees a driver fix. Use CPU or API when affected. No unverified AMD-specific safe layer count is imposed.
+
+Successful runs write `run.json`; failures after the output directory is established also write diagnostics with the requested backend settings, error, and actual llama-server arguments when a server was started. Earlier preflight or metadata failures do not create this file. Include it and `course2md doctor` output when reporting problems. Subtitle-based conversion skips ASR and GPU checks.
 
 ## Model Selection & Accuracy Guide
 
@@ -446,6 +484,8 @@ On success, open one of the listed note files. Only generated files are listed; 
 | `-o, --out <DIR>` | Output root directory | `out` |
 | `--transcript-source <auto/subtitle/asr>` | Transcript source: `auto` = platform subtitles first (manual > auto-caption), fall back to local ASR; `subtitle` = fail if none; `asr` = skip subtitles | `auto` |
 | `--provider <coreml/gpu/cpu/api/npu>` | ASR backend: `coreml` (macOS arm64), `gpu` (non-Mac), `cpu`, or `api` (cloud STT) | Platform default |
+| `--gpu-layers <0-99>` | GPU offload layers for `llama-server` (`-ngl`); try lowering it if AMD/ROCm iGPUs hang | `99` |
+| `--mmproj-offload` / `--no-mmproj-offload` | Offload the multimodal projector to GPU or keep it on CPU | Offload |
 | `--asr-model <qwen3-1.7b/qwen3-0.6b/whisper>` | CoreML ASR model variant: `qwen3-1.7b` (default, MLX on GPU), `qwen3-0.6b` (CoreML on ANE, low power), or `whisper` (large-v3-turbo) | `qwen3-1.7b` |
 | `--asr-api-base-url <URL>` | Cloud STT base URL (OpenAI-compatible) | `https://openrouter.ai/api/v1` |
 | `--asr-api-key <KEY>` | Cloud STT API Key (or set `COURSE2MD_ASR_API_KEY` env) | Config / Env |

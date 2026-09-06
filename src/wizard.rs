@@ -59,6 +59,7 @@ fn run_wizard(
     println!(
         "欢迎使用 course2md！选择字幕不可用时的语音转写方式。 / Welcome! Choose how to transcribe when subtitles are unavailable."
     );
+    println!("{}", crate::auth::BILIBILI_SETUP_TIP);
     println!();
 
     println!(

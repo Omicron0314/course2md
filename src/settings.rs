@@ -29,6 +29,10 @@ pub struct Defaults {
     pub keep_video: Option<bool>,
     pub no_download: Option<bool>,
     pub resume: Option<bool>,
+    /// GPU 卸载层数（llama-server -ngl，0-99；仅 gpu 后端生效）
+    pub gpu_layers: Option<u32>,
+    /// 是否把多模态 projector（mmproj）卸载到 GPU
+    pub mmproj_offload: Option<bool>,
 }
 
 /// 云端 STT 的请求模式。
@@ -76,6 +80,8 @@ impl Default for AsrApi {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DesktopSettings {
+    pub library_cards: bool,
+    pub library_group_folders: bool,
     pub setup_completed: bool,
     pub system_titlebar: bool,
     pub reduce_motion: bool,
@@ -168,6 +174,10 @@ pub const TEMPLATE: &str = r#"# course2md 配置 / Configuration
 # api: 云端识别，需要 API 密钥 / cloud transcription, requires an API key
 # 留空自动选择后端；course2md doctor 查看可用性 / Leave unset for automatic selection; check with course2md doctor
 #provider = "gpu"
+# GPU 卸载层数（0–99）；核显不稳定时可降低 / GPU offload layers; lower on unstable integrated GPUs
+#gpu_layers = 99
+# 将多模态 projector 放到 GPU；false 留在 CPU / Offload projector to GPU; false keeps it on CPU
+#mmproj_offload = true
 # 模型需与后端兼容 / Models must match the backend
 # gpu/cpu: qwen3; coreml: qwen3-1.7b, qwen3-0.6b, whisper
 #asr_model = "qwen3"
@@ -296,6 +306,11 @@ pub fn print_effective(cfg: &ConfigFile) {
     println!("  keep_video     : {}", d.keep_video.unwrap_or(false));
     println!("  no_download    : {}", d.no_download.unwrap_or(false));
     println!("  resume         : {}", d.resume.unwrap_or(false));
+    println!(
+        "  gpu_layers     : {}",
+        d.gpu_layers.unwrap_or(c::DEFAULT_GPU_LAYERS)
+    );
+    println!("  mmproj_offload : {}", d.mmproj_offload.unwrap_or(true));
     println!("[asr_api]");
     println!("  base_url       : {}", cfg.asr_api.base_url);
     println!("  model          : {}", cfg.asr_api.model);
