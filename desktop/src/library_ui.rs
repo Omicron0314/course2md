@@ -537,6 +537,8 @@ impl Desktop {
                             div()
                                 .w(px(192.))
                                 .h(px(108.))
+                                .border_1()
+                                .border_color(rgba(0x0000001a))
                                 .flex_shrink_0()
                                 .rounded_lg()
                                 .overflow_hidden()
@@ -564,6 +566,9 @@ impl Desktop {
                                 .when(!self.online, |view| {
                                     view.child(
                                         Button::new("choose-video")
+                                            .self_start()
+                                            .h(px(32.))
+                                            .min_h(px(32.))
                                             .ghost()
                                             .label("更换视频")
                                             .on_click(cx.listener(|this, _, window, cx| {

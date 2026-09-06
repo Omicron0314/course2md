@@ -159,6 +159,7 @@ struct Desktop {
     cancelling: bool,
     closing: bool,
     task_status: String,
+    task_error: Option<String>,
     progress: BTreeMap<String, activity::Activity>,
     settings_snapshot: course2md::settings::ConfigFile,
     settings_deadline: Option<Instant>,
@@ -386,6 +387,7 @@ impl Desktop {
             kind: Kind::Convert,
             cancelling: false,
             closing: false,
+            task_error: None,
             task_status: "尚无运行中的任务".into(),
             progress: BTreeMap::new(),
             logs: VecDeque::new(),
@@ -653,6 +655,7 @@ impl Desktop {
                 self.show_logs = false;
                 self.scrolls[Page::Task as usize].set_offset(point(px(0.), px(0.)));
                 self.progress.clear();
+                self.task_error = None;
                 self.logs.clear();
                 self.completed = None;
                 self.pending_done = None;
@@ -713,8 +716,8 @@ impl Desktop {
                         .workers = workers;
                 }
                 Event::Error { message } => {
-                    self.logs.push_back(message.clone());
-                    self.message = Some(message);
+                    self.task_error = Some(activity::failure_message(&message).into());
+                    self.logs.push_back(message);
                 }
                 Event::Done(done) => self.pending_done = Some(done),
                 Event::Exit { success, cancelled } => {
@@ -727,6 +730,7 @@ impl Desktop {
                         return;
                     }
                     if cancelled {
+                        self.task_error = None;
                         self.task_status = "任务已取消，可修改设置后重试".into();
                     } else if success && (self.kind != Kind::Convert || self.pending_done.is_some())
                     {
@@ -757,11 +761,9 @@ impl Desktop {
                         }
                     } else {
                         self.task_status = "任务未完成".into();
-                        self.show_logs = true;
-                        if self.message.is_none() {
-                            self.message =
-                                Some("引擎退出，未生成完整结果。请查看下方日志并重试。".into());
-                        }
+                        self.task_error.get_or_insert_with(|| {
+                            "任务未完成。请重试，详细原因可在日志中查看。".into()
+                        });
                     }
                 }
             }

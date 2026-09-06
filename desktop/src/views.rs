@@ -1,7 +1,7 @@
 //! Native pages: stable navigation and actions surround independently scrolling content.
 use super::*;
 use crate::theme::*;
-use gpui_component::{button::*, checkbox::Checkbox, progress::Progress, text::TextView};
+use gpui_component::{button::*, progress::Progress, switch::Switch, text::TextView};
 
 fn muted(text: impl Into<SharedString>) -> Div {
     div().text_sm().text_color(rgb(MUTED)).child(text.into())
@@ -58,7 +58,7 @@ impl Desktop {
                 }),
         )
     }
-    fn new_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn new_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut view = v_flex().gap_4().child(self.source_card(cx));
         if self.source_preview.is_some() {
             view = view.child(
@@ -77,7 +77,7 @@ impl Desktop {
                         })),
                 ),
             );
-            if self.show_options {
+            {
                 let options =
                     card()
                         .gap_4()
@@ -99,34 +99,43 @@ impl Desktop {
                             v.child(self.engine_panel(cx))
                         })
                         .child(self.format_choices(cx))
-                        .child(
-                            Checkbox::new("llm")
-                                .label("AI 整理")
-                                .checked(self.task_options.llm)
-                                .on_click(cx.listener(|this, value, _, cx| {
+                        .child(crate::settings_ui::preference(
+                            "AI 整理",
+                            "启用后，转录文字会发送到设置中的 AI 服务。",
+                            Switch::new("llm").checked(self.task_options.llm).on_click(
+                                cx.listener(|this, value, _, cx| {
                                     this.task_options.llm = *value;
                                     cx.notify();
-                                })),
-                        )
-                        .child(
-                            Checkbox::new("resume")
-                                .label("继续上次未完成的转换")
+                                }),
+                            ),
+                        ))
+                        .child(crate::settings_ui::preference(
+                            "继续上次未完成的转换",
+                            "",
+                            Switch::new("resume")
                                 .checked(self.task_options.resume)
                                 .on_click(cx.listener(|this, value, _, cx| {
                                     this.task_options.resume = *value;
                                     cx.notify();
                                 })),
-                        )
-                        .child(
-                            Checkbox::new("keep-video")
-                                .label("保留下载的视频")
+                        ))
+                        .child(crate::settings_ui::preference(
+                            "保留下载的视频",
+                            "",
+                            Switch::new("keep-video")
                                 .checked(self.task_options.keep_video)
                                 .on_click(cx.listener(|this, value, _, cx| {
                                     this.task_options.keep_video = *value;
                                     cx.notify();
                                 })),
-                        );
-                view = view.child(reveal(options, "options-reveal", cx));
+                        ));
+                view = view.child(disclosure(
+                    "conversion-options",
+                    self.show_options,
+                    options,
+                    window,
+                    cx,
+                ));
             }
         }
         view.into_any_element()
@@ -175,7 +184,15 @@ impl Desktop {
         let active = self.active_work();
         let active_ids: Vec<_> = active.iter().map(|(id, _)| *id).collect();
         let mut content = v_flex().gap_4();
-        if self.job.is_none() {
+        if let Some(error) = &self.task_error {
+            content = content.child(
+                card()
+                    .bg(rgb(0xffefeb))
+                    .text_color(rgb(0xa32626))
+                    .child(error.clone()),
+            );
+        }
+        if self.job.is_none() && self.task_error.is_none() {
             content = content.child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
@@ -282,16 +299,15 @@ impl Desktop {
         if self.show_logs {
             content = content.child(
                 card().child(
-                    TextView::markdown(
-                        "logs",
-                        self.logs
-                            .iter()
-                            .map(|line| format!("    {line}"))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    )
-                    .selectable(true)
-                    .text_xs(),
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_xs()
+                        .whitespace_normal()
+                        .child(gpui_base::SelectableText::new(
+                            "logs-text",
+                            self.logs.iter().cloned().collect::<Vec<_>>().join("\n"),
+                        )),
                 ),
             );
         }
@@ -446,6 +462,8 @@ impl Desktop {
                                 .child(
                                     div()
                                         .size_full()
+                                        .border_b_1()
+                                        .border_color(rgba(0x0000001a))
                                         .bg(rgb(SIDEBAR))
                                         .flex()
                                         .items_center()
@@ -747,14 +765,25 @@ impl Desktop {
                     })),
             );
         } else if self.page == Page::Task
-            && self.kind == Kind::Convert
             && self.completed.is_none()
-            && !self.logs.is_empty()
+            && (self.task_error.is_some() || (self.kind == Kind::Convert && !self.logs.is_empty()))
         {
             row = row.child(
                 Button::new("retry")
-                    .label("调整并重试")
-                    .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::New, cx))),
+                    .h(px(32.))
+                    .min_h(px(32.))
+                    .label(match self.kind {
+                        Kind::Convert => "调整并重试",
+                        Kind::Doctor => "重新检查",
+                        Kind::Models => "重新下载",
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.kind == Kind::Convert {
+                            this.navigate(Page::New, cx);
+                        } else {
+                            this.start(this.kind, cx);
+                        }
+                    })),
             );
         } else if self.page == Page::Result {
             row = row
@@ -830,7 +859,7 @@ impl Render for Desktop {
             self.settings_status = "未保存".into();
         }
         let content = match self.page {
-            Page::New => self.new_page(cx),
+            Page::New => self.new_page(window, cx),
             Page::Task => self.task_page(cx),
             Page::Library => self.library_page(cx),
             Page::Settings => self.settings_page(window, cx),

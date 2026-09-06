@@ -101,6 +101,18 @@ impl Activity {
         }
     }
 }
+/// Present actionable feedback while keeping raw tool output in the log.
+pub fn failure_message(message: &str) -> &'static str {
+    if message.contains("ffmpeg")
+        && (message.contains("does not contain any stream")
+            || message.contains("matches no streams"))
+    {
+        "未能提取音轨。请改用“字幕优先”读取已有字幕，或更换带声音的视频。"
+    } else {
+        "任务未完成。请重试，详细原因可在日志中查看。"
+    }
+}
+
 pub fn title(stage: &str) -> String {
     if let Some(file) = stage.strip_prefix("model/") {
         return if file == "apple" {

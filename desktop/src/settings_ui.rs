@@ -19,7 +19,7 @@ fn group(title: &'static str) -> Div {
                 .child(title),
         )
 }
-fn preference(label: &'static str, hint: &'static str, control: Switch) -> Div {
+pub(super) fn preference(label: &'static str, hint: &'static str, control: Switch) -> Div {
     h_flex()
         .w_full()
         .min_h(px(44.))
