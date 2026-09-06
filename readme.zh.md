@@ -11,6 +11,14 @@
 
 ---
 
+## 选择安装方式
+
+- **使用窗口（GUI）**：从[最新 Release](https://github.com/mizorewww/course2md/releases/latest) 下载 macOS Apple Silicon DMG、Windows x64 ZIP 或 Linux x64 tar.gz。GUI 已内置 CLI 引擎，无需另装独立 CLI。
+- **使用终端（CLI）**：按下方[安装指南](#安装指南)使用 Homebrew、AUR、install.sh 或独立二进制；这些方式不会安装 GUI。GUI 也不会自动添加终端命令。
+- 两者都需 ffmpeg/ffprobe；在线视频另需 yt-dlp。安装工具后重新打开应用或终端。首次启动 GUI 按向导设置目录和识别方式，在「设置 → 运行环境」检查依赖；CLI 使用 `course2md doctor` 检查。
+- Windows/Linux GUI 请完整解压，保留桌面程序旁的 CLI；不要下载 Source code 当安装包。Intel Mac 和 Linux ARM64 目前只有预编译 CLI。
+- 升级时退出旧 GUI，替换整个应用或解压目录；独立 CLI 单独升级。已有配置、笔记和模型缓存可继续使用。参见 [v1.7.0 安装与升级步骤](docs/releases/v1.7.0.md)。
+
 ## 快速上手
 
 > 请先完成[安装指南](#安装指南)。

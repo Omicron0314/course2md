@@ -11,6 +11,14 @@ Turn YouTube, Bilibili, or local course/meeting recordings into slide-illustrate
 
 ---
 
+## Choose GUI or CLI
+
+- **Desktop window (GUI):** get the Apple Silicon DMG, Windows x64 ZIP, or Linux x64 tar.gz from the [latest release](https://github.com/mizorewww/course2md/releases/latest). The GUI bundles its CLI engine; no separate CLI install is needed.
+- **Terminal (CLI):** use Homebrew, AUR, install.sh, or standalone binaries in the [installation guide](#installation). These methods do not install the GUI. The GUI does not add a shell command to PATH.
+- Both need ffmpeg/ffprobe; online videos also need yt-dlp. Restart the app/terminal after installing tools. Follow the GUI setup guide and check Settings → Runtime environment, or run `course2md doctor` for the CLI.
+- Extract the entire Windows/Linux GUI archive and keep the bundled CLI beside the desktop executable. Source code archives are not installers. Intel Mac and Linux ARM64 currently have standalone CLI builds only.
+- To upgrade, quit the GUI and replace the whole app/archive; upgrade standalone CLI separately. Keep existing settings, notes and model caches. See the [v1.7.0 installation and upgrade steps](docs/releases/v1.7.0.md).
+
 ## Quick Start
 
 > Make sure you completed the [Installation](#installation) section first.
