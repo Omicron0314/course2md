@@ -344,6 +344,8 @@ impl Desktop {
         let folders = self.library.folders.clone();
         let entity = cx.entity().downgrade();
         Button::new(("folder-picker", index))
+            .h(px(32.))
+            .min_h(px(32.))
             .disabled(self.library_error.is_some())
             .icon(IconName::Folder)
             .label(label)

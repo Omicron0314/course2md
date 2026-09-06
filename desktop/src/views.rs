@@ -343,12 +343,17 @@ impl Desktop {
             h_flex()
                 .gap_3()
                 .child(
-                    div()
-                        .flex_1()
-                        .child(Input::new(&self.inputs[&Field::Search]).aria_label("搜索课程")),
+                    div().flex_1().child(
+                        Input::new(&self.inputs[&Field::Search])
+                            .aria_label("搜索课程")
+                            .min_h(px(36.))
+                            .max_h(px(36.)),
+                    ),
                 )
                 .child(
                     Button::new("refresh-library")
+                        .h(px(36.))
+                        .min_h(px(36.))
                         .ghost()
                         .icon(icons::refresh())
                         .label("刷新")
@@ -362,6 +367,8 @@ impl Desktop {
                     .gap_2()
                     .child(
                         Button::new("rename-folder")
+                            .h(px(32.))
+                            .min_h(px(32.))
                             .ghost()
                             .label("重命名")
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -370,6 +377,8 @@ impl Desktop {
                     )
                     .child(
                         Button::new("remove-folder")
+                            .h(px(32.))
+                            .min_h(px(32.))
                             .ghost()
                             .label("删除文件夹")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -494,6 +503,8 @@ impl Desktop {
                                         ))
                                         .child(
                                             Button::new(("course-files", index))
+                                                .h(px(32.))
+                                                .min_h(px(32.))
                                                 .ghost()
                                                 .icon(IconName::FolderOpen)
                                                 .accessibility_label("打开导出文件")
@@ -847,15 +858,21 @@ impl Render for Desktop {
                                     .gap_3()
                                     .child(
                                         Button::new("library-repair-location")
+                                            .h(px(32.))
+                                            .min_h(px(32.))
                                             .label("打开保存位置")
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 cx.reveal_path(&this.library_root)
                                             })),
                                     )
                                     .child(
-                                        Button::new("library-retry").label("重新读取").on_click(
-                                            cx.listener(|this, _, _, cx| this.refresh_library(cx)),
-                                        ),
+                                        Button::new("library-retry")
+                                            .h(px(32.))
+                                            .min_h(px(32.))
+                                            .label("重新读取")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.refresh_library(cx)
+                                            })),
                                     ),
                             ),
                     )
