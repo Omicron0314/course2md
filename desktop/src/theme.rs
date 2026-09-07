@@ -129,6 +129,16 @@ pub fn disclosure(
     cx: &mut App,
 ) -> gpui::AnyElement {
     use gpui::{IntoElement, Styled};
+    // MotionReveal starts at zero height and depends on extra frames to measure
+    // itself; with reduced motion that stalls on an empty group. Show the final
+    // state immediately instead.
+    if cx.reduce_motion() {
+        return if open {
+            content.w_full().pb(px(4.)).into_any_element()
+        } else {
+            gpui::div().into_any_element()
+        };
+    }
     let id = id.into();
     let progress = gpui_base::transition(
         id.clone(),
