@@ -400,15 +400,17 @@ impl Render for Desktop {
                                 && (page != Page::Library || self.folder_filter.is_none()),
                         )
                         .w_full()
-                        .h(px(36.))
+                        .h_auto()
+                        .min_h(rems(2.25))
                         .justify_start()
                         .accessibility_label(label)
                         .child(
                             h_flex()
                                 .w_full()
+                                .min_w_0()
                                 .gap_2()
-                                .child(icon.size(px(20.)))
-                                .child(label),
+                                .child(icon.size(px(20.)).flex_shrink_0())
+                                .child(div().flex_1().min_w_0().whitespace_normal().child(label)),
                         )
                         .selected(
                             self.page == page

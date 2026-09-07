@@ -746,7 +746,7 @@ impl Desktop {
             .icon(IconName::Folder)
             .accessibility_label(format!("保存到文件夹：{label}"))
             .tooltip(label.clone())
-            .child(div().flex_1().min_w_0().whitespace_normal().child(label))
+            .child(div().flex_1().min_w_0().whitespace_normal().line_clamp(2).child(label))
             .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
             .dropdown_menu(move |menu, _, _| {
                 let mut entries = vec![(None, "未分类".to_owned())];

@@ -879,7 +879,7 @@ impl Desktop {
                                     })
                                 }),
                         )
-                        .child(div().w(px(152.)).flex_shrink_0().child(self.folder_picker(
+                        .child(div().w(rems(9.5)).flex_shrink_0().child(self.folder_picker(
                             Some(course.dir.clone()),
                             index + 1,
                             cx,
