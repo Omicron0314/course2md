@@ -900,6 +900,21 @@ impl Desktop {
                 if let Some(library) = this.library_indexes.get(&this.library_root) {
                     this.library = library.clone();
                     this.library_error = None;
+                } else if let Some((root, library)) = this
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.state.libraries.first())
+                    .and_then(|location| {
+                        this.library_indexes
+                            .get(&location.root)
+                            .map(|library| (location.root.clone(), library.clone()))
+                    })
+                {
+                    // The configured default is not a registered library; follow
+                    // the workspace's first readable location instead.
+                    this.library_root = root;
+                    this.library = library;
+                    this.library_error = None;
                 } else {
                     this.library_error = Some("当前库的文件夹信息暂时无法读取".into());
                 }
