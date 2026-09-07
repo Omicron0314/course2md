@@ -1434,7 +1434,8 @@ impl Desktop {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.save_reading_position(cx);
                             this.select_task(&id, cx);
-                            this.page = Page::Task;
+                            // M4: 任务详情并入工作台输入盒；先回到工作台。
+                            this.page = Page::New;
                             cx.notify();
                         })),
                 );

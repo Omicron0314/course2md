@@ -6,6 +6,15 @@ use gpui_component::{button::*, progress::Progress};
 fn muted(text: impl Into<SharedString>) -> Div {
     div().text_sm().text_color(rgb(MUTED)).child(text.into())
 }
+/// Every chrome row and page body sits in this one centered column.
+fn shell_column() -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .max_w(COLUMN)
+        .mx_auto()
+        .px(px(24.))
+}
 fn section(title: &str, description: &str) -> Div {
     v_flex()
         .gap_1()
@@ -31,6 +40,111 @@ fn card() -> Div {
 }
 
 impl Desktop {
+    /// App top bar under the title bar: wordmark, workspace/notes tabs, settings gear.
+    fn shell_topbar(&self, cx: &mut Context<Self>) -> Div {
+        let settings_problem = self.settings_have_problem();
+        let wordmark = h_flex().flex_shrink_0().items_baseline().children([
+            div()
+                .text_size(TEXT_BODY)
+                .font_weight(FontWeight::BOLD)
+                .child("course"),
+            div()
+                .text_size(TEXT_BODY)
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(ACCENT))
+                .child("2"),
+            div()
+                .text_size(TEXT_BODY)
+                .font_weight(FontWeight::BOLD)
+                .child("md"),
+        ]);
+        let tabs = h_flex()
+            .flex_1()
+            .min_w_0()
+            .justify_center()
+            .gap_6()
+            .children(
+                [(Page::New, "工作台"), (Page::Library, "我的笔记")]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (page, label))| {
+                        // 阅读页归入我的笔记 tab（mock v2 同样归位）。
+                        let active =
+                            self.page == page || (page == Page::Library && self.page == Page::Result);
+                        control(("shell-tab", index))
+                            .ghost()
+                            .h_auto()
+                            .px(px(2.))
+                            .py(px(6.))
+                            .selected(active)
+                            .toggled(active)
+                            .accessibility_label(label)
+                            .child(
+                                v_flex()
+                                    .gap(px(4.))
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_color(rgb(if active { INK } else { GRAY }))
+                                            .when(active, |text| {
+                                                text.font_weight(FontWeight::SEMIBOLD)
+                                            })
+                                            .child(label),
+                                    )
+                                    .child(div().h(px(2.)).w_full().rounded_full().bg(
+                                        if active {
+                                            rgb(ACCENT)
+                                        } else {
+                                            rgba(0x00000000)
+                                        },
+                                    )),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if page == Page::Library {
+                                    this.folder_filter = None;
+                                }
+                                this.navigate(page, cx);
+                            }))
+                    }),
+            );
+        let gear = control("shell-settings")
+            .ghost()
+            .h_auto()
+            .min_h(rems(2.286))
+            .min_w(rems(2.286))
+            .rounded(RADIUS_PILL)
+            .icon(IconName::Settings)
+            .accessibility_label(if settings_problem {
+                "设置，未保存"
+            } else {
+                "设置"
+            })
+            .selected(self.page == Page::Settings)
+            .toggled(self.page == Page::Settings)
+            .when(self.page == Page::Settings, |button| {
+                button.bg(rgb(BADGE_PROGRESS_BG))
+            })
+            .when(settings_problem, |button| button.text_color(rgb(ACCENT_STRONG)))
+            .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Settings, cx)));
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(rgb(HAIRLINE))
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .max_w(COLUMN)
+                    .mx_auto()
+                    .px(px(24.))
+                    .py(px(12.))
+                    .items_center()
+                    .child(wordmark)
+                    .child(tabs)
+                    .child(gear),
+            )
+    }
     fn active_work(&self) -> Vec<(&str, &activity::Activity)> {
         let preparing = self
             .progress
@@ -374,124 +488,23 @@ impl Render for Desktop {
                 )
             })
             .child(content);
-        let settings_problem = self.settings_have_problem();
-        let sidebar = v_flex()
-            .w(rems(208. / 14.))
-            .h_full()
-            .flex_shrink_0()
-            .p_3()
-            .gap_4()
-            .bg(rgb(SIDEBAR))
-            .border_r_1()
-            .border_color(rgb(LINE))
-            .child(
-                v_flex().gap_1().children(
-                    [
-                        (Page::Library, "课程库", Icon::new(IconName::BookOpen)),
-                        (Page::New, "生成笔记", Icon::new(IconName::Plus)),
-                        (Page::Task, "任务", icons::task()),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (page, label, icon))| {
-                        navigation(
-                            control(("nav", index)),
-                            self.page == page
-                                && (page != Page::Library || self.folder_filter.is_none()),
-                        )
-                        .w_full()
-                        .h_auto()
-                        .min_h(rems(2.25))
-                        .justify_start()
-                        .accessibility_label(label)
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .gap_2()
-                                .child(icon.size(px(20.)).flex_shrink_0())
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .child(label),
-                                ),
-                        )
-                        .selected(
-                            self.page == page
-                                && (page != Page::Library || self.folder_filter.is_none()),
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                if page == Page::New {
-                                    this.navigate(Page::New, cx);
-                                } else {
-                                    if page == Page::Library {
-                                        this.folder_filter = None;
-                                    }
-                                    this.navigate(page, cx);
-                                }
-                            },
-                        ))
-                    }),
-                ),
-            )
-            .child(
-                div()
-                    .id("folder-scroll")
-                    .min_h_0()
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(self.folder_sidebar(cx)),
-            )
-            .child(
-                navigation(control("nav-settings"), self.page == Page::Settings)
-                    .w_full()
-                    .min_h(rems(2.6))
-                    .justify_start()
-                    .accessibility_label(if settings_problem {
-                        "设置，未保存"
-                    } else {
-                        "设置"
-                    })
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .w_full()
-                            .gap_2()
-                            .child(Icon::new(IconName::Settings).size(px(20.)))
-                            .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child("设置")
-                                    .when(settings_problem, |label| {
-                                        label.child(div().text_xs().child("未保存"))
-                                    }),
-                            ),
-                    )
-                    .selected(self.page == Page::Settings)
-                    .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Settings, cx))),
-            );
+        let topbar = self.shell_topbar(cx);
         let body = v_flex()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
+            .w_full()
             .child(
-                div()
-                    .px(px(24.))
+                shell_column()
                     .flex_shrink_0()
                     .child(self.page_header(window, cx)),
             )
             .when(self.page == Page::Library, |v| {
-                v.child(div().px(px(24.)).child(self.library_toolbar(cx)))
+                v.child(shell_column().child(self.library_toolbar(cx)))
             })
             .when_some(self.workspace_error.clone(), |v, message| {
                 v.child(
-                    div()
-                        .px(px(24.))
+                    shell_column()
                         .pb_3()
                         .text_color(rgb(0xa32626))
                         .child(accessible_text("workspace-error", message).role(Role::Alert))
@@ -523,7 +536,7 @@ impl Render for Desktop {
             })
             .when_some(self.message.clone(), |v, message| {
                 v.child(
-                    div().px(px(24.)).pb_3().child(
+                    shell_column().pb_3().child(
                         h_flex()
                             .min_w_0()
                             .gap_3()
@@ -556,16 +569,24 @@ impl Render for Desktop {
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
+                    .w_full()
                     .when(self.page != Page::Result, |view| {
                         view.overflow_y_scroll()
                             .track_scroll(&self.scrolls[self.page as usize])
                     })
-                    .px(px(24.))
-                    .pb_6()
-                    .child(content),
+                    .child(
+                        shell_column()
+                            .when(self.page == Page::Result, |v| v.h_full().min_h_0())
+                            .pb_6()
+                            .child(content),
+                    ),
             )
             .when(self.page == Page::New, |view| {
-                view.child(div().px_6().pb_3().child(self.import_footer(cx)))
+                view.child(
+                    shell_column()
+                        .pb_3()
+                        .child(self.import_footer(cx)),
+                )
             });
         let background = v_flex()
             .size_full()
@@ -584,14 +605,8 @@ impl Render for Desktop {
                     ),
                 )
             })
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(sidebar)
-                    .child(body),
-            )
+            .child(topbar)
+            .child(body)
             .when(
                 (self.job.is_some()
                     || self
@@ -638,7 +653,8 @@ impl Render for Desktop {
                                                 this.settings_tab = 3;
                                                 this.navigate(Page::Settings, cx);
                                             } else {
-                                                this.navigate(Page::Task, cx);
+                                                // M4: 任务进度并入工作台输入盒；先回到工作台。
+                                                this.navigate(Page::New, cx);
                                             }
                                         })),
                                 )

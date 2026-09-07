@@ -377,7 +377,11 @@ impl Desktop {
 
     pub fn library_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let scale = self.preferences.application().font_scale;
-        let content = (f32::from(window.bounds().size.width) - 208. * scale - 48.).max(0.);
+        // Centered shell column: full width minus page padding, capped at COLUMN.
+        let column = COLUMN.0 * 14. * scale;
+        let content = (f32::from(window.bounds().size.width) - 48.)
+            .min(column)
+            .max(0.);
         let columns = ((content + 16.) / (196. * scale + 16.)).floor().max(1.) as usize;
         let card_w = (content - 16. * columns.saturating_sub(1) as f32) / columns as f32;
         let layout = LibraryLayout {
@@ -740,6 +744,77 @@ impl Desktop {
         view.into_any_element()
     }
 
+    /// Sidebar successor: folder filter + creation entry, final form with M5.
+    fn folder_filter_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let multi = self
+            .workspace
+            .as_ref()
+            .is_some_and(|w| w.state.libraries.len() > 1);
+        let mut sections: Vec<(PathBuf, String, Vec<(u64, String)>)> = self
+            .workspace
+            .as_ref()
+            .map(|w| w.state.libraries.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|location| {
+                self.library_indexes.get(&location.root).map(|organization| {
+                    (
+                        location.root.clone(),
+                        location.name.clone(),
+                        organization
+                            .folders
+                            .iter()
+                            .map(|(id, name)| (*id, name.clone()))
+                            .collect(),
+                    )
+                })
+            })
+            .collect();
+        if sections.is_empty() {
+            sections.push((
+                self.library_root.clone(),
+                "课程库".to_owned(),
+                self.library
+                    .folders
+                    .iter()
+                    .map(|(id, name)| (*id, name.clone()))
+                    .collect(),
+            ));
+        }
+        let label = match self.folder_filter {
+            None => "全部笔记".to_owned(),
+            Some(0) => "未分类".into(),
+            Some(id) => self
+                .library
+                .folders
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| "文件夹已删除".into()),
+        };
+        control("folder-filter")
+            .h_auto()
+            .min_h(rems(2.6))
+            .max_w(rems(16.))
+            .icon(IconName::Folder)
+            .accessibility_label(format!("文件夹筛选：{label}"))
+            .tooltip(label.clone())
+            .child(
+                div()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label),
+            )
+            .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
+            .dropdown_menu(Self::folder_filter_menu(
+                cx.entity().downgrade(),
+                multi,
+                sections,
+                self.library_root.clone(),
+                self.folder_filter,
+            ))
+    }
+
     pub fn library_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let controls = h_flex()
             .gap_2()
@@ -747,6 +822,7 @@ impl Desktop {
             .min_w_0()
             .max_w_full()
             .flex_shrink_0()
+            .child(self.folder_filter_control(cx))
             .when_some(self.folder_filter.filter(|id| *id != 0), |row, id| {
                 let entity = cx.entity().downgrade();
                 row.child(control("manage-folder").label("管理文件夹").dropdown_menu(

@@ -532,157 +532,6 @@ impl Desktop {
         })
         .detach();
     }
-    pub fn folder_sidebar(&self, cx: &mut Context<Self>) -> Div {
-        let libraries = self
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.state.libraries.clone())
-            .unwrap_or_default();
-        let mut view = v_flex().gap_4();
-        for (library_index, location) in libraries.into_iter().enumerate() {
-            let Some(organization) = self.library_indexes.get(&location.root) else {
-                let root = location.root.clone();
-                view = view.child(
-                    v_flex()
-                        .gap_1()
-                        .child(
-                            control(("unavailable-library-nav", library_index))
-                                .ghost()
-                                .disabled(self.loading)
-                                .label(location.name.clone())
-                                .accessibility_label(format!(
-                                    "查看{}的保存位置与恢复状态",
-                                    location.name
-                                ))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if this.page == Page::New && !this.save_current_draft(cx) {
-                                        return;
-                                    }
-                                    this.library_root = root.clone();
-                                    this.library_error =
-                                        Some("此课程库的位置或分类记录暂时无法读取".into());
-                                    this.folder_filter = None;
-                                    this.navigate(Page::Library, cx);
-                                })),
-                        )
-                        .child(
-                            accessible_text(
-                                ("unavailable-library-state", library_index),
-                                if self.loading {
-                                    "正在读取"
-                                } else {
-                                    "暂时无法读取"
-                                },
-                            )
-                            .text_sm()
-                            .text_color(rgb(MUTED)),
-                        ),
-                );
-                continue;
-            };
-            let root = location.root.clone();
-            let mut entries = vec![(Some(0), "未分类".to_owned())];
-            entries.extend(
-                organization
-                    .folders
-                    .iter()
-                    .map(|(id, name)| (Some(*id), name.clone())),
-            );
-            let mut counts = BTreeMap::<u64, usize>::new();
-            for course in &self.courses {
-                if self
-                    .course_location(course)
-                    .is_some_and(|library| library.root == root)
-                {
-                    *counts
-                        .entry(
-                            organization
-                                .folder(&root, &course.storage_dir())
-                                .unwrap_or(0),
-                        )
-                        .or_default() += 1;
-                }
-            }
-            let add_root = root.clone();
-            let mut group = v_flex().gap_1().child(
-                h_flex()
-                    .justify_between()
-                    .px_2()
-                    .child(
-                        accessible_text(("sidebar-library-title", library_index), location.name)
-                            .text_xs()
-                            .text_color(rgb(MUTED)),
-                    )
-                    .child(
-                        control(("new-folder", library_index))
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .accessibility_label("在此保存位置新建文件夹")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if this.page == Page::New && !this.save_current_draft(cx) {
-                                    return;
-                                }
-                                this.library_root = add_root.clone();
-                                if let Some(organization) = this.library_indexes.get(&add_root) {
-                                    this.library = organization.clone();
-                                }
-                                this.page = Page::Library;
-                                this.begin_folder(None, window, cx);
-                            })),
-                    ),
-            );
-            for (entry_index, (id, name)) in entries.into_iter().enumerate() {
-                let root = root.clone();
-                let selected = self.page == Page::Library
-                    && self.library_root == root
-                    && self.folder_filter == id;
-                let count = counts.get(&id.unwrap_or(0)).copied().unwrap_or(0);
-                group = group.child(
-                    navigation(
-                        control(("folder-nav", library_index * 100_000 + entry_index)),
-                        selected,
-                    )
-                    .w_full()
-                    .h_auto()
-                    .py_2()
-                    .accessibility_label(format!("{name}，{count} 份笔记"))
-                    .tooltip(name.clone())
-                    .selected(selected)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_start()
-                            .gap_2()
-                            .child(Icon::new(IconName::Folder).size(px(18.)).flex_shrink_0())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .whitespace_normal()
-                                    .text_ellipsis()
-                                    .line_clamp(2)
-                                    .child(name),
-                            )
-                            .child(div().flex_shrink_0().text_xs().child(count.to_string())),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.page == Page::New {
-                            this.save_current_draft(cx);
-                        }
-                        this.library_root = root.clone();
-                        if let Some(organization) = this.library_indexes.get(&root) {
-                            this.library = organization.clone();
-                        }
-                        this.folder_filter = id;
-                        this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
-                        this.navigate(Page::Library, cx);
-                    })),
-                );
-            }
-            view = view.child(group);
-        }
-        view
-    }
 
     fn folder_context(&self, course: Option<PathBuf>) -> FolderContext {
         let storage = course.as_ref().map(|path| {
@@ -800,6 +649,67 @@ impl Desktop {
             })
         }
     }
+
+    /// Folder filter for the library toolbar (sidebar successor): lists 未分类 and
+    /// every folder of every readable registered library; the final form lands
+    /// with the notes-page milestone (M5).
+    pub fn folder_filter_menu(
+        entity: WeakEntity<Desktop>,
+        multi: bool,
+        sections: Vec<(PathBuf, String, Vec<(u64, String)>)>,
+        current_root: PathBuf,
+        current: Option<u64>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        move |menu, _, _| {
+            let menu = menu.item(PopupMenuItem::new("全部笔记").checked(current.is_none()).on_click({
+                let entity = entity.clone();
+                move |_, _, cx| {
+                    let _ = entity.update(cx, |this, cx| {
+                        this.folder_filter = None;
+                        this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
+                        cx.notify();
+                    });
+                }
+            }));
+            let mut menu = menu;
+            for (root, library_name, folders) in sections.iter() {
+                let mut entries: Vec<(u64, String)> = vec![(0u64, "未分类".to_owned())];
+                entries.extend(folders.iter().cloned());
+                menu = menu.separator();
+                for (id, name) in entries {
+                    let entity = entity.clone();
+                    let root = root.clone();
+                    let checked = current == Some(id) && current_root == root;
+                    let label = if multi {
+                        format!("{library_name} · {name}")
+                    } else {
+                        name
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                        move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.library_root = root.clone();
+                                if let Some(organization) = this.library_indexes.get(&root) {
+                                    this.library = organization.clone();
+                                }
+                                this.folder_filter = Some(id);
+                                this.scrolls[Page::Library as usize]
+                                    .set_offset(point(px(0.), px(0.)));
+                                this.navigate(Page::Library, cx);
+                            });
+                        },
+                    ));
+                }
+            }
+            menu.separator().item(PopupMenuItem::new("新建文件夹…").on_click({
+                let entity = entity.clone();
+                move |_, window, cx| {
+                    let _ = entity.update(cx, |this, cx| this.begin_folder(None, window, cx));
+                }
+            }))
+        }
+    }
+
 
     pub fn folder_picker(
         &self,
