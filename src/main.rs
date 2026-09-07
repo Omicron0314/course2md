@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Parser;
 use course2md::cli::{Cli, Command, ConfigCmd, LlmCmd, ModelsCmd};
 use course2md::{config, doctor, llm, models, pipeline, progress, settings, wizard};
@@ -50,7 +51,7 @@ fn main() -> std::process::ExitCode {
         .iter()
         .skip(1)
         .take_while(|a| *a != "--")
-        .any(|a| a == "--json");
+        .any(|a| a == "--json" || a == "run-task");
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) => {
@@ -69,10 +70,13 @@ fn main() -> std::process::ExitCode {
         }
     };
     let json = cli.opts.json
+        || matches!(&cli.command, Some(Command::RunTask))
         || matches!(
             &cli.command,
             Some(Command::Models {
                 cmd: ModelsCmd::Download { json: true, .. }
+                    | ModelsCmd::Prepare { json: true, .. }
+                    | ModelsCmd::Inspect { json: true, .. }
             })
         );
     if json {
@@ -111,7 +115,42 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
     match cli.command {
+        Some(Command::RunTask) => {
+            init_logging(0, false, true);
+            let request = course2md::execution::Request::read(std::io::stdin().lock())?;
+            tokio::runtime::Runtime::new()?.block_on(course2md::execution::run(request))
+        }
         Some(Command::Models { cmd }) => match cmd {
+            ModelsCmd::Inspect {
+                provider,
+                model,
+                dir,
+                json,
+            } => {
+                init_logging(0, false, json);
+                let root = config::model_dir_from(dir.as_deref());
+                let status = models::status::inspect(provider, &model, &root)?;
+                println!("{}", serde_json::to_string(&status)?);
+                Ok(())
+            }
+            ModelsCmd::Prepare {
+                provider,
+                model,
+                dir,
+                json,
+            } => {
+                init_logging(0, false, json);
+                let root = config::model_dir_from(dir.as_deref());
+                let status = tokio::runtime::Runtime::new()?
+                    .block_on(models::prepare(provider, &model, &root))?;
+                progress::emit(
+                    serde_json::json!({"type":"done", "out_dir":root, "title":model, "slides":0, "segments":0, "model_status":status}),
+                );
+                if !json {
+                    println!("模型准备完成：{}", serde_json::to_string(&status)?);
+                }
+                Ok(())
+            }
             ModelsCmd::Download { dir, json } => {
                 if json {
                     progress::set_json_mode();
@@ -211,11 +250,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Summarize(args)) => {
             init_logging(0, false, false);
             let file = settings::load()?;
-            if !file.llm.enabled {
-                anyhow::bail!(
-                    "AI 总结需要先配置服务 / Set up AI before summarizing: course2md llm setup"
-                );
-            }
+            llm::validate(&file.llm)?;
             let rt = tokio::runtime::Runtime::new()?;
             let mut targets: Vec<std::path::PathBuf> = vec![];
             for dir in &args.dirs {
@@ -332,7 +367,14 @@ fn collect_targets(
     out: &mut Vec<std::path::PathBuf>,
     depth: usize,
 ) -> anyhow::Result<()> {
-    if dir.join("timeline.jsonl").is_file() {
+    if dir.join("current.json").is_file() {
+        let current: course2md::artifact::CurrentVersion =
+            serde_json::from_slice(&std::fs::read(dir.join("current.json"))?)?;
+        let manifest = course2md::artifact::safe_asset_path(dir, &current.manifest)?;
+        out.push(manifest.parent().context("笔记清单位置无效")?.to_path_buf());
+        return Ok(());
+    }
+    if dir.join("timeline.jsonl").is_file() || dir.join("manifest.json").is_file() {
         out.push(dir.to_path_buf());
         return Ok(());
     }
@@ -341,10 +383,108 @@ fn collect_targets(
     }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.path().is_dir() {
+        if entry.path().is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
             collect_targets(&entry.path(), out, depth + 1)?;
         }
     }
+    Ok(())
+}
+
+fn summarize_version(
+    file: &settings::ConfigFile,
+    dir: &std::path::Path,
+    force: bool,
+    out: Option<&std::path::Path>,
+    rt: &tokio::runtime::Runtime,
+) -> anyhow::Result<()> {
+    use course2md::{artifact, execution};
+    let base = artifact::read_manifest(&dir.join("manifest.json"))?;
+    artifact::validate_version(dir, &base)?;
+    let document: artifact::Document =
+        serde_json::from_slice(&std::fs::read(dir.join(&base.document))?)?;
+    if document.summary.is_some() && !force {
+        println!(
+            "已有摘要，笔记保持不变 / Summary already exists: {}",
+            dir.display()
+        );
+        return Ok(());
+    }
+    let mut settings = file.llm.clone();
+    settings.api_key.clear();
+    let mut task_id = format!(
+        "summary-{}",
+        execution::digest(&serde_json::to_vec(
+            &serde_json::json!({"base_version":base.version_id,"settings":settings})
+        )?)
+    );
+    if force {
+        task_id.push_str(&format!(
+            "-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+    }
+    let course_dir = dir
+        .parent()
+        .and_then(|p| p.parent())
+        .context("笔记版本位置无效")?
+        .to_path_buf();
+    let work = course_dir.join(".work").join(&task_id);
+    execution::bind_work_dir(
+        &work,
+        &serde_json::json!({"source_id":base.source_id,"task_id":task_id,"settings":settings,"base_version":base.version_id}),
+    )?;
+    let _lock = course2md::runtime::lock_file(&work.join(".task.lock"))?;
+    let _dispatch = course2md::dispatch::install(&work, None, &Default::default())?;
+    let target = artifact::Target {
+        task_id: task_id.clone(),
+        course_id: base.course_id.clone(),
+        source_id: base.source_id.clone(),
+        version_id: task_id,
+        course_dir,
+    };
+    if artifact::published(&target)?.is_some() {
+        println!(
+            "摘要已保存 / Summary already saved: {}",
+            target.version_dir().display()
+        );
+        return Ok(());
+    }
+    let speech = document
+        .sections
+        .iter()
+        .flat_map(|section| section.speech.clone())
+        .collect::<Vec<_>>();
+    let summary = rt.block_on(course2md::summarize::summarize(
+        &file.llm,
+        &speech,
+        &document.meta,
+    ))?;
+    let mut outcomes = base.outcomes;
+    outcomes.summary = artifact::Outcome::succeeded();
+    outcomes.exports.clear();
+    rt.block_on(artifact::publish(
+        &target,
+        dir,
+        &document.meta,
+        &document.sections,
+        Some(&summary),
+        &[],
+        outcomes,
+    ))?;
+    if let Some(out) = out {
+        std::fs::create_dir_all(out)?;
+        let file = out.join(format!(
+            "{}.html",
+            config::sanitize_component(&document.meta.title)
+        ));
+        course2md::portable::export(&target.version_dir(), config::OutputFormat::Html, &file)?;
+    }
+    println!(
+        "摘要已作为新版笔记保存 / Summary saved as a new note version: {}",
+        target.version_dir().display()
+    );
     Ok(())
 }
 
@@ -356,6 +496,9 @@ fn summarize_dir(
     out: Option<&std::path::Path>,
     rt: &tokio::runtime::Runtime,
 ) -> anyhow::Result<()> {
+    if dir.join("manifest.json").is_file() {
+        return summarize_version(file, dir, force, out, rt);
+    }
     use course2md::timeline::TimelineEvent;
     let timeline_path = dir.join("timeline.jsonl");
     let md_path = dir.join("course.md");

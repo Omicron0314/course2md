@@ -199,20 +199,30 @@ fn remote_download_output_does_not_leak_into_json_or_quiet_mode() {
     std::fs::write(&script, r#"#!/bin/sh
 output=''
 subtitles=0
+simulate=0
+json=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -J) printf '%s\n' '{"title":"Test lecture","id":"test","webpage_url":"https://example.test/video","duration":3,"extractor":"test"}'; exit 0 ;;
+    -J|--dump-single-json) json=1 ;;
+    --simulate) simulate=1 ;;
+    --no-simulate) simulate=0 ;;
     -o) shift; output="$1" ;;
     --skip-download) subtitles=1 ;;
   esac
   shift
 done
-if [ "$subtitles" -eq 1 ]; then
+if [ "$simulate" -eq 1 ]; then
+  :
+elif [ "$subtitles" -eq 1 ]; then
   printf '1\n00:00:00,000 --> 00:00:02,500\nWelcome to the lecture.\n' > "$output.en.srt"
 else
   /bin/cp "$CLI_TEST_VIDEO" "$output"
 fi
-printf 'raw downloader output\n'
+if [ "$json" -eq 1 ]; then
+  printf '%s\n' '{"title":"Test lecture","id":"test","webpage_url":"https://example.test/video","duration":3,"extractor":"test","subtitles":{"en":[{"ext":"srt","url":"https://example.test/en.srt"}]},"automatic_captions":{}}'
+else
+  printf 'raw downloader output\n'
+fi
 printf 'raw downloader stderr\n' >&2
 "#).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();

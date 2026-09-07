@@ -116,6 +116,44 @@ final class AsrBox {
     init(_ m: AsrKind) { model = m }
 }
 
+// Cache-only preparation follows the same repositories and required files as the
+// actual loaders. It deliberately avoids constructing a second copy of ASR weights.
+@_cdecl("c2m_asr_prepare_cache")
+public func c2mAsrPrepareCache(_ model: UnsafePointer<CChar>, _ errBuf: UnsafeMutablePointer<CChar>, _ errLen: Int) -> Int32 {
+    let name = String(cString: model)
+    do {
+        try runSync {
+            var downloads: [(String, [String])] = []
+            switch name {
+            case "qwen3-1.7b":
+                downloads.append(("aufklarer/Qwen3-ASR-1.7B-MLX-8bit", ["vocab.json", "merges.txt", "tokenizer_config.json"]))
+            case "qwen3-0.6b":
+                downloads.append(("aufklarer/Qwen3-ASR-CoreML", ["encoder.mlmodelc/**", "embedding.mlmodelc/**", "decoder_part1.mlmodelc/**", "decoder_part2.mlmodelc/**", "config.json"]))
+                downloads.append(("aufklarer/Qwen3-ASR-0.6B-MLX-4bit", ["vocab.json", "merges.txt", "tokenizer_config.json"]))
+            case "whisper":
+                downloads.append(("aufklarer/Whisper-Large-v3-Turbo-CoreML", ["MelSpectrogram.mlmodelc/**", "AudioEncoder.mlmodelc/**", "TextDecoder.mlmodelc/**", "TextDecoderContextPrefill.mlmodelc/**", "generation_config.json", "manifest.json", "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"]))
+            default:
+                throw NSError(domain: "course2md", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unsupported Apple model: \(name)"])
+            }
+            downloads.append(("aufklarer/Silero-VAD-v6.2.1-CoreML", ["silero_vad.mlmodelc/**", "config.json"]))
+            for (index, item) in downloads.enumerated() {
+                let directory = try HuggingFaceDownloader.getCacheDirectory(for: item.0)
+                try await HuggingFaceDownloader.downloadWeights(modelId: item.0, to: directory, additionalFiles: item.1, progressHandler: { fraction in
+                    progressLog((Double(index) + fraction) / Double(downloads.count), item.0)
+                })
+            }
+        }
+        return 0
+    } catch {
+        if errLen > 0 {
+            let message = "Apple model download failed (\(name)): \(error)"
+            message.withCString { _ = strncpy(errBuf, $0, errLen - 1) }
+            errBuf[errLen - 1] = 0
+        }
+        return -1
+    }
+}
+
 @_cdecl("c2m_asr_create")
 public func c2mAsrCreate(_ model: UnsafePointer<CChar>, _ errBuf: UnsafeMutablePointer<CChar>, _ errLen: Int) -> UnsafeMutableRawPointer? {
     let name = String(cString: model)

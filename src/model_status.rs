@@ -1,0 +1,702 @@
+//! Read-only cache evidence. Finding files is deliberately distinct from loading a model.
+use crate::config::AsrProvider;
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheState {
+    Missing,
+    Partial,
+    Cached,
+    Loaded,
+    Unsupported,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CachePart {
+    pub name: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub missing: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalModelStatus {
+    pub provider: AsrProvider,
+    pub model: String,
+    pub state: CacheState,
+    pub parts: Vec<CachePart>,
+    pub bytes: u64,
+    pub can_prepare: bool,
+    pub last_error: Option<String>,
+    pub loaded_at: Option<u64>,
+    pub fingerprint: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct Receipt {
+    fingerprint: String,
+    loaded_at: Option<u64>,
+    last_error: Option<String>,
+    version: String,
+}
+
+pub fn inspect(provider: AsrProvider, model: &str, root: &Path) -> Result<LocalModelStatus> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::config::cache_dir());
+    let apple_base = ["QWEN3_CACHE_DIR", "QWEN3_ASR_CACHE_DIR"]
+        .into_iter()
+        .find_map(|key| {
+            std::env::var_os(key)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| home.join("Library/Caches"))
+        .join("qwen3-speech");
+    let hf_base = ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"]
+        .into_iter()
+        .find_map(|key| {
+            std::env::var_os(key)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| {
+            std::env::var_os("HF_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".cache/huggingface"))
+                .join("hub")
+        });
+    let mut status = inspect_at(provider, model, root, &apple_base, &hf_base)?;
+    if let Ok(bytes) = fs::read(receipt_path(&status))
+        && let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes)
+    {
+        status.last_error = receipt.last_error;
+        if status.state == CacheState::Cached
+            && receipt.fingerprint == status.fingerprint
+            && receipt.version == env!("CARGO_PKG_VERSION")
+        {
+            status.loaded_at = receipt.loaded_at;
+            if receipt.loaded_at.is_some() {
+                status.state = CacheState::Loaded;
+            }
+        }
+    }
+    Ok(status)
+}
+
+/// Explicit roots make cache checks testable without inspecting the user's model directory.
+pub fn inspect_at(
+    provider: AsrProvider,
+    model: &str,
+    root: &Path,
+    apple_base: &Path,
+    hf_base: &Path,
+) -> Result<LocalModelStatus> {
+    let model = if model.trim().is_empty() {
+        "qwen3-1.7b"
+    } else {
+        model.trim()
+    };
+    let mut parts = Vec::new();
+    let supported = match provider {
+        AsrProvider::Cpu | AsrProvider::Gpu => model == "qwen3-1.7b",
+        AsrProvider::Coreml => ["qwen3-1.7b", "qwen3-0.6b", "whisper"].contains(&model),
+        AsrProvider::Npu => !model.is_empty(),
+        AsrProvider::Api => false,
+    };
+    if !supported {
+        return Ok(LocalModelStatus {
+            provider,
+            model: model.into(),
+            state: CacheState::Unsupported,
+            parts,
+            bytes: 0,
+            can_prepare: false,
+            last_error: None,
+            loaded_at: None,
+            fingerprint: String::new(),
+        });
+    }
+    match provider {
+        AsrProvider::Cpu | AsrProvider::Gpu => {
+            let files = super::llama_paths(root);
+            let path = files.model.parent().unwrap().to_path_buf();
+            let mut missing = Vec::new();
+            for file in [&files.model, &files.mmproj] {
+                if !super::file_complete(file) || !gguf_header(file) {
+                    missing.push(file.file_name().unwrap().to_string_lossy().into_owned());
+                }
+            }
+            parts.push(cache_part("Qwen3-ASR 1.7B Q8_0", path, missing)?);
+        }
+        AsrProvider::Coreml => {
+            match model {
+                "qwen3-1.7b" => parts.push(apple_part(
+                    apple_base,
+                    "aufklarer/Qwen3-ASR-1.7B-MLX-8bit",
+                    &[
+                        "config.json",
+                        "vocab.json",
+                        "merges.txt",
+                        "tokenizer_config.json",
+                    ],
+                    &[],
+                    true,
+                )?),
+                "qwen3-0.6b" => {
+                    parts.push(apple_part(
+                        apple_base,
+                        "aufklarer/Qwen3-ASR-CoreML",
+                        &["config.json"],
+                        &[
+                            "encoder.mlmodelc",
+                            "embedding.mlmodelc",
+                            "decoder_part1.mlmodelc",
+                            "decoder_part2.mlmodelc",
+                        ],
+                        false,
+                    )?);
+                    parts.push(apple_part(
+                        apple_base,
+                        "aufklarer/Qwen3-ASR-0.6B-MLX-4bit",
+                        &["vocab.json", "merges.txt", "tokenizer_config.json"],
+                        &[],
+                        true,
+                    )?);
+                }
+                "whisper" => parts.push(apple_part(
+                    apple_base,
+                    "aufklarer/Whisper-Large-v3-Turbo-CoreML",
+                    &[
+                        "generation_config.json",
+                        "tokenizer.json",
+                        "tokenizer_config.json",
+                    ],
+                    &[
+                        "MelSpectrogram.mlmodelc",
+                        "AudioEncoder.mlmodelc",
+                        "TextDecoder.mlmodelc",
+                        "TextDecoderContextPrefill.mlmodelc",
+                    ],
+                    false,
+                )?),
+                _ => unreachable!(),
+            }
+            parts.push(apple_part(
+                apple_base,
+                "aufklarer/Silero-VAD-v6.2.1-CoreML",
+                &["config.json"],
+                &["silero_vad.mlmodelc"],
+                false,
+            )?);
+        }
+        AsrProvider::Npu => {
+            let repo = crate::npu::resolve_npu_model(Some(model));
+            let root = if Path::new(&repo).is_absolute() {
+                PathBuf::from(&repo)
+            } else {
+                hf_base.join(format!("models--{}", repo.replace('/', "--")))
+            };
+            let path = if root.join("refs/main").is_file() {
+                let revision = fs::read_to_string(root.join("refs/main"))?;
+                let revision = revision.trim();
+                ensure!(
+                    !revision.is_empty()
+                        && revision
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                    "NPU 缓存版本记录无效"
+                );
+                root.join("snapshots").join(revision)
+            } else {
+                root
+            };
+            let files = files_under(&path)?;
+            let xml = files
+                .iter()
+                .filter(|file| file.extension().is_some_and(|extension| extension == "xml"))
+                .collect::<Vec<_>>();
+            let mut missing = Vec::new();
+            if xml.is_empty() {
+                missing.push("OpenVINO 模型 XML 和权重".into());
+            }
+            for file in xml {
+                if !nonempty(&file.with_extension("bin")) {
+                    missing.push(file.with_extension("bin").display().to_string());
+                }
+            }
+            parts.push(cache_part(&repo, path, missing)?);
+        }
+        AsrProvider::Api => unreachable!(),
+    }
+    let bytes = parts.iter().map(|part| part.bytes).sum();
+    let missing = parts.iter().any(|part| !part.missing.is_empty());
+    let state = if bytes == 0 {
+        CacheState::Missing
+    } else if missing {
+        CacheState::Partial
+    } else {
+        CacheState::Cached
+    };
+    let mut hash = Sha256::new();
+    hash.update(provider.as_str());
+    hash.update(model);
+    for part in &parts {
+        hash.update(part.path.to_string_lossy().as_bytes());
+        for file in files_under(&part.path)? {
+            let metadata = fs::metadata(&file)?;
+            hash.update(
+                file.strip_prefix(&part.path)
+                    .unwrap_or(&file)
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
+            hash.update(metadata.len().to_le_bytes());
+            hash.update(
+                metadata
+                    .modified()?
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .to_le_bytes(),
+            );
+        }
+    }
+    Ok(LocalModelStatus {
+        provider,
+        model: model.into(),
+        state,
+        parts,
+        bytes,
+        can_prepare: true,
+        last_error: None,
+        loaded_at: None,
+        fingerprint: format!("{:x}", hash.finalize()),
+    })
+}
+fn cache_part(name: &str, path: PathBuf, missing: Vec<String>) -> Result<CachePart> {
+    let bytes = files_under(&path)?
+        .into_iter()
+        .map(|path| fs::metadata(path).map(|metadata| metadata.len()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .sum();
+    Ok(CachePart {
+        name: name.into(),
+        path,
+        bytes,
+        missing,
+    })
+}
+fn apple_part(
+    base: &Path,
+    repo: &str,
+    files: &[&str],
+    bundles: &[&str],
+    weights: bool,
+) -> Result<CachePart> {
+    let old = base.join(repo.replace('/', "_"));
+    // Match speech-swift's directory choice exactly, then independently assess file
+    // completeness. Its legacy probe accepts bundle markers, but rejects missing shards.
+    let path = if apple_uses_legacy_cache(&old)? {
+        old
+    } else {
+        base.join("models").join(repo)
+    };
+    let mut missing = files
+        .iter()
+        .filter(|file| !nonempty(&path.join(file)))
+        .map(|file| (*file).into())
+        .collect::<Vec<String>>();
+    for bundle in bundles {
+        let payload = files_under(&path.join(bundle))?;
+        if !payload.iter().any(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "bin" || extension == "mil")
+                && nonempty(path)
+        }) {
+            missing.push(format!("{bundle} 的模型内容"));
+        }
+    }
+    if weights {
+        let index = path.join("model.safetensors.index.json");
+        if index.is_file() {
+            match fs::read(index)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| {
+                    value
+                        .get("weight_map")
+                        .and_then(|map| map.as_object())
+                        .cloned()
+                }) {
+                Some(map) if !map.is_empty() => {
+                    for file in map
+                        .values()
+                        .filter_map(|value| value.as_str())
+                        .collect::<BTreeSet<_>>()
+                    {
+                        if !safe_tensor(&path.join(file)) {
+                            missing.push(file.into());
+                        }
+                    }
+                }
+                _ => missing.push("有效的模型分片索引".into()),
+            }
+        } else if !files_under(&path)?.iter().any(|file| {
+            file.extension()
+                .is_some_and(|extension| extension == "safetensors")
+                && safe_tensor(file)
+        }) {
+            missing.push("完整的 safetensors 权重文件".into());
+        }
+    }
+    cache_part(repo, path, missing)
+}
+fn apple_uses_legacy_cache(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let entries = fs::read_dir(path)
+        .with_context(|| format!("无法读取模型缓存：{}", path.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    if !entries.iter().any(|entry| {
+        entry.path().extension().is_some_and(|extension| {
+            ["safetensors", "mlmodelc", "mlpackage"]
+                .iter()
+                .any(|value| extension == *value)
+        })
+    }) {
+        return Ok(false);
+    }
+    if let Ok(bytes) = fs::read(path.join("model.safetensors.index.json"))
+        && let Ok(index) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(map) = index.get("weight_map").and_then(|value| value.as_object())
+        && map.values().all(|value| value.is_string())
+        && map
+            .values()
+            .any(|value| !path.join(value.as_str().unwrap()).exists())
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+fn nonempty(path: &Path) -> bool {
+    path.is_file() && fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+}
+fn gguf_header(path: &Path) -> bool {
+    use std::io::Read;
+    let mut header = [0u8; 8];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok()
+        && &header[..4] == b"GGUF"
+        && matches!(u32::from_le_bytes(header[4..].try_into().unwrap()), 2 | 3)
+}
+fn safe_tensor(path: &Path) -> bool {
+    use std::io::Read;
+    let checked = || -> Result<bool> {
+        let mut file = fs::File::open(path)?;
+        let length = file.metadata()?.len();
+        let mut header = [0; 8];
+        file.read_exact(&mut header)?;
+        let size = u64::from_le_bytes(header);
+        ensure!(
+            size > 0 && size < 16 * 1024 * 1024 && size + 8 < length,
+            "权重头不完整"
+        );
+        let mut header = vec![0; size as usize];
+        file.read_exact(&mut header)?;
+        let value: serde_json::Value = serde_json::from_slice(&header)?;
+        let tensors = value.as_object().context("权重索引无效")?;
+        let mut count = 0;
+        for (key, tensor) in tensors {
+            if key == "__metadata__" {
+                continue;
+            }
+            let offsets = tensor
+                .get("data_offsets")
+                .and_then(|value| value.as_array())
+                .context("权重偏移无效")?;
+            ensure!(
+                offsets.len() == 2
+                    && offsets[1]
+                        .as_u64()
+                        .is_some_and(|end| end <= length - size - 8),
+                "权重文件不完整"
+            );
+            count += 1;
+        }
+        Ok(count > 0)
+    };
+    checked().unwrap_or(false)
+}
+fn files_under(root: &Path) -> Result<Vec<PathBuf>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut queue = vec![root.to_path_buf()];
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+    while let Some(path) = queue.pop() {
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("无法读取模型缓存：{}", path.display()))?;
+        if !seen.insert(canonical) {
+            continue;
+        }
+        if path.is_dir() {
+            for child in fs::read_dir(&path)? {
+                queue.push(child?.path());
+            }
+        } else if path.is_file() {
+            result.push(path);
+        }
+        ensure!(seen.len() < 20_000, "模型缓存包含过多文件，检查未完成");
+    }
+    result.sort();
+    Ok(result)
+}
+fn receipt_path(status: &LocalModelStatus) -> PathBuf {
+    let key = format!(
+        "{}:{}:{}",
+        status.provider.as_str(),
+        status.model,
+        status
+            .parts
+            .iter()
+            .map(|part| part.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("|")
+    );
+    crate::config::cache_dir()
+        .join("model-checks")
+        .join(format!("{:x}.json", Sha256::digest(key)))
+}
+pub fn record_result(status: &LocalModelStatus, loaded: bool, error: Option<String>) -> Result<()> {
+    let receipt = Receipt {
+        fingerprint: status.fingerprint.clone(),
+        loaded_at: loaded.then(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        }),
+        last_error: error,
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    crate::checkpoint::atomic_write(&receipt_path(status), &serde_json::to_vec(&receipt)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    fn roots() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+    fn inspect_model(root: &Path, provider: AsrProvider, model: &str) -> LocalModelStatus {
+        inspect_at(
+            provider,
+            model,
+            &root.join("gguf"),
+            &root.join("apple"),
+            &root.join("hub"),
+        )
+        .unwrap()
+    }
+    fn tensor(path: &Path, truncate: bool) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let header = br#"{"tensor":{"dtype":"U8","shape":[4],"data_offsets":[0,4]}}"#;
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(header).unwrap();
+        file.write_all(if truncate { &[0_u8; 2] } else { &[0_u8; 4] })
+            .unwrap();
+    }
+    fn apple_fixture(
+        base: &Path,
+        repo: &str,
+        weight: bool,
+        files: &[&str],
+        bundles: &[&str],
+    ) -> PathBuf {
+        let path = base.join("apple/models").join(repo);
+        fs::create_dir_all(&path).unwrap();
+        for file in files {
+            fs::write(path.join(file), "{}").unwrap();
+        }
+        for bundle in bundles {
+            fs::create_dir_all(path.join(bundle)).unwrap();
+            fs::write(path.join(bundle).join("model.mil"), "known fixture payload").unwrap();
+        }
+        if weight {
+            tensor(&path.join("model.safetensors"), false);
+        }
+        path
+    }
+    #[test]
+    fn inspection_does_not_create_directories_or_claim_an_empty_marker_is_ready() {
+        let root = roots();
+        let status = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert_eq!(status.state, CacheState::Missing);
+        assert_eq!(status.parts.len(), 2);
+        assert!(!root.path().join("apple").exists());
+        fs::create_dir_all(root.path().join("apple/aufklarer_Qwen3-ASR-1.7B-MLX-8bit")).unwrap();
+        let status = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert_eq!(status.state, CacheState::Missing);
+        assert!(
+            status.parts[0]
+                .path
+                .ends_with("models/aufklarer/Qwen3-ASR-1.7B-MLX-8bit")
+        );
+    }
+    #[test]
+    fn apple_weights_and_vad_are_separate_requirements_and_cache_is_not_a_load_test() {
+        let root = roots();
+        let main = apple_fixture(
+            root.path(),
+            "aufklarer/Qwen3-ASR-1.7B-MLX-8bit",
+            true,
+            &[
+                "config.json",
+                "vocab.json",
+                "merges.txt",
+                "tokenizer_config.json",
+            ],
+            &[],
+        );
+        let status = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert_eq!(status.state, CacheState::Partial);
+        assert!(status.parts[0].missing.is_empty());
+        assert!(!status.parts[1].missing.is_empty());
+        apple_fixture(
+            root.path(),
+            "aufklarer/Silero-VAD-v6.2.1-CoreML",
+            false,
+            &["config.json"],
+            &["silero_vad.mlmodelc"],
+        );
+        let cached = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert_eq!(cached.state, CacheState::Cached);
+        assert!(cached.loaded_at.is_none());
+        tensor(&main.join("model.safetensors"), true);
+        let partial = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert_eq!(partial.state, CacheState::Partial);
+        assert_ne!(partial.fingerprint, cached.fingerprint);
+    }
+    #[test]
+    fn missing_safetensor_shard_and_unsupported_model_remain_explicit() {
+        let root = roots();
+        let main = apple_fixture(
+            root.path(),
+            "aufklarer/Qwen3-ASR-1.7B-MLX-8bit",
+            true,
+            &[
+                "config.json",
+                "vocab.json",
+                "merges.txt",
+                "tokenizer_config.json",
+            ],
+            &[],
+        );
+        fs::write(
+            main.join("model.safetensors.index.json"),
+            r#"{"weight_map":{"a":"model.safetensors","b":"missing.safetensors"}}"#,
+        )
+        .unwrap();
+        let status = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert!(
+            status.parts[0]
+                .missing
+                .contains(&"missing.safetensors".into())
+        );
+        let unsupported = inspect_model(root.path(), AsrProvider::Cpu, "qwen3-0.6b");
+        assert_eq!(unsupported.state, CacheState::Unsupported);
+        assert!(!unsupported.can_prepare);
+    }
+    #[test]
+    fn legacy_directory_choice_matches_loader_before_cache_completeness_is_assessed() {
+        let root = roots();
+        let old = root.path().join("apple/aufklarer_Qwen3-ASR-1.7B-MLX-8bit");
+        tensor(&old.join("model.safetensors"), false);
+        fs::write(
+            old.join("model.safetensors.index.json"),
+            r#"{"weight_map":{"a":"model.safetensors","b":"missing.safetensors"}}"#,
+        )
+        .unwrap();
+        let missing_shard = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert!(
+            missing_shard.parts[0]
+                .path
+                .ends_with("models/aufklarer/Qwen3-ASR-1.7B-MLX-8bit")
+        );
+        tensor(&old.join("missing.safetensors"), false);
+        let complete_index = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert_eq!(complete_index.parts[0].path, old);
+        assert!(!complete_index.parts[0].missing.is_empty());
+
+        let old_vad = root.path().join("apple/aufklarer_Silero-VAD-v6.2.1-CoreML");
+        fs::create_dir_all(old_vad.join("silero_vad.mlmodelc")).unwrap();
+        let bundle_marker = inspect_model(root.path(), AsrProvider::Coreml, "qwen3-1.7b");
+        assert_eq!(bundle_marker.parts[1].path, old_vad);
+        assert!(!bundle_marker.parts[1].missing.is_empty());
+    }
+    #[test]
+    fn a_large_non_model_response_does_not_pass_gguf_cache_detection() {
+        let root = roots();
+        let files = super::super::llama_paths(&root.path().join("gguf"));
+        fs::create_dir_all(files.model.parent().unwrap()).unwrap();
+        for path in [&files.model, &files.mmproj] {
+            let file = fs::File::create(path).unwrap();
+            file.set_len(1_100_000).unwrap();
+        }
+        assert_eq!(
+            inspect_model(root.path(), AsrProvider::Cpu, "qwen3-1.7b").state,
+            CacheState::Partial
+        );
+        for path in [&files.model, &files.mmproj] {
+            let mut file = fs::OpenOptions::new().write(true).open(path).unwrap();
+            file.write_all(b"GGUF\x03\0\0\0").unwrap();
+        }
+        assert_eq!(
+            inspect_model(root.path(), AsrProvider::Cpu, "qwen3-1.7b").state,
+            CacheState::Cached
+        );
+    }
+    #[test]
+    fn npu_uses_the_recorded_hub_revision_and_checks_matching_weight_files() {
+        let root = roots();
+        let repo = root
+            .path()
+            .join("hub/models--OpenVINO--whisper-large-v3-turbo-int8-ov");
+        fs::create_dir_all(repo.join("refs")).unwrap();
+        fs::create_dir_all(repo.join("snapshots/abc123")).unwrap();
+        fs::write(repo.join("refs/main"), "abc123").unwrap();
+        fs::write(
+            repo.join("snapshots/abc123/openvino_encoder_model.xml"),
+            "<model/>",
+        )
+        .unwrap();
+        let partial = inspect_model(root.path(), AsrProvider::Npu, "whisper");
+        assert_eq!(partial.state, CacheState::Partial);
+        assert!(partial.parts[0].path.ends_with("snapshots/abc123"));
+        fs::write(
+            repo.join("snapshots/abc123/openvino_encoder_model.bin"),
+            "weights",
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_model(root.path(), AsrProvider::Npu, "whisper").state,
+            CacheState::Cached
+        );
+    }
+}

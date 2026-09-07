@@ -168,8 +168,57 @@ pub fn run_npu(
         return Ok(vec![]);
     }
 
-    // chunk 与 worker 脚本都放在临时目录（此前脚本写进用户的 out_dir/.workers/，
-    // 污染输出目录）；原子写避免崩溃留下半截脚本
+    let (tmp, mut child, stderr_tail, base) = start_model_worker(model_id)?;
+    let client = ureq::AgentBuilder::new().timeout(NPU_HTTP_TIMEOUT).build();
+
+    let r = crate::asr::run_chunks(wav, &segs, cp, tmp.path(), "npu asr", |_i, _seg, chunk| {
+        let req_body = serde_json::json!({
+            "path": chunk.to_string_lossy(),
+        });
+        let resp = client
+            .post(&format!("{base}/audio/transcriptions"))
+            .send_json(req_body)
+            .map_err(|e| anyhow::anyhow!("NPU 转写请求失败，请检查网络和服务配置 / Request failed; check your connection and service settings: {e}"))?;
+        let v: serde_json::Value = resp.into_json().map_err(|e| {
+            anyhow::anyhow!("NPU 无法解析服务响应 / Could not parse the service response: {e}")
+        })?;
+        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+            anyhow::bail!("NPU 识别失败 / NPU transcription failed: {e}");
+        }
+        let text = v["text"].as_str().unwrap_or("").trim().to_string();
+        let sanitized = crate::asr::sanitize_qwen_text(&text);
+        Ok((!sanitized.is_empty()).then_some(sanitized))
+    });
+
+    stop_model_worker(&mut child, &base);
+
+    let events = r.map_err(|e| {
+        let tail = stderr_tail.tail();
+        if tail.is_empty() {
+            e
+        } else {
+            e.context(format!(
+                "NPU 识别错误详情 / NPU transcription error details:\n{tail}"
+            ))
+        }
+    })?;
+    tracing::info!(
+        n = events.len(),
+        secs = format_args!("{:.1}", t0.elapsed().as_secs_f64()),
+        "npu asr done"
+    );
+    Ok(events)
+}
+
+fn start_model_worker(
+    model_id: &str,
+) -> Result<(
+    crate::runtime::TempWorkDir,
+    crate::runtime::ManagedChild,
+    crate::runtime::StderrTail,
+    String,
+)> {
+    let t0 = Instant::now();
     let tmp = crate::runtime::TempWorkDir::new("npu")?;
     let script_path = tmp.path().join("npu_worker.py");
     crate::checkpoint::atomic_write(&script_path, NPU_WORKER_SCRIPT.as_bytes())?;
@@ -202,34 +251,18 @@ pub fn run_npu(
     );
 
     crate::progress::stage("model-load", "done");
-    let client = ureq::AgentBuilder::new().timeout(NPU_HTTP_TIMEOUT).build();
+    Ok((tmp, child, stderr_tail, base))
+}
 
-    let r = crate::asr::run_chunks(wav, &segs, cp, tmp.path(), "npu asr", |_i, _seg, chunk| {
-        let req_body = serde_json::json!({
-            "path": chunk.to_string_lossy(),
-        });
-        let resp = client
-            .post(&format!("{base}/audio/transcriptions"))
-            .send_json(req_body)
-            .map_err(|e| anyhow::anyhow!("NPU 转写请求失败，请检查网络和服务配置 / Request failed; check your connection and service settings: {e}"))?;
-        let v: serde_json::Value = resp.into_json().map_err(|e| {
-            anyhow::anyhow!("NPU 无法解析服务响应 / Could not parse the service response: {e}")
-        })?;
-        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
-            anyhow::bail!("NPU 识别失败 / NPU transcription failed: {e}");
-        }
-        let text = v["text"].as_str().unwrap_or("").trim().to_string();
-        let sanitized = crate::asr::sanitize_qwen_text(&text);
-        Ok((!sanitized.is_empty()).then_some(sanitized))
-    });
-
+fn stop_model_worker(child: &mut crate::runtime::ManagedChild, base: &str) {
     // 优雅关闭：POST /shutdown → try_wait 轮询 ~2s → 未退再 SIGTERM 进程组
     // （避免 uv 衍生的孙子进程残留）→ 短等 → 仍未退由 ManagedChild Drop 兜底。
+    let client = ureq::AgentBuilder::new().timeout(NPU_HTTP_TIMEOUT).build();
     let _ = client
         .post(&format!("{base}/shutdown"))
         .timeout(SHUTDOWN_TIMEOUT)
         .send_json(serde_json::json!({}));
-    if !wait_exit(&mut child, SHUTDOWN_WAIT) {
+    if !wait_exit(child, SHUTDOWN_WAIT) {
         #[cfg(unix)]
         {
             let pid = child.id() as i32;
@@ -237,25 +270,15 @@ pub fn run_npu(
                 libc::kill(-pid, libc::SIGTERM);
             }
         }
-        let _ = wait_exit(&mut child, SIGTERM_WAIT);
+        let _ = wait_exit(child, SIGTERM_WAIT);
     }
+}
 
-    let events = r.map_err(|e| {
-        let tail = stderr_tail.tail();
-        if tail.is_empty() {
-            e
-        } else {
-            e.context(format!(
-                "NPU 识别错误详情 / NPU transcription error details:\n{tail}"
-            ))
-        }
-    })?;
-    tracing::info!(
-        n = events.len(),
-        secs = format_args!("{:.1}", t0.elapsed().as_secs_f64()),
-        "npu asr done"
-    );
-    Ok(events)
+/// Prepare the exact NPU model through the normal worker; no media is sent.
+pub fn prepare_npu_model(model_id: &str) -> Result<()> {
+    let (_temporary, mut child, _stderr, base) = start_model_worker(model_id)?;
+    stop_model_worker(&mut child, &base);
+    Ok(())
 }
 
 /// 非阻塞轮询等待子进程退出；true = 已在 timeout 内退出。

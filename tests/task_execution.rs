@@ -1,0 +1,902 @@
+//! End-to-end stdin task protocol, using real ffmpeg and isolated local files only.
+use course2md::{
+    artifact,
+    config::{AsrProvider, SlideMode, TranscriptSource},
+    execution::Request,
+    settings::ConfigFile,
+    timeline::TranscriptEvent,
+};
+use std::{
+    io::Write,
+    path::Path,
+    process::{Command, Output, Stdio},
+};
+
+fn request(root: &Path, source: &Path) -> Request {
+    let mut config = ConfigFile::default();
+    config.defaults.formats = Some(vec![]);
+    config.defaults.provider = Some(AsrProvider::Api);
+    config.defaults.transcript_source = Some(TranscriptSource::Subtitle);
+    config.defaults.slide_mode = Some(SlideMode::First);
+    Request {
+        schema: 1,
+        operation: Default::default(),
+        task_id: "task-one".into(),
+        course_id: "course-one".into(),
+        version_id: "version-one".into(),
+        source: source.display().to_string(),
+        source_id: format!(
+            "local:sha256:{}",
+            course2md::execution::file_digest(source).unwrap()
+        ),
+        title: "我确认的笔记名称".into(),
+        author: String::new(),
+        duration: 1.,
+        subtitle: None,
+        subtitle_events: Some(vec![TranscriptEvent {
+            start: 0.,
+            end: 1.,
+            text: "这里是已选字幕中的实际正文。".into(),
+            raw: None,
+        }]),
+        config,
+        allow_unauthenticated_asr: false,
+        work_dir: root.join("work"),
+        course_dir: root.join("course"),
+        control_path: None,
+        service_versions: Default::default(),
+    }
+}
+fn run(root: &Path, request: &Request) -> Output {
+    let config = root.join("config/course2md");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "[broken").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_course2md"))
+        .arg("run-task")
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("COURSE2MD_ASR_API_KEY", "environment-key-must-not-be-used")
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(request).unwrap())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+fn events(output: &Output) -> Vec<serde_json::Value> {
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn scanning_finishes_before_a_slow_screenshot_reports_zero_of_its_real_total() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::fs::PermissionsExt,
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+    let (Some(ffmpeg), Some(python)) = (
+        course2md::runtime::which("ffmpeg"),
+        course2md::runtime::which("python3"),
+    ) else {
+        return;
+    };
+    if course2md::runtime::which("ffprobe").is_none() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let video = root.path().join("flat-video.mp4");
+    let generated = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x32:r=1",
+            "-t",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&video)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let gate = root.path().join("extract-started");
+    let release = root.path().join("extract-release");
+    let wrapper = bin.join("ffmpeg");
+    let py_literal = |path: &Path| serde_json::to_string(path.to_str().unwrap()).unwrap();
+    std::fs::write(&wrapper,format!("#!{}\nimport os,sys,time,pathlib\nif '-frames:v' in sys.argv:\n    pathlib.Path({}).write_text('started')\n    deadline=time.monotonic()+10\n    while not pathlib.Path({}).exists() and time.monotonic()<deadline:\n        time.sleep(0.01)\nos.execv({},[{},*sys.argv[1:]])\n",python.display(),py_literal(&gate),py_literal(&release),py_literal(&ffmpeg),py_literal(&ffmpeg))).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let mut request = request(root.path(), &video);
+    request.duration = 18.;
+    request.config.defaults.sample_interval = Some(1.);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_course2md"))
+        .arg("run-task")
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let value: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if tx.send(value).is_err() {
+                break;
+            }
+        }
+    });
+    let mut observed = Vec::new();
+    loop {
+        let event = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("new screenshot progress must be emitted before ffmpeg finishes");
+        let initial = event["type"] == "progress" && event["stage"] == "scenes/extract";
+        if initial {
+            assert_eq!(event["current"], 0);
+            assert_eq!(event["total"], 1);
+        }
+        observed.push(event);
+        if initial {
+            break;
+        }
+    }
+    assert!(
+        observed
+            .iter()
+            .any(|event| event["stage"] == "scenes/scan" && event["status"] == "done")
+    );
+    let scan = observed
+        .iter()
+        .rev()
+        .find(|event| event["stage"] == "scenes/scan" && event["type"] == "progress")
+        .unwrap();
+    assert_eq!(scan["current"], 18);
+    assert_eq!(
+        scan["total"], 0,
+        "duration-derived estimates are not actual sample totals"
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !gate.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        gate.exists(),
+        "real screenshot subprocess should now be blocked at the gate"
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    for event in rx.try_iter() {
+        assert!(
+            !(event["stage"] == "scenes/extract"
+                && (event["current"] == 1 || event["status"] == "done")),
+            "unfinished ffmpeg output must not count as a saved screenshot"
+        );
+        observed.push(event);
+    }
+    std::fs::write(&release, b"continue").unwrap();
+    let output = child.wait_with_output().unwrap();
+    reader.join().unwrap();
+    observed.extend(rx.try_iter());
+    assert!(
+        output.status.success(),
+        "{observed:#?}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        observed
+            .iter()
+            .any(|event| event["stage"] == "scenes/extract"
+                && event["current"] == 1
+                && event["total"] == 1)
+    );
+    assert!(
+        observed
+            .iter()
+            .any(|event| event["stage"] == "scenes/extract" && event["status"] == "done")
+    );
+    assert!(!observed.iter().any(|event| event["stage"] == "scenes"));
+}
+
+#[test]
+fn explicit_subtitles_zero_exports_and_confirmed_title_survive_real_conversion_and_resume() {
+    if course2md::runtime::which("ffmpeg").is_none()
+        || course2md::runtime::which("ffprobe").is_none()
+    {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let video = root.path().join("different-original-name.mp4");
+    let make = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=320x240:r=1",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&video)
+        .output()
+        .unwrap();
+    assert!(
+        make.status.success(),
+        "{}",
+        String::from_utf8_lossy(&make.stderr)
+    );
+    let mut request = request(root.path(), &video);
+    let first = run(root.path(), &request);
+    let first_events = events(&first);
+    assert!(first.status.success(), "{first_events:#?}");
+    let done = first_events
+        .iter()
+        .find(|event| event["type"] == "done")
+        .unwrap();
+    assert_eq!(done["title"], request.title);
+    assert_eq!(done["outputs"], serde_json::json!([]));
+    assert!(
+        !first_events
+            .iter()
+            .any(|event| event["stage"] == "transcribe" || event["stage"] == "audio")
+    );
+    let version = request.course_dir.join("versions/version-one");
+    let manifest = artifact::read_manifest(&version.join("manifest.json")).unwrap();
+    assert!(!manifest.frames.is_empty());
+    artifact::validate_version(&version, &manifest).unwrap();
+    let original = std::fs::read(version.join("document.json")).unwrap();
+    assert!(String::from_utf8_lossy(&original).contains("这里是已选字幕中的实际正文"));
+    let resumed = run(root.path(), &request);
+    assert!(resumed.status.success(), "{:?}", events(&resumed));
+    assert_eq!(
+        std::fs::read(version.join("document.json")).unwrap(),
+        original
+    );
+    request.title = "后来在添加页填写的不同标题".into();
+    assert!(!run(root.path(), &request).status.success());
+    assert_eq!(
+        std::fs::read(version.join("document.json")).unwrap(),
+        original
+    );
+    let persisted = std::fs::read_to_string(request.work_dir.join("task-identity.json")).unwrap();
+    assert!(!persisted.contains("environment-key-must-not-be-used"));
+}
+
+#[test]
+fn broken_video_preserves_readable_subtitles_as_partial_note_without_phantom_images() {
+    if course2md::runtime::which("ffmpeg").is_none()
+        || course2md::runtime::which("ffprobe").is_none()
+    {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let video = root.path().join("broken.mp4");
+    std::fs::write(&video, b"broken media").unwrap();
+    let request = request(root.path(), &video);
+    let output = run(root.path(), &request);
+    let observed = events(&output);
+    assert!(output.status.success(), "{observed:#?}");
+    let manifest = artifact::read_manifest(
+        &request
+            .course_dir
+            .join("versions/version-one/manifest.json"),
+    )
+    .unwrap();
+    assert!(manifest.partial);
+    assert!(manifest.frames.is_empty());
+    assert_eq!(
+        manifest.outcomes.screenshots.status,
+        artifact::Status::Failed
+    );
+    let body =
+        std::fs::read_to_string(request.course_dir.join("versions/version-one/course.md")).unwrap();
+    assert!(body.contains("这里是已选字幕"));
+    assert!(!body.contains("![]"));
+    assert!(!body.contains("本段无语音"));
+}
+
+#[test]
+fn missing_frozen_cloud_credentials_fail_before_download_and_ignore_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("local.mp4");
+    std::fs::write(&source, b"input").unwrap();
+    let mut request = request(root.path(), &source);
+    request.source = "https://example.invalid/video".into();
+    request.source_id = "online:example:video".into();
+    request.subtitle_events = None;
+    request.config.defaults.transcript_source = Some(TranscriptSource::Asr);
+    let output = run(root.path(), &request);
+    let observed = events(&output);
+    assert!(!output.status.success());
+    assert!(!observed.iter().any(|event| event["stage"] == "download"));
+    assert!(observed.iter().any(|event| {
+        event["type"] == "error"
+            && event["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("API key")
+    }));
+    assert!(!request.work_dir.join("media.mp4").exists());
+    assert!(!request.course_dir.join("current.json").exists());
+}
+
+#[test]
+fn changed_local_source_is_rejected_before_using_the_confirmed_subtitles() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("changed.mp4");
+    std::fs::write(&source, b"confirmed content").unwrap();
+    let request = request(root.path(), &source);
+    std::fs::write(&source, b"replacement content").unwrap();
+    let result = run(root.path(), &request);
+    assert!(!result.status.success());
+    let observed = events(&result);
+    assert!(observed.iter().any(|event| {
+        event["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("视频文件已在读取后发生变化"))
+    }));
+    assert!(!request.course_dir.join("current.json").exists());
+}
+
+struct MockAi {
+    url: String,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl MockAi {
+    fn new() -> Self {
+        Self::respond_with(|number, body| {
+            if number == 0 {
+                return None; // Request was received, but its response is lost.
+            }
+            let is_polish = body["messages"][0]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("segments");
+            let content = if is_polish {
+                serde_json::json!({"segments":[{"id":0,"text":"第一段已经校对。"},{"id":1,"text":"第二段已经校对。"}]})
+            } else {
+                serde_json::json!({"tldr":"这是一份独立生成的摘要。","key_points":["实际要点"],"outline":[{"t":0,"title":"开头","detail":"实际内容"}]})
+            };
+            Some((
+                200,
+                serde_json::json!({"choices":[{"message":{"content":content.to_string()}}]}),
+            ))
+        })
+    }
+    fn respond_with(
+        respond: impl Fn(usize, &serde_json::Value) -> Option<(u16, serde_json::Value)> + Send + 'static,
+    ) -> Self {
+        use std::{
+            io::Read,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+            },
+            time::Duration,
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = bodies.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (count, shutdown) = (calls.clone(), stop.clone());
+        let worker = std::thread::spawn(move || {
+            while !shutdown.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut data = Vec::new();
+                let mut buffer = [0u8; 4096];
+                let (header_end, length) = loop {
+                    let size = stream.read(&mut buffer).unwrap();
+                    if size == 0 {
+                        return;
+                    }
+                    data.extend_from_slice(&buffer[..size]);
+                    if let Some(index) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&data[..index]);
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.split_once(':')
+                                    .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap();
+                        break (index + 4, length);
+                    }
+                };
+                while data.len() < header_end + length {
+                    let size = stream.read(&mut buffer).unwrap();
+                    if size == 0 {
+                        return;
+                    }
+                    data.extend_from_slice(&buffer[..size]);
+                }
+                let number = count.fetch_add(1, Ordering::SeqCst);
+                let body: serde_json::Value =
+                    serde_json::from_slice(&data[header_end..header_end + length]).unwrap();
+                received.lock().unwrap().push(body.clone());
+                let Some((status, response)) = respond(number, &body) else {
+                    continue;
+                };
+                let response = serde_json::to_vec(&response).unwrap();
+                write!(stream,"HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",response.len()).unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        });
+        Self {
+            url,
+            calls,
+            bodies,
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+impl Drop for MockAi {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
+    }
+}
+
+fn summary_response() -> serde_json::Value {
+    serde_json::json!({"choices":[{"message":{"content":serde_json::json!({"tldr":"这份摘要来自保留的正文。","key_points":["正文内容"],"outline":[{"t":0,"title":"开头","detail":"正文内容"}]}).to_string()}}]})
+}
+
+#[test]
+fn summary_only_reprocessing_retries_known_failure_once_without_repeating_source_work() {
+    use std::sync::atomic::Ordering;
+    if course2md::runtime::which("ffmpeg").is_none()
+        || course2md::runtime::which("ffprobe").is_none()
+    {
+        return;
+    }
+    let mock = MockAi::respond_with(|number, _| {
+        if number < 2 {
+            Some((
+                400,
+                serde_json::json!({"error":{"message":"Invalid model; private-task-key must not be copied"}}),
+            ))
+        } else {
+            Some((200, summary_response()))
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("video.mp4");
+    std::fs::write(&source, b"broken video, readable selected subtitles").unwrap();
+    let mut initial = request(root.path(), &source);
+    initial.config.defaults.formats = Some(vec![course2md::config::OutputFormat::Html]);
+    initial.config.llm.enabled = false;
+    initial.config.llm.summarize = true;
+    initial.config.llm.base_url = mock.url.clone();
+    initial.config.llm.model = "summary-model".into();
+    initial.config.llm.api_key = "private-task-key".into();
+    initial
+        .service_versions
+        .insert("llm".into(), "service-v1".into());
+    let first = run(root.path(), &initial);
+    assert!(first.status.success(), "{:?}", events(&first));
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        1,
+        "an arbitrary HTTP 400 must not change and resend the payload"
+    );
+    let base = initial.course_dir.join("versions/version-one");
+    let first_manifest = artifact::read_manifest(&base.join("manifest.json")).unwrap();
+    assert_eq!(
+        first_manifest.outcomes.summary.status,
+        artifact::Status::Failed
+    );
+    assert_eq!(
+        first_manifest.outcomes.exports["html"].status,
+        artifact::Status::Succeeded
+    );
+    let reason = first_manifest.outcomes.summary.message.as_deref().unwrap();
+    assert!(reason.contains("HTTP 400"));
+    assert!(!reason.contains(" / ") && !reason.contains("private-task-key"));
+    std::fs::write(
+        base.join("course.md"),
+        "# 我的人工补充\n\n旧版本不能被补摘要覆盖。\n",
+    )
+    .unwrap();
+    let original_files = std::fs::read_dir(&base)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|p| p.is_file())
+        .map(|p| {
+            let bytes = std::fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect::<Vec<_>>();
+    std::fs::remove_file(&source).unwrap();
+    let mut retry = initial.clone();
+    retry.task_id = "summary-retry".into();
+    retry.version_id = "summary-retry".into();
+    retry.work_dir = root.path().join("retry-work");
+    retry.operation = course2md::execution::Operation::Reprocess {
+        base_version_dir: base.clone(),
+        components: vec!["summary".into()],
+        prior_work_dir: Some(initial.work_dir.clone()),
+    };
+    let second = run(root.path(), &retry);
+    let second_events = events(&second);
+    assert!(second.status.success(), "{second_events:#?}");
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        2,
+        "the selected known-failed summary must be attempted again"
+    );
+    assert!(
+        second_events
+            .iter()
+            .any(|event| event["type"] == "stage" && event["stage"] == "summary")
+    );
+    assert!(!second_events.iter().any(|event| {
+        ["audio", "transcribe", "llm", "download", "scenes"]
+            .iter()
+            .any(|stage| event["stage"] == *stage)
+            || event["stage"]
+                .as_str()
+                .is_some_and(|stage| stage.starts_with("scenes/"))
+    }));
+    let receipt = course2md::dispatch::receipts(&retry.work_dir)
+        .unwrap()
+        .remove(0);
+    assert_eq!(receipt.attempt, 2);
+    assert!(receipt.retry_authorized.is_none());
+    let resumed = run(root.path(), &retry);
+    assert!(resumed.status.success(), "{:?}", events(&resumed));
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        2,
+        "normal continuation must not renew an explicit retry"
+    );
+    let mut final_retry = retry.clone();
+    final_retry.task_id = "summary-final".into();
+    final_retry.version_id = "summary-final".into();
+    final_retry.work_dir = root.path().join("final-work");
+    final_retry.operation = course2md::execution::Operation::Reprocess {
+        base_version_dir: initial.course_dir.join("versions/summary-retry"),
+        components: vec!["summary".into()],
+        prior_work_dir: Some(retry.work_dir.clone()),
+    };
+    let third = run(root.path(), &final_retry);
+    assert!(third.status.success(), "{:?}", events(&third));
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
+    let final_dir = initial.course_dir.join("versions/summary-final");
+    let manifest = artifact::read_manifest(&final_dir.join("manifest.json")).unwrap();
+    assert_eq!(
+        manifest.outcomes.summary.status,
+        artifact::Status::Succeeded
+    );
+    let document: artifact::Document =
+        serde_json::from_slice(&std::fs::read(final_dir.join("document.json")).unwrap()).unwrap();
+    assert_eq!(document.summary.unwrap().tldr, "这份摘要来自保留的正文。");
+    for (path, bytes) in original_files {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    let bodies = mock.bodies.lock().unwrap();
+    assert!(
+        bodies
+            .iter()
+            .all(|body| body.get("response_format").is_some())
+    );
+    assert_eq!(bodies[0], bodies[1]);
+    assert_eq!(bodies[1], bodies[2]);
+}
+
+#[test]
+fn only_explicit_response_format_rejection_allows_one_compatible_summary_request() {
+    use std::sync::atomic::Ordering;
+    if course2md::runtime::which("ffmpeg").is_none()
+        || course2md::runtime::which("ffprobe").is_none()
+    {
+        return;
+    }
+    let mock = MockAi::respond_with(|number, _| {
+        if number == 0 {
+            Some((
+                422,
+                serde_json::json!({"error":{"param":"response_format","code":"unsupported_parameter","message":"Unsupported response_format; private-task-key"}}),
+            ))
+        } else {
+            Some((200, summary_response()))
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("video.mp4");
+    std::fs::write(&source, b"broken video").unwrap();
+    let mut initial = request(root.path(), &source);
+    initial.config.llm.enabled = false;
+    initial.config.llm.summarize = true;
+    initial.config.llm.base_url = mock.url.clone();
+    initial.config.llm.model = "summary-model".into();
+    let first = run(root.path(), &initial);
+    assert!(first.status.success(), "{:?}", events(&first));
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+    let bodies = mock.bodies.lock().unwrap();
+    assert!(bodies[0].get("response_format").is_some());
+    assert!(bodies[1].get("response_format").is_none());
+    let manifest = artifact::read_manifest(
+        &initial
+            .course_dir
+            .join("versions/version-one/manifest.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.outcomes.summary.status,
+        artifact::Status::Succeeded
+    );
+    for receipt in course2md::dispatch::receipts(&initial.work_dir).unwrap() {
+        assert!(
+            !serde_json::to_string(&receipt)
+                .unwrap()
+                .contains("private-task-key")
+        );
+    }
+}
+
+#[test]
+fn real_http_uncertainty_requires_exact_authorization_and_reprocessing_never_repeats_asr() {
+    use std::sync::atomic::Ordering;
+    if course2md::runtime::which("ffmpeg").is_none()
+        || course2md::runtime::which("ffprobe").is_none()
+    {
+        return;
+    }
+    let mock = MockAi::new();
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("unreadable-video.mp4");
+    std::fs::write(&source, b"broken").unwrap();
+    let mut original = request(root.path(), &source);
+    original.duration = 10.;
+    original.subtitle_events = Some(vec![
+        TranscriptEvent {
+            start: 0.,
+            end: 1.,
+            text: "第一段原文。".into(),
+            raw: None,
+        },
+        TranscriptEvent {
+            start: 6.,
+            end: 7.,
+            text: "第二段原文。".into(),
+            raw: None,
+        },
+    ]);
+    original.config.llm.enabled = true;
+    original.config.llm.base_url = mock.url.clone();
+    original.config.llm.model = "test-model".into();
+    original.config.llm.api_key = "private-task-key".into();
+    original
+        .service_versions
+        .insert("llm".into(), "ai-v1".into());
+    let first = run(root.path(), &original);
+    let first_events = events(&first);
+    assert!(first.status.success(), "{first_events:#?}");
+    assert!(
+        first_events
+            .iter()
+            .any(|event| event["type"] == "blocked" && event["reason"] == "uncertain")
+    );
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+    let receipt = course2md::dispatch::receipts(&original.work_dir)
+        .unwrap()
+        .remove(0);
+    assert_eq!(receipt.state, course2md::dispatch::State::Uncertain);
+    assert!(receipt.description.contains("00:00–00:07"));
+    assert!(!String::from_utf8_lossy(&first.stdout).contains("private-task-key"));
+    let base = original.course_dir.join("versions/version-one");
+    let untouched = std::fs::read(base.join("document.json")).unwrap();
+    let mut retry = original.clone();
+    retry.task_id = "retry-polish".into();
+    retry.version_id = "retry-polish".into();
+    retry.work_dir = root.path().join("retry-work");
+    retry.control_path = Some(retry.work_dir.join("control.json"));
+    retry.operation = course2md::execution::Operation::Reprocess {
+        base_version_dir: base.clone(),
+        components: vec!["proofreading".into()],
+        prior_work_dir: Some(original.work_dir.clone()),
+    };
+    std::fs::create_dir_all(&retry.work_dir).unwrap();
+    std::fs::write(
+        retry.control_path.as_ref().unwrap(),
+        serde_json::to_vec(&serde_json::json!({"intent":"run","resend":[receipt.request_id]}))
+            .unwrap(),
+    )
+    .unwrap();
+    let second = run(root.path(), &retry);
+    let observed = events(&second);
+    assert!(second.status.success(), "{observed:#?}");
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+    assert!(
+        !observed
+            .iter()
+            .any(|event| event["stage"] == "transcribe" || event["stage"] == "download")
+    );
+    let updated =
+        artifact::read_manifest(&retry.course_dir.join("versions/retry-polish/manifest.json"))
+            .unwrap();
+    assert_eq!(
+        updated.outcomes.proofreading.status,
+        artifact::Status::Succeeded
+    );
+    assert_eq!(
+        std::fs::read(base.join("document.json")).unwrap(),
+        untouched
+    );
+    // Summary is independent of proofreading and does not need the original media anymore.
+    std::fs::remove_file(&source).unwrap();
+    let mut summary = retry.clone();
+    summary.task_id = "summary-only".into();
+    summary.version_id = "summary-only".into();
+    summary.work_dir = root.path().join("summary-work");
+    summary.control_path = None;
+    summary.config.llm.enabled = false;
+    summary.operation = course2md::execution::Operation::Reprocess {
+        base_version_dir: retry.course_dir.join("versions/retry-polish"),
+        components: vec!["summary".into()],
+        prior_work_dir: None,
+    };
+    let third = run(root.path(), &summary);
+    assert!(third.status.success(), "{:?}", events(&third));
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
+    let manifest = artifact::read_manifest(
+        &summary
+            .course_dir
+            .join("versions/summary-only/manifest.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.outcomes.summary.status,
+        artifact::Status::Succeeded
+    );
+}
+
+#[test]
+fn export_only_recovery_uses_the_saved_version_after_source_and_subtitle_are_gone() {
+    use course2md::config::OutputFormat;
+    if course2md::runtime::which("ffmpeg").is_none()
+        || course2md::runtime::which("ffprobe").is_none()
+    {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("video.mp4");
+    std::fs::write(&source, b"broken").unwrap();
+    let original = request(root.path(), &source);
+    assert!(run(root.path(), &original).status.success());
+    let base = original.course_dir.join("versions/version-one");
+    let pointer = std::fs::read(original.course_dir.join("current.json")).unwrap();
+    let mut export = original.clone();
+    export.task_id = "exports".into();
+    export.version_id = "unused-new-body".into();
+    export.work_dir = root.path().join("export-work");
+    export.subtitle_events = None;
+    export.subtitle = Some(root.path().join("deleted-subtitles.srt"));
+    export.operation = course2md::execution::Operation::Reprocess {
+        base_version_dir: base,
+        components: vec!["exports".into()],
+        prior_work_dir: None,
+    };
+    export.config.defaults.formats = Some(vec![
+        OutputFormat::Md,
+        OutputFormat::Html,
+        OutputFormat::Json,
+    ]);
+    for attempt in 0..2 {
+        if attempt == 1 {
+            std::fs::remove_file(&source).unwrap();
+        }
+        let result = run(root.path(), &export);
+        let events = events(&result);
+        assert!(result.status.success(), "{events:#?}");
+        let done = events.iter().find(|event| event["type"] == "done").unwrap();
+        assert_eq!(done["partial"], false);
+        assert_eq!(done["outputs"].as_array().unwrap().len(), 3);
+    }
+    assert_eq!(
+        std::fs::read(original.course_dir.join("current.json")).unwrap(),
+        pointer
+    );
+    assert!(
+        !original
+            .course_dir
+            .join("versions/unused-new-body")
+            .exists()
+    );
+}
+
+#[test]
+fn relocation_updates_owned_paths_only_after_verifying_the_copy() {
+    let root = tempfile::tempdir().unwrap();
+    let old = root.path().join("old");
+    let new = root.path().join("new");
+    std::fs::create_dir_all(old.join("work")).unwrap();
+    std::fs::create_dir_all(new.join("work")).unwrap();
+    let identity = serde_json::json!({"source":old.join("source.mp4"),"config":{"url":old.join("source.mp4"),"out_root":old.join("notes"),"out_dir":old.join("work"),"model_dir":old.join("models")}});
+    for path in [&old, &new] {
+        std::fs::write(
+            path.join("work/task-identity.json"),
+            serde_json::to_vec(&identity).unwrap(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        course2md::execution::relocate_work_bindings(&old, &new).unwrap(),
+        1
+    );
+    let changed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(new.join("work/task-identity.json")).unwrap())
+            .unwrap();
+    assert_eq!(changed["source"], identity["source"]);
+    assert_eq!(changed["config"]["url"], identity["config"]["url"]);
+    assert_eq!(
+        changed["config"]["out_dir"],
+        serde_json::json!(new.join("work"))
+    );
+    assert_eq!(
+        changed["config"]["model_dir"],
+        serde_json::json!(new.join("models"))
+    );
+    assert_eq!(
+        course2md::execution::relocate_work_bindings(&old, &new).unwrap(),
+        0
+    );
+    std::fs::write(new.join("work/task-identity.json"), b"{\"different\":true}").unwrap();
+    assert!(course2md::execution::relocate_work_bindings(&old, &new).is_err());
+}

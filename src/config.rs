@@ -1,4 +1,4 @@
-use anyhow::Result as AnyhowResult;
+use anyhow::{Context, Result as AnyhowResult};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,28 @@ pub const DEFAULT_OUT_DIR: &str = "out";
 /// 注意：没有证据表明某个非零层数在 AMD/ROCm 核显上稳定（issue #12 复测结论），
 /// 因此不设平台差异化默认——Linux+AMD 只做风险警告（pipeline.rs），由用户手动降载。
 pub const DEFAULT_GPU_LAYERS: u32 = 99;
+
+/// Accept a service root or its exact supported endpoint, never double-append paths.
+pub fn asr_endpoint(api: &crate::settings::AsrApi) -> AnyhowResult<String> {
+    let base = api.base_url.trim().trim_end_matches('/');
+    let suffix = match api.mode {
+        crate::settings::AsrApiMode::Transcriptions => "/audio/transcriptions",
+        crate::settings::AsrApiMode::Chat => "/chat/completions",
+    };
+    let other = match api.mode {
+        crate::settings::AsrApiMode::Transcriptions => "/chat/completions",
+        crate::settings::AsrApiMode::Chat => "/audio/transcriptions",
+    };
+    anyhow::ensure!(
+        !base.ends_with(other),
+        "服务地址与所选接口类型不一致 / Service endpoint and protocol do not match"
+    );
+    Ok(if base.ends_with(suffix) {
+        base.to_string()
+    } else {
+        format!("{base}{suffix}")
+    })
+}
 
 /// 云端 STT API key 环境变量：新名 `COURSE2MD_ASR_API_KEY` 优先，
 /// `OPENROUTER_API_KEY` 仅作兼容回落（旧文档/脚本中已存在）。
@@ -124,7 +146,7 @@ impl fmt::Display for OutputFormat {
 }
 
 /// 运行期管线配置（由 CLI 参数归一而来）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     pub url: String,
     pub out_dir: PathBuf,
@@ -164,7 +186,7 @@ pub struct PipelineConfig {
 }
 
 /// 感兴趣区域；坐标可为像素或比例（0.0-1.0）。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Roi {
     pub x1: f64,
     pub y1: f64,
@@ -265,8 +287,8 @@ impl PipelineConfig {
             self.similarity
         );
         anyhow::ensure!(
-            self.sample_interval > 0.0,
-            "--sample-interval 必须 > 0 秒 / must be greater than 0 seconds (received {})",
+            self.sample_interval >= 0.2,
+            "--sample-interval 必须 >= 0.2 秒 / must be at least 0.2 seconds (received {})",
             self.sample_interval
         );
         anyhow::ensure!(
@@ -296,10 +318,6 @@ impl PipelineConfig {
             self.max_height
         );
         anyhow::ensure!(
-            !self.formats.is_empty(),
-            "--formats 不能为空 / Choose at least one output format: md,html,json"
-        );
-        anyhow::ensure!(
             self.gpu_layers <= 99,
             "gpu_layers 必须在 0..=99（收到 {}）",
             self.gpu_layers
@@ -310,6 +328,14 @@ impl PipelineConfig {
 
     /// 仅在确实需要语音识别时验证后端配置；字幕路径不依赖 ASR。
     pub fn validate_asr(&self) -> AnyhowResult<()> {
+        self.validate_asr_with_auth(true, true)
+    }
+
+    pub fn validate_asr_with_auth(
+        &self,
+        require_key: bool,
+        allow_environment: bool,
+    ) -> AnyhowResult<()> {
         // provider × 模型兼容性：静默忽略用户指定的模型属于静默错误结果
         if let Some(m) = self
             .asr_model
@@ -321,15 +347,31 @@ impl PipelineConfig {
             match self.provider {
                 AsrProvider::Gpu | AsrProvider::Cpu => {
                     anyhow::ensure!(
-                        lower.contains("qwen"),
-                        "provider {:?} 只支持 qwen3 系模型 / supports only Qwen3 models.
-                         Whisper 请使用兼容后端 / For Whisper, select a compatible backend: coreml, npu or api",
+                        matches!(
+                            lower.as_str(),
+                            "qwen3"
+                                | "qwen3-1.7b"
+                                | "qwen3-asr-1.7b"
+                                | "qwen3-1.7b-gguf"
+                                | "qwen3-asr-1.7b-q8_0.gguf"
+                        ),
+                        "provider {:?} 当前使用 Qwen3-ASR-1.7B Q8_0；请选择该模型 / This provider currently supports Qwen3-ASR-1.7B Q8_0 only.",
                         self.provider
                     );
                 }
                 AsrProvider::Coreml => {
                     anyhow::ensure!(
-                        lower.contains("qwen") || lower.contains("whisper"),
+                        matches!(
+                            lower.as_str(),
+                            "qwen"
+                                | "qwen3"
+                                | "qwen3-1.7b"
+                                | "qwen3-asr-1.7b"
+                                | "qwen3-0.6b"
+                                | "qwen3-asr-0.6b"
+                                | "whisper"
+                                | "whisper-large-v3-turbo"
+                        ),
                         "provider coreml 支持的模型 / supported models: qwen3-1.7b, qwen3-0.6b, whisper (received {m:?})"
                     );
                 }
@@ -345,8 +387,21 @@ impl PipelineConfig {
 
         // api 后端：key 缺失时立即报错，而不是切完音频才发现
         if self.provider == AsrProvider::Api {
+            let endpoint = url::Url::parse(&asr_endpoint(&self.asr_api)?).context(
+                "请输入包含 http:// 或 https:// 的语音服务地址 / Invalid speech service URL",
+            )?;
             anyhow::ensure!(
-                !self.asr_api.api_key.trim().is_empty() || asr_api_key_from_env().is_some(),
+                matches!(endpoint.scheme(), "http" | "https") && endpoint.host_str().is_some(),
+                "请输入包含 http:// 或 https:// 的语音服务地址 / Invalid speech service URL"
+            );
+            anyhow::ensure!(
+                !self.asr_api.model.trim().is_empty(),
+                "请输入语音服务提供的模型 ID / Speech model ID is required"
+            );
+            anyhow::ensure!(
+                !require_key
+                    || !self.asr_api.api_key.trim().is_empty()
+                    || (allow_environment && asr_api_key_from_env().is_some()),
                 "provider api 需要 API key：配置文件 [asr_api].api_key、--asr-api-key \
                  或环境变量 COURSE2MD_ASR_API_KEY。/ Cloud transcription requires an API key; set COURSE2MD_ASR_API_KEY or [asr_api].api_key."
             );
@@ -438,7 +493,7 @@ pub fn resolve_resume(cli_resume: bool, cli_no_resume: bool, file_resume: Option
     if cli_resume {
         return true;
     }
-    file_resume.unwrap_or(false)
+    file_resume.unwrap_or(true)
 }
 
 /// Linux + AMD GPU 检测（issue #12）：任一 /sys/class/drm/card*/device/vendor
@@ -711,7 +766,10 @@ mod tests {
         c.threads = DEFAULT_THREADS;
 
         c.formats = vec![];
-        assert!(c.validate().is_err());
+        assert!(
+            c.validate().is_ok(),
+            "Internal reading does not depend on optional exports"
+        );
     }
 
     #[test]
@@ -723,6 +781,8 @@ mod tests {
         c.provider = AsrProvider::Coreml;
         c.asr_model = Some("whisper".into());
         c.validate_asr().unwrap();
+        c.asr_model = Some("qwen-not-a-supported-model".into());
+        assert!(c.validate_asr().is_err());
         c.provider = AsrProvider::Npu;
         c.asr_model = Some("org/custom-ov-model".into());
         c.validate_asr().unwrap();
@@ -740,7 +800,7 @@ mod tests {
         // 都没传：回落配置文件
         assert!(resolve_resume(false, false, Some(true)));
         assert!(!resolve_resume(false, false, Some(false)));
-        assert!(!resolve_resume(false, false, None));
+        assert!(resolve_resume(false, false, None));
     }
 
     #[test]

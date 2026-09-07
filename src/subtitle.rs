@@ -3,7 +3,391 @@
 //! 与 ASR 产物统一到 `TranscriptEvent`，下游 timeline/LLM/渲染完全复用。
 
 use crate::timeline::TranscriptEvent;
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// A track is a discovery result, not proof that its text can be read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubtitleTrack {
+    pub id: String,
+    pub language: Option<String>,
+    pub name: Option<String>,
+    pub kind: SubtitleKind,
+    pub origin: SubtitleOrigin,
+    #[serde(default)]
+    pub source_order: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubtitleKind {
+    Manual,
+    Automatic,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SubtitleOrigin {
+    Online {
+        /// Exact extractor key. This is not a translated display label.
+        language_key: String,
+        automatic: bool,
+        #[serde(default)]
+        inline_text: Option<String>,
+    },
+    Embedded {
+        stream_index: u32,
+        codec: String,
+    },
+    File {
+        path: PathBuf,
+    },
+}
+
+impl SubtitleTrack {
+    pub fn label(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(name) = self.name.as_ref().filter(|value| !value.trim().is_empty()) {
+            parts.push(name.clone());
+        } else if let Some(language) = &self.language {
+            parts.push(language_label(language));
+        } else if let SubtitleOrigin::File { path } = &self.origin {
+            parts.push(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        } else if let SubtitleOrigin::Embedded { stream_index, .. } = &self.origin {
+            parts.push(format!("内嵌字幕（轨道 {stream_index}）"));
+        } else {
+            parts.push("字幕".into());
+        }
+        match self.kind {
+            SubtitleKind::Manual => parts.push("人工字幕".into()),
+            SubtitleKind::Automatic => parts.push("自动字幕".into()),
+            SubtitleKind::Unknown => {}
+        }
+        parts.join(" · ")
+    }
+}
+
+/// Failed discovery and successful discovery with no readable tracks are distinct.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SubtitleEvidence {
+    #[default]
+    Unchecked,
+    Found {
+        tracks: Vec<SubtitleTrack>,
+        /// Some channels may fail while others return usable candidates.
+        #[serde(default)]
+        warning: Option<String>,
+    },
+    NoneFound,
+    Failed {
+        message: String,
+    },
+    Unsupported {
+        message: String,
+    },
+}
+
+impl SubtitleEvidence {
+    pub fn tracks(&self) -> &[SubtitleTrack] {
+        match self {
+            Self::Found { tracks, .. } => tracks,
+            _ => &[],
+        }
+    }
+}
+
+/// This value is created only after parsing nonempty text. Tasks may copy events,
+/// avoiding a later change to the attached file or an expired remote subtitle URL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CachedSubtitle {
+    pub source_identity: String,
+    pub track_id: String,
+    pub label: String,
+    pub path: PathBuf,
+    pub events: Vec<TranscriptEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SubtitleReadError {
+    Failed { message: String },
+    NoReadableText { message: String },
+    Unsupported { message: String },
+    Cancelled,
+}
+
+impl std::fmt::Display for SubtitleReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed { message }
+            | Self::NoReadableText { message }
+            | Self::Unsupported { message } => f.write_str(message),
+            Self::Cancelled => f.write_str("已取消读取字幕"),
+        }
+    }
+}
+
+impl std::error::Error for SubtitleReadError {}
+
+pub fn language_label(language: &str) -> String {
+    match normalize_language(language).as_str() {
+        "zh" => "中文".into(),
+        "zh-hans" | "zh-cn" | "zh-sg" => "简体中文".into(),
+        "zh-hant" | "zh-tw" | "zh-hk" => "繁体中文".into(),
+        "en" => "英语".into(),
+        "fr" => "法语".into(),
+        "de" => "德语".into(),
+        "ja" => "日语".into(),
+        "ko" => "韩语".into(),
+        "es" => "西班牙语".into(),
+        "pt" => "葡萄牙语".into(),
+        "ru" => "俄语".into(),
+        "ar" => "阿拉伯语".into(),
+        "it" => "意大利语".into(),
+        _ => language.to_owned(),
+    }
+}
+
+fn normalize_language(language: &str) -> String {
+    let value = language.trim().replace('_', "-").to_ascii_lowercase();
+    // ffprobe commonly returns ISO 639-2 language codes.
+    match value.as_str() {
+        "zho" | "chi" => "zh".into(),
+        "eng" => "en".into(),
+        "fra" | "fre" => "fr".into(),
+        "deu" | "ger" => "de".into(),
+        "jpn" => "ja".into(),
+        "kor" => "ko".into(),
+        "spa" => "es".into(),
+        "por" => "pt".into(),
+        "rus" => "ru".into(),
+        "ara" => "ar".into(),
+        "ita" => "it".into(),
+        _ => value,
+    }
+}
+
+/// Preference list → interface language → known original language → discovery
+/// order. A missed preference always falls through, never removes other languages.
+/// A generic preference such as `zh` covers its language family equally; a
+/// script/region preference such as `zh-Hans` prefers that exact variant.
+/// Within an identical language, known human captions precede known automatic ones.
+pub fn sort_tracks(
+    tracks: &mut [SubtitleTrack],
+    preferences: &[String],
+    interface_language: &str,
+    original_language: Option<&str>,
+) {
+    let mut languages = Vec::new();
+    for language in preferences
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(interface_language))
+        .chain(original_language)
+    {
+        let value = normalize_language(language);
+        if !value.is_empty() && !languages.contains(&value) {
+            languages.push(value);
+        }
+    }
+    // Precompute one rank for each exact language group. This preserves the
+    // extractor's order between remaining languages, including non-Latin tracks.
+    let mut groups: Vec<Option<String>> = Vec::new();
+    let mut discovery: Vec<_> = tracks.iter().collect();
+    discovery.sort_by_key(|track| track.source_order);
+    for track in discovery {
+        let language = track.language.as_deref().map(normalize_language);
+        if !groups.contains(&language) {
+            groups.push(language);
+        }
+    }
+    let rank = |track: &SubtitleTrack| {
+        let language = track.language.as_deref().map(normalize_language);
+        let preferred = language
+            .as_ref()
+            .and_then(|language| {
+                languages
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, preference)| {
+                        let same = language == preference;
+                        let family = language.split('-').next() == preference.split('-').next();
+                        (same || family).then_some((
+                            index,
+                            if same || !preference.contains('-') {
+                                0
+                            } else {
+                                1
+                            },
+                        ))
+                    })
+            })
+            .unwrap_or((languages.len(), 0));
+        let group = groups
+            .iter()
+            .position(|group| group == &language)
+            .unwrap_or(usize::MAX);
+        (preferred, group)
+    };
+    tracks.sort_by_key(rank);
+    // Unknown labels retain their positions. Only reorder slots whose type the
+    // source explicitly distinguishes, avoiding invented claims about a track.
+    let mut start = 0;
+    while start < tracks.len() {
+        let language = tracks[start].language.as_deref().map(normalize_language);
+        let end = tracks[start..]
+            .iter()
+            .position(|track| track.language.as_deref().map(normalize_language) != language)
+            .map(|offset| start + offset)
+            .unwrap_or(tracks.len());
+        let positions: Vec<_> = (start..end)
+            .filter(|index| tracks[*index].kind != SubtitleKind::Unknown)
+            .collect();
+        let mut known: Vec<_> = positions
+            .iter()
+            .map(|index| tracks[*index].clone())
+            .collect();
+        known.sort_by_key(|track| track.kind == SubtitleKind::Automatic);
+        for (position, track) in positions.into_iter().zip(known) {
+            tracks[position] = track;
+        }
+        start = end;
+    }
+}
+
+/// Decode supported sidecars without lossy replacement of the original words.
+pub fn read_subtitle_text(path: &Path) -> Result<String> {
+    use std::io::Read;
+    const MAX_BYTES: usize = 32 * 1024 * 1024;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("无法读取字幕文件 {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= MAX_BYTES,
+        "字幕文件超过 32 MB，请选择较小的 SRT 或 VTT 文件"
+    );
+    if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        ensure!(
+            (bytes.len() - 2) % 2 == 0,
+            "字幕文件的 UTF-16 编码不完整，请重新导出为 UTF-8"
+        );
+        let little = bytes[0] == 0xff;
+        let words: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| {
+                if little {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        return String::from_utf16(&words)
+            .context("字幕文件的字符编码无法读取，请重新导出为 UTF-8");
+    }
+    String::from_utf8(bytes)
+        .map(|text| text.trim_start_matches('\u{feff}').to_owned())
+        .context("字幕文件的字符编码无法读取，请重新导出为 UTF-8")
+}
+
+pub fn to_srt(events: &[TranscriptEvent]) -> String {
+    fn timestamp(seconds: f64) -> String {
+        let millis = (seconds.max(0.) * 1000.).round() as u64;
+        format!(
+            "{:02}:{:02}:{:02},{:03}",
+            millis / 3_600_000,
+            millis / 60_000 % 60,
+            millis / 1000 % 60,
+            millis % 1000
+        )
+    }
+    events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            format!(
+                "{}\n{} --> {}\n{}\n\n",
+                index + 1,
+                timestamp(event.start),
+                timestamp(event.end),
+                event.text
+            )
+        })
+        .collect()
+}
+
+/// All exact-name and language-qualified sidecars, retaining both SRT and VTT.
+pub fn sidecar_tracks(video: &Path) -> Vec<SubtitleTrack> {
+    let Some(parent) = video.parent() else {
+        return Vec::new();
+    };
+    let Some(stem) = video.file_stem().and_then(|value| value.to_str()) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            if !path.is_file() || !is_subtitle_file(path) {
+                return false;
+            }
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .is_some_and(|candidate| {
+                    candidate == stem || candidate.starts_with(&format!("{stem}."))
+                })
+        })
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let language = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .and_then(|candidate| candidate.strip_prefix(&format!("{stem}.")))
+                .filter(|candidate| {
+                    candidate
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphabetic() || byte == b'-' || byte == b'_')
+                })
+                .map(str::to_owned);
+            let mut track = file_track(path, language);
+            track.source_order = index;
+            track
+        })
+        .collect()
+}
+
+pub fn is_subtitle_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "srt" | "vtt"))
+}
+
+pub fn file_track(path: PathBuf, language: Option<String>) -> SubtitleTrack {
+    SubtitleTrack {
+        id: format!("file:{}", path.display()),
+        language,
+        name: None,
+        kind: SubtitleKind::Unknown,
+        origin: SubtitleOrigin::File { path },
+        source_order: usize::MAX,
+    }
+}
 
 /// 解析 SRT / VTT 字幕为转写事件。
 /// - 时间戳兼容 `HH:MM:SS,mmm`（SRT）与 `HH:MM:SS.mmm`（VTT）及 `MM:SS.mmm`
@@ -119,12 +503,8 @@ fn clean_cue_text(line: &str) -> String {
     s.trim().to_string()
 }
 
-/// yt-dlp `--sub-langs` 的语言偏好参数，fetch.rs 抓取字幕时引用；
-/// 与下方 `lang_rank` 的挑选顺序同源（zh 优先、en 其次），改动时需同步检查。
-pub(crate) const SUB_LANGS: &str = "zh.*,en.*";
-
-/// 在目录里挑选字幕文件（`sub.<lang>.srt`）：zh* 优先，其次 en*，再任意。
-/// 只认 `.srt`：依赖 fetch.rs 抓取时 `--convert-subs srt` 的约定（两边需保持一致）。
+/// Legacy filesystem helper. New callers fetch one explicit track into an isolated
+/// directory; this must never choose from artifacts belonging to another source.
 pub fn pick_subtitle_file(dir: &Path) -> Option<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
@@ -139,7 +519,7 @@ pub fn pick_subtitle_file(dir: &Path) -> Option<PathBuf> {
     files.into_iter().next()
 }
 
-/// 语言排名：与 `SUB_LANGS`（fetch.rs `--sub-langs`）同源，zh 优先、en 其次。
+/// Legacy ranking used only when inspecting pre-existing converted SRT files.
 fn lang_rank(p: &Path) -> (u8, String) {
     let stem = p
         .file_stem()
@@ -171,6 +551,141 @@ pub fn sidecar_subtitle(video: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn track(language: &str, kind: SubtitleKind) -> SubtitleTrack {
+        SubtitleTrack {
+            id: format!("{language}:{kind:?}"),
+            language: Some(language.into()),
+            name: None,
+            kind,
+            source_order: 0,
+            origin: SubtitleOrigin::Online {
+                language_key: language.into(),
+                automatic: kind == SubtitleKind::Automatic,
+                inline_text: None,
+            },
+        }
+    }
+
+    #[test]
+    fn missed_preferences_fall_through_without_hiding_languages() {
+        let mut tracks = vec![
+            track("fr", SubtitleKind::Automatic),
+            track("ja", SubtitleKind::Manual),
+            track("fr", SubtitleKind::Manual),
+            track("de", SubtitleKind::Manual),
+        ];
+        sort_tracks(&mut tracks, &["zh".into()], "en", Some("ja"));
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.language.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["ja", "fr", "fr", "de"]
+        );
+        assert_eq!(tracks[1].kind, SubtitleKind::Manual);
+        assert_eq!(tracks[2].kind, SubtitleKind::Automatic);
+        sort_tracks(&mut tracks, &["xx".into()], "yy", None);
+        assert_eq!(tracks.len(), 4);
+    }
+
+    #[test]
+    fn explicit_language_then_interface_then_original_then_discovery_order() {
+        let mut tracks = vec![
+            track("ru", SubtitleKind::Manual),
+            track("fr", SubtitleKind::Manual),
+            track("de", SubtitleKind::Manual),
+            track("en", SubtitleKind::Manual),
+            track("ja", SubtitleKind::Manual),
+        ];
+        sort_tracks(&mut tracks, &["ja".into()], "en", Some("de"));
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.language.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["ja", "en", "de", "ru", "fr"]
+        );
+    }
+
+    #[test]
+    fn simplified_interface_prefers_hans_without_inventing_caption_kind() {
+        let mut tracks = vec![
+            track("zh", SubtitleKind::Automatic),
+            track("zh-Hans", SubtitleKind::Unknown),
+            track("ja", SubtitleKind::Manual),
+        ];
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.source_order = index;
+        }
+        sort_tracks(&mut tracks, &[], "zh-Hans", Some("ja"));
+        assert_eq!(tracks[0].language.as_deref(), Some("zh-Hans"));
+        assert_eq!(tracks[0].kind, SubtitleKind::Unknown);
+        assert!(!tracks[0].label().contains("人工"));
+        assert_eq!(tracks[1].kind, SubtitleKind::Automatic);
+    }
+
+    #[test]
+    fn generic_language_preference_does_not_promote_unspecified_script() {
+        let mut tracks = vec![
+            track("zh-Hans", SubtitleKind::Unknown),
+            track("zh", SubtitleKind::Automatic),
+            track("ja", SubtitleKind::Manual),
+        ];
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.source_order = index;
+        }
+        sort_tracks(&mut tracks, &["zh".into()], "en", None);
+        assert_eq!(tracks[0].language.as_deref(), Some("zh-Hans"));
+        assert_eq!(tracks[1].language.as_deref(), Some("zh"));
+    }
+
+    #[test]
+    fn sidecars_include_every_language_and_both_formats_without_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("Lecture.mp4");
+        for name in [
+            "Lecture.fr.srt",
+            "Lecture.JA.VTT",
+            "Lecture.srt",
+            "Other.srt",
+        ] {
+            std::fs::write(
+                dir.path().join(name),
+                "1\n00:00:00,000 --> 00:00:01,000\nBonjour\n",
+            )
+            .unwrap();
+        }
+        let tracks = sidecar_tracks(&video);
+        assert_eq!(tracks.len(), 3);
+        assert!(
+            tracks
+                .iter()
+                .any(|track| track.language.as_deref() == Some("fr"))
+        );
+        assert!(
+            tracks
+                .iter()
+                .any(|track| track.language.as_deref() == Some("JA"))
+        );
+    }
+
+    #[test]
+    fn utf16_sidecars_and_standard_cache_preserve_words_and_timing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("arbitrary-name.srt");
+        let text = "1\n00:00:01,125 --> 00:00:02,375\nBonjour 世界\n";
+        let bytes: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        std::fs::write(&file, bytes).unwrap();
+        let events = parse_subtitle(&read_subtitle_text(&file).unwrap());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events, parse_subtitle(&to_srt(&events)));
+        std::fs::write(&file, [0xff, 0xff, 0xfe]).unwrap();
+        assert!(read_subtitle_text(&file).is_err());
+    }
 
     #[test]
     fn repeated_words_after_a_pause_remain_separate() {

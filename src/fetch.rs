@@ -1,12 +1,12 @@
 //! yt-dlp 子进程封装：元数据抓取 + 视频下载。
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 /// 我们关心的元数据字段子集。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VideoMeta {
     pub title: String,
     #[serde(default)]
@@ -20,6 +20,395 @@ pub struct VideoMeta {
     pub id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceCandidate {
+    /// The extractor's concrete video URL, never the original playlist URL.
+    pub input: String,
+    pub title: String,
+    pub identity: Option<String>,
+    pub duration: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OnlineVideo {
+    pub meta: VideoMeta,
+    pub identity: String,
+    pub thumbnail: Option<String>,
+    pub original_language: Option<String>,
+    pub subtitles: crate::subtitle::SubtitleEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OnlineProbe {
+    Video {
+        video: OnlineVideo,
+    },
+    Collection {
+        title: String,
+        candidates: Vec<SourceCandidate>,
+        unavailable_entries: usize,
+    },
+    Unresolved {
+        message: String,
+    },
+}
+
+/// Preserve the extractor's language order; serde_json::Value maps sort keys
+/// unless a crate-wide feature is enabled, which would silently change defaults.
+#[derive(Debug, Default)]
+struct OrderedTracks(Vec<(String, Vec<serde_json::Value>)>);
+
+impl<'de> Deserialize<'de> for OrderedTracks {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = OrderedTracks;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("subtitle language map")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, Vec<serde_json::Value>>()? {
+                    entries.push((key, value));
+                }
+                Ok(OrderedTracks(entries))
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ExtractorInfo {
+    #[serde(rename = "_type", default)]
+    kind: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    uploader: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    webpage_url: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    extractor: Option<String>,
+    #[serde(default)]
+    extractor_key: Option<String>,
+    #[serde(default)]
+    ie_key: Option<String>,
+    #[serde(default)]
+    thumbnail: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    subtitles: Option<OrderedTracks>,
+    #[serde(default)]
+    automatic_captions: Option<OrderedTracks>,
+    #[serde(default)]
+    entries: Option<Vec<Option<ExtractorInfo>>>,
+}
+
+fn extractor_name(info: &ExtractorInfo) -> &str {
+    info.extractor
+        .as_deref()
+        .or(info.extractor_key.as_deref())
+        .or(info.ie_key.as_deref())
+        .unwrap_or_default()
+}
+
+/// Including the complete extractor ID preserves Bilibili `_pN` and interactive
+/// segment IDs. Display titles and URL tracking parameters are not identity.
+pub fn online_identity(extractor: &str, id: &str) -> Option<String> {
+    let extractor = extractor.trim().to_ascii_lowercase();
+    let id = id.trim();
+    if extractor.is_empty() || id.is_empty() {
+        return None;
+    }
+    Some(format!("online:{extractor}:{}:{}", id.len(), id))
+}
+
+fn concrete_url(info: &ExtractorInfo) -> Option<String> {
+    info.webpage_url
+        .as_deref()
+        .or(info.url.as_deref())
+        .filter(|value| {
+            url::Url::parse(value).ok().is_some_and(|url| {
+                matches!(url.scheme(), "https" | "http") && url.host_str().is_some()
+            })
+        })
+        .map(str::to_owned)
+}
+
+/// Parse one metadata response from a subtitle-enabled, flat-playlist extraction.
+/// Successful extraction can still contain explicit subtitle permission warnings.
+pub fn parse_online_probe(bytes: &[u8], input: &str, diagnostics: &str) -> Result<OnlineProbe> {
+    let info: ExtractorInfo =
+        serde_json::from_slice(bytes).context("无法读取视频信息，请重新读取")?;
+    if info.kind == "multi_video" {
+        return Ok(OnlineProbe::Unresolved {
+            message: "这个来源由多个媒体片段组成，暂时无法确认完整的视频范围。请选择本地完整视频。"
+                .into(),
+        });
+    }
+    if info.kind == "playlist" || info.entries.is_some() {
+        let mut candidates = Vec::new();
+        let mut unavailable_entries = 0;
+        for entry in info.entries.unwrap_or_default() {
+            let Some(entry) = entry else {
+                unavailable_entries += 1;
+                continue;
+            };
+            let Some(input) = concrete_url(&entry) else {
+                unavailable_entries += 1;
+                continue;
+            };
+            if matches!(entry.kind.as_str(), "playlist" | "multi_video") || entry.entries.is_some()
+            {
+                unavailable_entries += 1;
+                continue;
+            }
+            if candidates
+                .iter()
+                .any(|candidate: &SourceCandidate| candidate.input == input)
+            {
+                continue;
+            }
+            let identity = entry
+                .id
+                .as_deref()
+                .and_then(|id| online_identity(extractor_name(&entry), id));
+            candidates.push(SourceCandidate {
+                title: entry
+                    .title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| input.clone()),
+                input,
+                identity,
+                duration: entry
+                    .duration
+                    .filter(|value| value.is_finite() && *value > 0.),
+            });
+        }
+        return Ok(OnlineProbe::Collection {
+            title: info.title.unwrap_or_default(),
+            candidates,
+            unavailable_entries,
+        });
+    }
+    if matches!(info.kind.as_str(), "url" | "url_transparent") {
+        return Ok(OnlineProbe::Unresolved {
+            message: "还无法确定要处理哪个视频。请复制具体视频的链接。".into(),
+        });
+    }
+    let extractor = extractor_name(&info).to_owned();
+    let id = info
+        .id
+        .as_deref()
+        .context("来源没有提供可确认的视频身份，请复制具体视频的链接")?;
+    let identity = online_identity(&extractor, id)
+        .context("来源没有提供可确认的视频身份，请复制具体视频的链接")?;
+    let input = concrete_url(&info).unwrap_or_else(|| input.to_owned());
+    // The original concrete part link is authoritative if the extractor returns a
+    // canonical base URL: do not erase an explicitly selected Bilibili part.
+    let input = if extractor.to_ascii_lowercase().starts_with("bilibili") {
+        if let Some((_, part)) = id
+            .rsplit_once("_p")
+            .filter(|(_, part)| part.parse::<u32>().is_ok())
+        {
+            let mut url = url::Url::parse(&input)?;
+            let pairs: Vec<_> = url
+                .query_pairs()
+                .filter(|(key, _)| key != "p")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            url.set_query(None);
+            url.query_pairs_mut()
+                .extend_pairs(pairs)
+                .append_pair("p", part);
+            url.to_string()
+        } else {
+            input
+        }
+    } else {
+        input
+    };
+    let subtitles = subtitle_evidence(&info, &identity, diagnostics);
+    Ok(OnlineProbe::Video {
+        video: OnlineVideo {
+            identity,
+            meta: VideoMeta {
+                title: info
+                    .title
+                    .filter(|title| !title.trim().is_empty())
+                    .context("来源没有返回视频标题，请重新读取")?,
+                uploader: info.uploader.unwrap_or_default(),
+                duration: info
+                    .duration
+                    .filter(|value| value.is_finite() && *value >= 0.)
+                    .unwrap_or_default(),
+                webpage_url: input,
+                extractor,
+                id: id.to_owned(),
+            },
+            thumbnail: info.thumbnail,
+            original_language: info.language,
+            subtitles,
+        },
+    })
+}
+
+fn subtitle_evidence(
+    info: &ExtractorInfo,
+    identity: &str,
+    diagnostics: &str,
+) -> crate::subtitle::SubtitleEvidence {
+    use crate::subtitle::{SubtitleEvidence, SubtitleKind, SubtitleOrigin, SubtitleTrack};
+    let warning = diagnostics
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            (lower.contains("subtitle") || lower.contains("caption"))
+                && (lower.contains("error")
+                    || lower.contains("unable")
+                    || lower.contains("failed")
+                    || lower.contains("login")
+                    || lower.contains("logged in")
+                    || lower.contains("sign in"))
+        })
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let warning = (!warning.is_empty()).then_some(warning);
+    let mut tracks = Vec::new();
+    let bilibili = extractor_name(info)
+        .to_ascii_lowercase()
+        .starts_with("bilibili");
+    for (automatic, channel) in [(false, &info.subtitles), (true, &info.automatic_captions)] {
+        for (language_key, formats) in channel
+            .as_ref()
+            .map(|channel| channel.0.as_slice())
+            .unwrap_or_default()
+        {
+            // Danmaku/chat are timed comments, not a transcript of the video.
+            if matches!(language_key.as_str(), "danmaku" | "live_chat") {
+                continue;
+            }
+            let readable: Vec<_> = formats
+                .iter()
+                .filter(|format| {
+                    matches!(
+                        format["ext"].as_str(),
+                        Some(
+                            "srt"
+                                | "vtt"
+                                | "ttml"
+                                | "srv1"
+                                | "srv2"
+                                | "srv3"
+                                | "json3"
+                                | "ass"
+                                | "lrc"
+                        )
+                    )
+                })
+                .collect();
+            if readable.is_empty() {
+                continue;
+            }
+            let bilibili_auto = bilibili && language_key.starts_with("ai-");
+            let language = if bilibili_auto {
+                language_key.trim_start_matches("ai-").to_owned()
+            } else {
+                language_key.clone()
+            };
+            let kind = if automatic || bilibili_auto {
+                SubtitleKind::Automatic
+            } else if bilibili {
+                SubtitleKind::Unknown
+            } else {
+                SubtitleKind::Manual
+            };
+            let name = readable
+                .iter()
+                .find_map(|format| format["name"].as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
+            let inline_text = readable
+                .iter()
+                .find(|format| matches!(format["ext"].as_str(), Some("srt" | "vtt")))
+                .and_then(|format| format["data"].as_str())
+                .map(str::to_owned);
+            tracks.push(SubtitleTrack {
+                id: format!(
+                    "{identity}:subtitle:{}:{language_key}",
+                    if automatic { "auto" } else { "provided" }
+                ),
+                language: Some(language),
+                name,
+                kind,
+                origin: SubtitleOrigin::Online {
+                    language_key: language_key.clone(),
+                    automatic,
+                    inline_text,
+                },
+                source_order: tracks.len(),
+            });
+        }
+    }
+    if !tracks.is_empty() {
+        SubtitleEvidence::Found { tracks, warning }
+    } else if let Some(message) = warning {
+        SubtitleEvidence::Failed { message }
+    } else if info.subtitles.is_none() && info.automatic_captions.is_none() {
+        SubtitleEvidence::Unsupported {
+            message: "此来源暂不支持读取字幕，可以识别视频声音".into(),
+        }
+    } else {
+        SubtitleEvidence::NoneFound
+    }
+}
+
+/// Local identity is content-based. Call on a worker and before matching a
+/// previous task/result; paths, names, timestamps and file size are not identity.
+pub fn local_content_identity(
+    path: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use std::sync::atomic::Ordering;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("无法读取视频文件 {}", path.display()))?;
+    let before = file.metadata()?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        ensure!(!cancel.load(Ordering::Relaxed), "已取消读取视频");
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    ensure!(!cancel.load(Ordering::Relaxed), "已取消读取视频");
+    let after = file.metadata()?;
+    ensure!(
+        before.len() == after.len() && before.modified().ok() == after.modified().ok(),
+        "视频文件在读取时发生变化，请重新读取"
+    );
+    Ok(format!("local:sha256:{:x}", hash.finalize()))
+}
+
 impl VideoMeta {
     pub fn save(&self, path: &Path) -> Result<()> {
         std::fs::write(path, serde_json::to_string_pretty(self)?)?;
@@ -29,17 +418,40 @@ impl VideoMeta {
 
 /// 抓取元数据（不下载）。
 pub async fn fetch_meta(url: &str) -> Result<VideoMeta> {
+    match probe_online(url).await? {
+        OnlineProbe::Video { video } => Ok(video.meta),
+        OnlineProbe::Collection { .. } => {
+            anyhow::bail!("这个链接包含多个视频，请选择具体单集后生成笔记")
+        }
+        OnlineProbe::Unresolved { message } => anyhow::bail!("{message}"),
+    }
+}
+
+/// Metadata and all available subtitle channels only; no media/AI requests.
+pub async fn probe_online(url: &str) -> Result<OnlineProbe> {
     let mut cmd = Command::new("yt-dlp");
     let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
-    let out = run(cmd
-        .args(["-J", "--no-warnings", "--no-playlist", "--"])
-        .arg(url))
+    let out = run_output(
+        cmd.args([
+            "--ignore-config",
+            "--simulate",
+            "--dump-single-json",
+            "--flat-playlist",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            "all",
+            "--socket-timeout",
+            "12",
+            "--retries",
+            "1",
+            "--",
+        ])
+        .arg(url),
+    )
     .await
     .map_err(|e| crate::auth::with_bilibili_login_tip(url, e))?;
-    let meta: VideoMeta = serde_json::from_str(&out)
-        .context("无法读取视频信息 / Could not parse video metadata from yt-dlp")
-        .map_err(|e| crate::auth::with_bilibili_login_tip(url, e))?;
-    Ok(meta)
+    parse_online_probe(&out.stdout, url, &String::from_utf8_lossy(&out.stderr))
 }
 
 /// 抓取的平台字幕（yt-dlp 产物）。
@@ -49,51 +461,139 @@ pub struct SubtitleFetch {
     pub auto: bool,
 }
 
-/// 用 yt-dlp 获取平台字幕并转为 srt：先人工字幕，再自动字幕。
-/// 平台不提供字幕时 yt-dlp 正常退出但不产出文件 → 返回 None。
+/// CLI compatibility path. Probe first so discovery failures remain errors;
+/// select from every language, then fetch that exact track without silent fallback.
 pub async fn fetch_subtitle(url: &str, out_dir: &Path) -> Result<Option<SubtitleFetch>> {
+    use crate::subtitle::SubtitleEvidence;
+    let video = match probe_online(url).await? {
+        OnlineProbe::Video { video } => video,
+        OnlineProbe::Collection { .. } => anyhow::bail!("这个链接包含多个视频，请选择具体单集"),
+        OnlineProbe::Unresolved { message } => anyhow::bail!("{message}"),
+    };
+    match video.subtitles {
+        SubtitleEvidence::Found { mut tracks, .. } => {
+            crate::subtitle::sort_tracks(
+                &mut tracks,
+                &[],
+                "zh",
+                video.original_language.as_deref(),
+            );
+            let track = tracks.first().context("字幕列表为空，请重新读取字幕")?;
+            fetch_selected_subtitle(&video.meta.webpage_url, &video.identity, track, out_dir)
+                .await
+                .map(Some)
+        }
+        SubtitleEvidence::Failed { message } => {
+            anyhow::bail!("字幕未读取成功，尚不能确认是否可用：{message}")
+        }
+        SubtitleEvidence::Unchecked => anyhow::bail!("尚未检查字幕，请重新读取视频信息"),
+        SubtitleEvidence::NoneFound | SubtitleEvidence::Unsupported { .. } => Ok(None),
+    }
+}
+
+/// Escape the complete language key as an exact yt-dlp subtitle regular expression.
+pub fn exact_subtitle_language(key: &str) -> String {
+    let mut escaped = String::from("^");
+    for character in key.chars() {
+        if matches!(
+            character,
+            '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped.push('$');
+    escaped
+}
+
+/// Fetch only the confirmed online track, rejecting a changed video identity.
+pub async fn fetch_selected_subtitle(
+    url: &str,
+    source_identity: &str,
+    track: &crate::subtitle::SubtitleTrack,
+    out_dir: &Path,
+) -> Result<SubtitleFetch> {
+    use crate::subtitle::SubtitleOrigin;
+    let SubtitleOrigin::Online {
+        language_key,
+        automatic,
+        inline_text,
+    } = &track.origin
+    else {
+        anyhow::bail!("所选字幕不是在线字幕");
+    };
+    ensure!(
+        track
+            .id
+            .starts_with(&format!("{source_identity}:subtitle:")),
+        "所选字幕与当前视频不一致，请重新选择字幕"
+    );
     let dir = out_dir.join(".subs");
-    // 每次重新抓取，避免读到上次运行残留的旧字幕
-    let _ = tokio::fs::remove_dir_all(&dir).await;
     tokio::fs::create_dir_all(&dir).await?;
-    let tmpl = dir.join("sub");
-    for auto in [false, true] {
+    let temp = tempfile::Builder::new()
+        .prefix("selected-")
+        .tempdir_in(&dir)?;
+    let text = if let Some(text) = inline_text {
+        text.clone()
+    } else {
+        let template = temp.path().join("subtitle");
         let mut cmd = Command::new("yt-dlp");
         let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
         cmd.args([
+            "--ignore-config",
             "--skip-download",
+            "--no-simulate",
+            "--dump-single-json",
             "--no-playlist",
-            // 转为 srt：pick_subtitle_file（subtitle.rs）只认 .srt，两处约定需保持一致
+            "--no-write-auto-subs",
+            "--no-write-subs",
             "--convert-subs",
             "srt",
             "--sub-format",
             "srt/vtt/best",
             "--sub-langs",
-            // 语言偏好与 subtitle.rs 的 lang_rank 同源
-            crate::subtitle::SUB_LANGS,
+            &exact_subtitle_language(language_key),
+            "--socket-timeout",
+            "12",
+            "--retries",
+            "1",
             "-o",
         ])
-        .arg(&tmpl);
-        if auto {
-            cmd.arg("--write-auto-subs");
+        .arg(&template)
+        .arg(if *automatic {
+            "--write-auto-subs"
         } else {
-            cmd.arg("--write-subs");
-        }
-        cmd.arg(url);
-        // 命令失败（yt-dlp 缺失/网络错误）：记 warn（错误内含 stderr 尾部摘要）后继续尝试 auto；
-        // 命令成功但无产物（平台无字幕，yt-dlp 打 warning 后正常退出）不算错误
-        if let Err(e) = run(&mut cmd)
+            "--write-subs"
+        })
+        .arg("--")
+        .arg(url);
+        let out = run_output(&mut cmd)
             .await
-            .map_err(|e| crate::auth::with_bilibili_login_tip(url, e))
-        {
-            tracing::warn!(auto, error = %e, "字幕获取失败，将尝试其他字幕 / Subtitle fetch failed; trying other captions");
-            continue;
+            .map_err(|error| crate::auth::with_bilibili_login_tip(url, error))?;
+        match parse_online_probe(&out.stdout, url, &String::from_utf8_lossy(&out.stderr))? {
+            OnlineProbe::Video { video } => ensure!(
+                video.identity == source_identity,
+                "视频来源发生变化，请重新读取并选择字幕"
+            ),
+            _ => anyhow::bail!("无法确认字幕对应的视频，请重新读取"),
         }
-        if let Some(path) = crate::subtitle::pick_subtitle_file(&dir) {
-            return Ok(Some(SubtitleFetch { path, auto }));
-        }
-    }
-    Ok(None)
+        let path = crate::subtitle::pick_subtitle_file(temp.path())
+            .context("所选字幕没有下载成功，请重新读取字幕或明确选择其他文字来源")?;
+        crate::subtitle::read_subtitle_text(&path)?
+    };
+    let events = crate::subtitle::parse_subtitle(&text);
+    ensure!(
+        !events.is_empty(),
+        "这份字幕未包含可读取的文字，请选择其他字幕"
+    );
+    let path = temp.path().join("selected.srt");
+    crate::checkpoint::atomic_write(&path, crate::subtitle::to_srt(&events).as_bytes())?;
+    let _ = temp.keep();
+    Ok(SubtitleFetch {
+        path,
+        auto: track.kind == crate::subtitle::SubtitleKind::Automatic,
+    })
 }
 
 /// 本地视频的同名字幕 sidecar（lecture.mp4 → lecture.srt/.vtt）。
@@ -194,7 +694,13 @@ pub fn bilibili_retry_delay(stderr: &str, retries: usize) -> Option<std::time::D
 
 pub const BILIBILI_412_HINT: &str = "Bilibili 暂时限制了请求（HTTP 412）。请稍后重试；若持续失败，请运行 course2md --login bilibili 登录或重新登录，更新 yt-dlp，并确认该链接能在浏览器播放，也可以导入已下载的本地视频。";
 
+#[cfg(test)]
 async fn run(cmd: &mut Command) -> Result<String> {
+    let out = run_output(cmd).await?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+async fn run_output(cmd: &mut Command) -> Result<std::process::Output> {
     let mut retries = 0;
     loop {
         let out = cmd
@@ -203,7 +709,7 @@ async fn run(cmd: &mut Command) -> Result<String> {
             .await
             .context("启动 yt-dlp 失败")?;
         if out.status.success() {
-            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+            return Ok(out);
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         if let Some(delay) = bilibili_retry_delay(&stderr, retries) {
@@ -240,6 +746,133 @@ async fn run_status(cmd: &mut Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collection_is_never_implicitly_the_first_part() {
+        let result = parse_online_probe(
+            include_bytes!("../tests/fixtures/source/bilibili-parts.json"),
+            "https://www.bilibili.com/video/BV-fixture",
+            "",
+        )
+        .unwrap();
+        let OnlineProbe::Collection {
+            candidates,
+            unavailable_entries,
+            ..
+        } = result
+        else {
+            panic!("expected collection")
+        };
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[1].input,
+            "https://www.bilibili.com/video/BV-fixture?p=2"
+        );
+        assert_eq!(unavailable_entries, 1);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.identity.is_none())
+        );
+    }
+
+    #[test]
+    fn exact_part_identity_and_all_language_evidence_survive_serialization() {
+        let OnlineProbe::Video { video } = parse_online_probe(
+            include_bytes!("../tests/fixtures/source/multilingual-video.json"),
+            "https://www.bilibili.com/video/fixture?p=2",
+            "",
+        )
+        .unwrap() else {
+            panic!("expected video")
+        };
+        assert!(video.identity.ends_with("fixture_p2"));
+        assert!(video.meta.webpage_url.ends_with("?p=2"));
+        let tracks = video.subtitles.tracks();
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.language.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["fr", "ja", "zh"]
+        );
+        assert_eq!(tracks[0].kind, crate::subtitle::SubtitleKind::Unknown);
+        assert_eq!(tracks[2].kind, crate::subtitle::SubtitleKind::Automatic);
+        assert_eq!(
+            video,
+            serde_json::from_str::<OnlineVideo>(&serde_json::to_string(&video).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn permission_failure_never_means_no_captions() {
+        let bytes = include_bytes!("../tests/fixtures/source/no-captions.json");
+        let OnlineProbe::Video { video } =
+            parse_online_probe(bytes, "https://example.invalid", "").unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            video.subtitles,
+            crate::subtitle::SubtitleEvidence::NoneFound
+        ));
+        let OnlineProbe::Video { video } = parse_online_probe(
+            bytes,
+            "https://example.invalid",
+            "WARNING: Subtitles are only available when logged in",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert!(matches!(
+            video.subtitles,
+            crate::subtitle::SubtitleEvidence::Failed { .. }
+        ));
+        let OnlineProbe::Video { video } = parse_online_probe(
+            br#"{"id":"one","title":"One","extractor":"test"}"#,
+            "https://example.invalid/one",
+            "",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert!(matches!(
+            video.subtitles,
+            crate::subtitle::SubtitleEvidence::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn fragmented_media_does_not_become_a_selectable_first_fragment() {
+        let result = parse_online_probe(br#"{"_type":"multi_video","id":"a","title":"Video","entries":[{"id":"a_0","url":"https://example.invalid/fragment.flv"}]}"#, "https://example.invalid/video", "").unwrap();
+        assert!(matches!(result, OnlineProbe::Unresolved { .. }));
+    }
+
+    #[test]
+    fn local_identity_depends_on_content_not_filename_and_can_cancel() {
+        use std::sync::atomic::AtomicBool;
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("lecture.mp4");
+        let b = dir.path().join("renamed.mp4");
+        std::fs::write(&a, b"video A").unwrap();
+        std::fs::write(&b, b"video A").unwrap();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            local_content_identity(&a, &cancel).unwrap(),
+            local_content_identity(&b, &cancel).unwrap()
+        );
+        std::fs::write(&b, b"video B").unwrap();
+        assert_ne!(
+            local_content_identity(&a, &cancel).unwrap(),
+            local_content_identity(&b, &cancel).unwrap()
+        );
+        assert!(
+            local_content_identity(&a, &AtomicBool::new(true))
+                .unwrap_err()
+                .to_string()
+                .contains("已取消")
+        );
+    }
 
     #[test]
     fn only_bilibili_rejections_are_retried_with_a_limit() {

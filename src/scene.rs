@@ -64,20 +64,14 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
     let info = media::probe_video(media)
         .await
         .context("无法读取视频尺寸，请检查文件是否可播放 / Could not read video dimensions; check that the file plays correctly")?;
-    // sample_interval 下限 0.2s（即采样率上限 5fps）；配置被收紧时必须告知用户
-    let interval = if cfg.sample_interval < 0.2 {
-        tracing::warn!(
-            configured = cfg.sample_interval,
-            "sample_interval 小于下限 0.2s，按 0.2s 采样"
-        );
-        0.2
-    } else {
-        cfg.sample_interval
-    };
+    anyhow::ensure!(
+        cfg.sample_interval >= 0.2,
+        "画面采样间隔至少为 0.2 秒 / Frame sampling interval must be at least 0.2 seconds"
+    );
+    let interval = cfg.sample_interval;
     let (tw, th) = scaled_wh(info.width, info.height, SAMPLE_WIDTH);
     let fps = 1.0 / interval;
     let vf = format!("fps={fps:.6},scale={tw}:{th},format=gray");
-    let total = ((info.duration / interval).ceil() as u64).max(1);
 
     tracing::info!(
         w = info.width,
@@ -111,8 +105,12 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
     });
     let frame_len = (tw as usize) * (th as usize);
     let mut buf = vec![0u8; frame_len];
-    let pb = crate::progress::Bar::new("scenes", total)
-        .with_template("{spinner:.green} sample {pos}/{len} [{bar:32.cyan/blue}] {msg}");
+    // Duration/fps gives an estimate, not the number ffmpeg will actually
+    // decode (especially for VFR input). Report observed samples without a
+    // fabricated denominator. Candidate selection happens within this scan.
+    let pb = crate::progress::Bar::new("scenes/scan", 0)
+        .with_template("{spinner:.green} sample {pos} frames {msg}");
+    pb.set_position(0);
 
     // 三状态检测：检测永不休眠（cooldown 只限制「发射」，不再造成盲区）。
     //   last_emitted  已输出的视觉状态
@@ -131,6 +129,7 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
     let mut last_emit_t: f64 = -f64::INFINITY;
     let mut i: u64 = 0;
     loop {
+        crate::dispatch::check_control()?;
         match stdout.read_exact(&mut buf).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
@@ -184,7 +183,7 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
             candidate_first_t = None;
             candidate_last_t = None;
             last_emit_t = t;
-            pb.set_message(format!("slides={} t={onset_t:.1}s", times.len()));
+            pb.set_message(format!("已找到 {} 张候选截图", times.len()));
         }
     }
     // EOF 冲刷：最后一个已稳定的候选即使还没过 cooldown 也补发（否则尾页永远丢失）
@@ -195,7 +194,6 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
             times.push((onset, capture));
         }
     }
-    pb.finish();
     let status = child.wait().await?;
     let stderr_bytes = stderr_task.await.unwrap_or_default();
     if !status.success() {
@@ -210,6 +208,7 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
             .join("\n");
         anyhow::bail!("读取视频画面失败 / Frame sampling failed ({status}): {tail}");
     }
+    pb.finish();
     tracing::info!(slides = times.len(), frames = i, mode = %cfg.slide_mode, "ssim scan done");
     Ok(times)
 }
@@ -219,17 +218,23 @@ pub async fn run(cfg: &PipelineConfig, media: &Path) -> Result<Vec<FrameEvent>> 
     let frames_dir = cfg.frames_dir();
     tokio::fs::create_dir_all(&frames_dir).await?;
     let t0 = std::time::Instant::now();
+    crate::progress::stage("scenes/scan", "start");
     let times = sample_timestamps(cfg, media).await?;
+    crate::progress::stage("scenes/scan", "done");
     anyhow::ensure!(!times.is_empty(), "未采样到任何帧");
 
-    let pb = crate::progress::Bar::new("scenes", times.len() as u64)
+    crate::progress::stage("scenes/extract", "start");
+    let pb = crate::progress::Bar::new("scenes/extract", times.len() as u64)
         .with_template("{spinner:.green} extract {pos}/{len} [{bar:32.cyan/blue}] {msg}");
+    // Emit before launching ffmpeg: the first image may take a long time.
+    pb.set_position(0);
     // JoinSet 限流并发抽帧：最多 EXTRACT_CONCURRENCY 个 ffmpeg 进程并行；
     // 按帧索引收集结果后排序，保证输出文件名与结果顺序与串行版完全一致。
     let mut set: tokio::task::JoinSet<(usize, Result<()>)> = tokio::task::JoinSet::new();
     let mut pending = times.iter().copied().enumerate();
     let mut results: Vec<(usize, Result<()>)> = Vec::with_capacity(times.len());
     loop {
+        crate::dispatch::check_control()?;
         while set.len() < EXTRACT_CONCURRENCY {
             let Some((i, (_, capture_t))) = pending.next() else {
                 break;
@@ -241,8 +246,9 @@ pub async fn run(cfg: &PipelineConfig, media: &Path) -> Result<Vec<FrameEvent>> 
         }
         match set.join_next().await {
             Some(Ok(item)) => {
-                pb.set_message(format!("t={:.1}s", times[item.0].0));
-                pb.inc(1);
+                if item.1.is_ok() {
+                    pb.inc(1);
+                }
                 results.push(item);
             }
             Some(Err(e)) => {
@@ -251,7 +257,6 @@ pub async fn run(cfg: &PipelineConfig, media: &Path) -> Result<Vec<FrameEvent>> 
             None => break,
         }
     }
-    pb.finish();
     results.sort_by_key(|(i, _)| *i);
     let mut frames = Vec::with_capacity(results.len());
     for (i, r) in results {
@@ -273,6 +278,8 @@ pub async fn run(cfg: &PipelineConfig, media: &Path) -> Result<Vec<FrameEvent>> 
         secs = format_args!("{:.1}", t0.elapsed().as_secs_f64()),
         "slides extracted"
     );
+    pb.finish();
+    crate::progress::stage("scenes/extract", "done");
     Ok(frames)
 }
 

@@ -258,6 +258,8 @@ pub struct RunOpts {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// 执行已保存的任务；从标准输入读取完整 JSON 参数 / Execute a saved task from stdin JSON
+    RunTask,
     /// 管理 gpu/cpu 本地识别模型 / Manage gpu/cpu speech models
     Models {
         #[command(subcommand)]
@@ -303,6 +305,28 @@ pub struct SummarizeArgs {
 
 #[derive(Subcommand)]
 pub enum ModelsCmd {
+    /// 只读检查指定设备和模型的缓存 / Inspect exact local model cache without downloading
+    Inspect {
+        #[arg(long, value_enum)]
+        provider: crate::config::AsrProvider,
+        #[arg(long, default_value = "qwen3-1.7b")]
+        model: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 准备指定模型，复用已有缓存 / Prepare an exact local model and retain downloaded files
+    Prepare {
+        #[arg(long, value_enum)]
+        provider: crate::config::AsrProvider,
+        #[arg(long, default_value = "qwen3-1.7b")]
+        model: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// 下载 gpu/cpu 模型（约 2.4GB）/ Download gpu/cpu models (~2.4GB)
     Download {
         #[arg(long)]

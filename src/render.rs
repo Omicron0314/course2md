@@ -65,41 +65,46 @@ fn md_inline(s: &str) -> String {
 
 pub fn render_markdown(meta: &VideoMeta, sections: &[Section]) -> String {
     let title = md_inline(&meta.title);
-    let uploader = md_inline(if meta.uploader.is_empty() {
-        "未知"
+    let uploader = if meta.uploader.is_empty() {
+        String::new()
     } else {
-        &meta.uploader
-    });
+        format!("- 作者：{}\n", md_inline(&meta.uploader))
+    };
     let mut md = String::new();
     // 写 String 不会失败，unwrap 安全
     write!(md, "# {title}\n\n").unwrap();
-    write!(
+    md.push_str(&uploader);
+    if meta.duration > 0. {
+        writeln!(md, "- 时长：{}", fmt_ts(meta.duration)).unwrap();
+    }
+    if !meta.webpage_url.is_empty() {
+        writeln!(
+            md,
+            "- 来源：[{}]({})",
+            md_inline(&meta.webpage_url),
+            source_url(meta)
+        )
+        .unwrap();
+    }
+    writeln!(
         md,
-        "- 作者：{uploader}\n- 时长：{}\n- 来源：[{}]({})\n- 由 course2md 生成（{} 张截图 / {} 段语音）\n\n",
-        fmt_ts(meta.duration),
-        meta.webpage_url,
-        source_url(meta),
-        sections.len(),
-        sections.iter().map(|s| s.speech.len()).sum::<usize>(),
+        "- 由 course2md 生成（{} 张截图 / {} 段文字）\n",
+        sections.iter().filter(|s| !s.image.is_empty()).count(),
+        sections.iter().map(|s| s.speech.len()).sum::<usize>()
     )
     .unwrap();
     md.push_str("---\n\n");
     for s in sections {
-        write!(
-            md,
-            "## [{}]({})\n\n![{}]({})\n\n",
-            fmt_ts(s.t),
-            ts_url(meta, s.t),
-            fmt_ts(s.t),
-            s.image
-        )
-        .unwrap();
-        if s.speech.is_empty() {
-            md.push_str("_(本段无语音)_\n\n");
+        if meta.webpage_url.is_empty() {
+            write!(md, "## {}\n\n", fmt_ts(s.t)).unwrap();
         } else {
-            for ev in &s.speech {
-                write!(md, "{}\n\n", ev.text).unwrap();
-            }
+            write!(md, "## [{}]({})\n\n", fmt_ts(s.t), ts_url(meta, s.t)).unwrap();
+        }
+        if !s.image.is_empty() {
+            write!(md, "![视频 {} 的截图]({})\n\n", fmt_ts(s.t), s.image).unwrap();
+        }
+        for ev in &s.speech {
+            write!(md, "{}\n\n", ev.text).unwrap();
         }
     }
     md
@@ -107,33 +112,53 @@ pub fn render_markdown(meta: &VideoMeta, sections: &[Section]) -> String {
 
 pub fn render_html(meta: &VideoMeta, sections: &[Section]) -> String {
     let mut body = String::new();
+    let mut details = Vec::new();
+    if !meta.uploader.is_empty() {
+        details.push(format!("作者 {}", esc(&meta.uploader)));
+    }
+    if meta.duration > 0. {
+        details.push(format!("时长 {}", fmt_ts(meta.duration)));
+    }
+    if !meta.webpage_url.is_empty() {
+        details.push(format!("<a href=\"{}\">源视频</a>", esc(&source_url(meta))));
+    }
+    details.push(format!(
+        "{} 张截图 / {} 段文字",
+        sections.iter().filter(|s| !s.image.is_empty()).count(),
+        sections.iter().map(|s| s.speech.len()).sum::<usize>()
+    ));
     writeln!(
         body,
-        "<header><h1>{}</h1><p>作者 {} · 时长 {} · <a href=\"{}\">源视频</a> · {} 张截图 / {} 段语音</p></header>",
+        "<header><h1>{}</h1><p>{}</p></header>",
         esc(&meta.title),
-        esc(if meta.uploader.is_empty() { "未知" } else { &meta.uploader }),
-        fmt_ts(meta.duration),
-        esc(&source_url(meta)),
-        sections.len(),
-        sections.iter().map(|s| s.speech.len()).sum::<usize>(),
+        details.join(" · ")
     )
     .unwrap();
     for s in sections {
-        write!(
-            body,
-            "<section id=\"t{ts}\"><h2><a href=\"{url}\" target=\"_blank\">[{t}]</a></h2>\n<a href=\"{url}\" target=\"_blank\"><img loading=\"lazy\" src=\"{img}\" alt=\"{t}\"></a>\n",
-            ts = s.t.floor() as u64,
-            url = esc(&ts_url(meta, s.t)),
-            t = esc(&fmt_ts(s.t)),
-            img = esc(&s.image),
-        )
-        .unwrap();
-        if s.speech.is_empty() {
-            body.push_str("<p class=\"mute\">（本段无语音）</p>\n");
+        write!(body, "<section id=\"t{}\"><h2>", s.t.floor() as u64).unwrap();
+        if meta.webpage_url.is_empty() {
+            write!(body, "{}", esc(&fmt_ts(s.t))).unwrap();
         } else {
-            for ev in &s.speech {
-                writeln!(body, "<p>{}</p>", esc(&ev.text)).unwrap();
-            }
+            write!(
+                body,
+                "<a href=\"{}\" target=\"_blank\">{}</a>",
+                esc(&ts_url(meta, s.t)),
+                esc(&fmt_ts(s.t))
+            )
+            .unwrap();
+        }
+        body.push_str("</h2>\n");
+        if !s.image.is_empty() {
+            writeln!(
+                body,
+                "<img loading=\"lazy\" src=\"{}\" alt=\"视频 {} 的截图\">",
+                esc(&s.image),
+                esc(&fmt_ts(s.t))
+            )
+            .unwrap();
+        }
+        for ev in &s.speech {
+            writeln!(body, "<p>{}</p>", esc(&ev.text)).unwrap();
         }
         body.push_str("</section>\n");
     }

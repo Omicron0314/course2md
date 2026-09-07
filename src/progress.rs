@@ -59,6 +59,8 @@ pub fn stage(name: &str, status: &str) {
             "fetch" => "读取视频信息 / Reading video information",
             "download" => "下载视频 / Downloading video",
             "scenes" => "提取截图 / Extracting slides",
+            "scenes/scan" => "扫描画面 / Scanning video frames",
+            "scenes/extract" => "生成截图 / Saving screenshots",
             "audio" => "提取音频 / Extracting audio",
             "transcribe" | "asr" => "识别语音 / Transcribing speech",
             "llm" => "润色文字 / Proofreading transcript",
@@ -139,7 +141,7 @@ impl Bar {
         self.bar.inc(n);
         if is_json() {
             let cur = self.current.fetch_add(n, Ordering::Relaxed) + n;
-            self.emit_progress(cur);
+            self.emit_progress(cur, false);
         }
     }
 
@@ -147,7 +149,7 @@ impl Bar {
         self.bar.set_position(pos);
         if is_json() {
             self.current.store(pos, Ordering::Relaxed);
-            self.emit_progress(pos);
+            self.emit_progress(pos, false);
         }
     }
 
@@ -156,7 +158,7 @@ impl Bar {
         if is_json() {
             *self.message.lock().unwrap() = msg;
             let cur = self.current.load(Ordering::Relaxed);
-            self.emit_progress(cur);
+            self.emit_progress(cur, false);
         } else {
             self.bar.set_message(msg);
         }
@@ -164,14 +166,15 @@ impl Bar {
 
     pub fn finish(&self) {
         if is_json() {
-            self.emit_progress(self.current.load(Ordering::Relaxed));
+            self.emit_progress(self.current.load(Ordering::Relaxed), true);
         }
         self.bar.finish_and_clear();
     }
 
-    fn emit_progress(&self, current: u64) {
+    fn emit_progress(&self, current: u64, force: bool) {
         let mut last = self.last_emit.lock().unwrap();
-        if current != 0
+        if !force
+            && current != 0
             && current != self.total
             && last.elapsed() < std::time::Duration::from_millis(100)
         {

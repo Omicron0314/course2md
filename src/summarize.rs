@@ -97,7 +97,7 @@ fn parse_time(v: Option<&serde_json::Value>) -> f64 {
     0.0
 }
 
-fn parse_summary(content: &str) -> Option<Summary> {
+pub(crate) fn parse_summary(content: &str) -> Option<Summary> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
     if end <= start {
@@ -155,31 +155,32 @@ fn parse_summary(content: &str) -> Option<Summary> {
     })
 }
 
-fn chat_once(s: &LlmSettings, sys: &str, user: &str) -> Result<String> {
+fn chat_once(s: &LlmSettings, sys: &str, user: &str, description: &str) -> Result<String> {
     let body = llm::chat_body(&s.model, sys, user, llm::CHAT_MAX_TOKENS);
-    llm::send_chat(s, &body)
+    llm::send_chat_described(s, &body, "summary", description)
         .map_err(|f| f.err)
         .context("LLM 总结请求失败")
 }
 
-/// 单次总结；解析失败带修复指令重试一次。
-fn summarize_text(s: &LlmSettings, transcript: &str) -> Result<Summary> {
-    let content = chat_once(s, SYSTEM_PROMPT, &user_prompt(transcript))?;
-    if let Some(sm) = parse_summary(&content) {
-        return Ok(sm);
-    }
-    let repair = chat_once(
-        s,
-        "你是严格的 JSON 输出器。输出必须且只能是一个合法 JSON 对象，包含 tldr、key_points、outline 字段；不要代码围栏、不要注释、不要多余文字。",
-        &user_prompt(transcript),
-    )?;
-    // 报错须打印刚失败的 repair 内容，而不是第一次的 content
-    parse_summary(&repair).with_context(|| {
-        format!(
-            "LLM 总结无法解析服务响应 / Could not parse the service response: {:.200}",
-            repair
-        )
-    })
+/// One requested summary scope. A protocol failure is retained, never hidden by another paid request.
+fn summarize_text(s: &LlmSettings, transcript: &str, description: &str) -> Result<Summary> {
+    let content = chat_once(s, SYSTEM_PROMPT, &user_prompt(transcript), description)?;
+    parse_summary(&content).context("服务返回的摘要结构无效 / Invalid summary response")
+}
+
+/// Show the actionable cause once. Provider bodies never reach these errors;
+/// their safe status classification is produced by the request ledger.
+pub fn failure_message(error: &anyhow::Error) -> String {
+    let message = error
+        .downcast_ref::<crate::dispatch::Failure>()
+        .map(|failure| failure.message.clone())
+        .unwrap_or_else(|| error.chain().last().unwrap_or(error.as_ref()).to_string());
+    message
+        .split(" / ")
+        .next()
+        .unwrap_or(&message)
+        .trim()
+        .to_string()
 }
 
 fn split_chunks(events: &[TranscriptEvent], char_limit: usize) -> Vec<Vec<TranscriptEvent>> {
@@ -231,7 +232,12 @@ pub async fn summarize(
     if total_chars <= DIRECT_CHAR_LIMIT {
         let t = transcript;
         let s2 = s.clone();
-        return tokio::task::spawn_blocking(move || summarize_text(&s2, &t))
+        let description = format!(
+            "生成整篇摘要（{}–{}）",
+            crate::render::fmt_ts(events.first().unwrap().start),
+            crate::render::fmt_ts(events.last().unwrap().end)
+        );
+        return tokio::task::spawn_blocking(move || summarize_text(&s2, &t, &description))
             .await
             .context("总结线程 join 失败")?;
     }
@@ -245,23 +251,36 @@ pub async fn summarize(
     let mut partials: Vec<Summary> = Vec::new();
     for batch in chunks.chunks(SUMMARIZE_CONCURRENCY) {
         let mut handles = Vec::with_capacity(batch.len());
-        for chunk in batch {
+        for (offset, chunk) in batch.iter().enumerate() {
             let t = format!("{ctx}{}", build_transcript(chunk));
             let s2 = s.clone();
-            handles.push(tokio::task::spawn_blocking(move || summarize_text(&s2, &t)));
+            let description = format!(
+                "生成第 {}/{} 部分摘要（{}–{}）",
+                partials.len() + offset + 1,
+                chunks.len(),
+                crate::render::fmt_ts(chunk.first().unwrap().start),
+                crate::render::fmt_ts(chunk.last().unwrap().end)
+            );
+            handles.push(tokio::task::spawn_blocking(move || {
+                summarize_text(&s2, &t, &description)
+            }));
         }
-        let base = partials.len();
-        for (off, h) in handles.into_iter().enumerate() {
-            let idx = base + off;
-            let sm = h.await.context("总结线程 join 失败")?.unwrap_or_else(|e| {
-                tracing::warn!("部分内容总结失败 / Could not summarize section {idx}: {e:#}");
-                Summary {
-                    tldr: String::new(),
-                    key_points: vec![],
-                    outline: vec![],
+        let mut failure = None;
+        // Join every started request so its confirmed result is saved, even if a peer failed.
+        for handle in handles {
+            match handle.await.context("摘要工作进程中断")? {
+                Ok(summary) => partials.push(summary),
+                Err(error) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
                 }
-            });
-            partials.push(sm);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error.context(
+                "部分摘要尚未完成，没有生成不完整的整篇摘要 / Summary parts are incomplete",
+            ));
         }
     }
     // 合并分段总结
@@ -291,34 +310,15 @@ pub async fn summarize(
 \"key_points\": [整个视频的3-8条要点], \
 \"outline\": [{{\"t\":秒,\"title\":\"章节标题\",\"detail\":\"简述\"}}]}}"
             ),
+            "将全部分段摘要合并为整篇摘要",
         )
     })
     .await
     .context("合并线程 join 失败")?;
-    if let Ok(combined) = combined
-        && let Some(sm) = parse_summary(&combined)
-    {
-        return Ok(sm);
-    }
-    // 合并失败：拼接分块总结兜底
-    let mut tldr = String::new();
-    let mut kp: Vec<String> = vec![];
-    let mut ol: Vec<OutlineItem> = vec![];
-    for sm in &partials {
-        if tldr.is_empty() && !sm.tldr.is_empty() {
-            tldr = sm.tldr.clone();
-        }
-        kp.extend(sm.key_points.iter().cloned());
-        ol.extend(sm.outline.iter().cloned());
-    }
-    if kp.is_empty() && ol.is_empty() {
-        bail!("视频总结失败：所有分段均未返回有效内容");
-    }
-    Ok(Summary {
-        tldr,
-        key_points: kp,
-        outline: ol,
-    })
+    let combined = combined?;
+    parse_summary(&combined).context(
+        "摘要合并未完成，已保存各段已确认结果 / Summary merge failed; completed parts retained",
+    )
 }
 
 /// 生成插入 course.md 的总结区块（markdown，哨兵注释包裹）。

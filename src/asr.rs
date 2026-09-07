@@ -123,12 +123,7 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
                 crate::apple::run_coreml(&wav, max_speech, &model, tmp.path(), cp)
             })
             .await;
-            match joined {
-                Ok(events) => return Ok(events), // 空 = VAD 无语音（终态，不再回落）
-                Err(e) => tracing::warn!(
-                    "Apple 识别失败，正在尝试 llama.cpp / Apple transcription failed; trying llama.cpp: {e:#}"
-                ),
-            }
+            return joined.context("已选的 Apple 识别方式未完成；任务参数和进度已保留 / Selected Apple transcription failed; task settings retained");
         }
         #[cfg(not(apple_native))]
         {
@@ -146,8 +141,7 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
     let threads = cfg.threads;
     let max_speech = cfg.max_speech;
     let llama = crate::models::ensure_llama_or_download(&cfg.model_dir).await?;
-    // coreml 回落场景：身份随实际转写后端（llama/qwen3），旧 coreml 进度作废，
-    // 避免同一 checkpoint 混入两个模型的转写文本。
+    // CPU/GPU paths share the same concrete GGUF model identity.
     let id = AsrIdentity::new(
         "llama",
         crate::models::llama_gguf_identity(),
@@ -301,6 +295,7 @@ pub(crate) fn run_chunks(
 
     let mut err: Option<anyhow::Error> = None;
     for (i, seg) in segs.iter().copied().enumerate() {
+        crate::dispatch::check_control()?;
         let (start, end) = (seg.start, seg.end);
         if cp.is_done(start, end) {
             pb.inc(1);
@@ -349,6 +344,9 @@ fn run_api(
     // key 解析（非递归）：配置 > 非空环境变量；空值不覆盖（防无限递归）
     let api_key = if !api.api_key.trim().is_empty() {
         api.api_key.clone()
+    } else if crate::dispatch::is_active() {
+        // The task preflight distinguished missing credentials from explicit no-auth.
+        String::new()
     } else {
         crate::config::asr_api_key_from_env()
             .context("云端识别未设置密钥 / Cloud speech API key missing. 设置 / Set COURSE2MD_ASR_API_KEY or [asr_api].api_key.")?
@@ -363,15 +361,14 @@ fn run_api(
     }
 
     let tmp = crate::runtime::TempWorkDir::new("asr")?;
-    let base = api.base_url.trim().trim_end_matches('/');
-    let url = match api.mode {
-        crate::settings::AsrApiMode::Transcriptions => format!("{base}/audio/transcriptions"),
-        crate::settings::AsrApiMode::Chat => format!("{base}/chat/completions"),
-    };
+    let url = crate::config::asr_endpoint(api)?;
     let pb = crate::progress::Bar::new("transcribe", segs.len() as u64)
         .with_template("{spinner:.green} asr {pos}/{len} [{bar:32.cyan/blue}] {elapsed} {msg}");
 
-    let client = ureq::AgentBuilder::new().timeout(API_HTTP_TIMEOUT).build();
+    let client = ureq::AgentBuilder::new()
+        .timeout(API_HTTP_TIMEOUT)
+        .redirects(0)
+        .build();
     // 断点续跑：预先过滤出未完成的 chunk（worker 只拿真正需要执行的任务）
     let pending: Vec<usize> = (0..segs.len())
         .filter(|&i| !cp.is_done(segs[i].start, segs[i].end))
@@ -473,6 +470,7 @@ fn post_json_retry(
         key,
         "application/json",
         &serde_json::to_vec(body)?,
+        Some(body),
     )
 }
 
@@ -482,38 +480,94 @@ fn post_bytes_retry(
     key: Option<&str>,
     content_type: &str,
     body: &[u8],
+    identity: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let mut delay = RETRY_BACKOFF_BASE;
     for attempt in 1..=MAX_ATTEMPTS {
-        let mut req = agent.post(url);
-        if let Some(k) = key {
-            req = req.set("Authorization", &format!("Bearer {k}"));
-        }
-        match req.set("Content-Type", content_type).send_bytes(body) {
-            Ok(resp) => {
-                return resp
-                    .into_json()
-                    .context("无法解析服务响应 / Could not parse the service response");
-            }
-            Err(e) => {
-                let retryable = match &e {
-                    ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
-                    ureq::Error::Transport(_) => true,
-                };
-                if retryable && attempt < MAX_ATTEMPTS {
-                    tracing::warn!(
-                        attempt,
-                        backoff_secs = delay.as_secs(),
-                        "请求失败，稍后重试 / Request failed; retrying shortly: {e}"
+        crate::dispatch::check_control()?;
+        let send = || {
+            let request = agent.post(url).set("Content-Type", content_type);
+            let request = if let Some(key) = key.filter(|key| !key.is_empty()) {
+                request.set("Authorization", &format!("Bearer {key}"))
+            } else {
+                request
+            };
+            crate::dispatch::receive(request.send_bytes(body))
+        };
+        // No key argument means the private local model server, not a cloud API.
+        // Cloud no-auth mode still passes Some("") and gets a durable request receipt.
+        let result = if key.is_some() {
+            let fallback = serde_json::json!({"payload_sha256": crate::execution::digest(body)});
+            let scope = identity.unwrap_or(&fallback);
+            let description = match (
+                scope["segment_start"].as_f64(),
+                scope["segment_end"].as_f64(),
+            ) {
+                (Some(start), Some(end)) => format!(
+                    "识别视频 {}–{} 的声音",
+                    crate::render::fmt_ts(start),
+                    crate::render::fmt_ts(end)
+                ),
+                _ => "识别视频声音".into(),
+            };
+            crate::dispatch::json_request_described(
+                "asr",
+                "transcription",
+                &description,
+                url,
+                scope,
+                send,
+                |value| {
+                    anyhow::ensure!(
+                        value.get("error").is_none_or(serde_json::Value::is_null),
+                        "语音服务返回错误内容 / Speech service returned an error"
                     );
-                    std::thread::sleep(delay);
-                    delay *= 2;
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "请求失败，请检查网络和服务配置 / Request failed; check your connection and service settings: {e}"
-                    ));
+                    let content = &value["choices"][0]["message"]["content"];
+                    anyhow::ensure!(
+                        value["text"].is_string()
+                            || content.is_string()
+                            || content.as_array().is_some_and(|parts| parts
+                                .iter()
+                                .any(|part| part["text"].is_string())),
+                        "语音服务响应缺少文字，不能当作静音 / Speech response is missing text"
+                    );
+                    Ok(())
+                },
+            )
+        } else {
+            match send() {
+                Ok(response) if (200..300).contains(&response.status) => {
+                    serde_json::from_slice(&response.body).map_err(|e| crate::dispatch::Failure {
+                        status: None,
+                        retryable: false,
+                        uncertain: false,
+                        message: e.to_string(),
+                        unsupported_response_format: false,
+                    })
                 }
+                Ok(response) => Err(crate::dispatch::Failure {
+                    status: Some(response.status),
+                    retryable: response.status == 429 || response.status >= 500,
+                    uncertain: false,
+                    message: format!("本机识别请求失败（HTTP {}）", response.status),
+                    unsupported_response_format: false,
+                }),
+                Err(error) => Err(crate::dispatch::Failure {
+                    status: None,
+                    retryable: true,
+                    uncertain: false,
+                    message: error.message,
+                    unsupported_response_format: false,
+                }),
             }
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) if error.retryable && attempt < MAX_ATTEMPTS => {
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+            Err(error) => return Err(anyhow::Error::new(error)),
         }
     }
     unreachable!()
@@ -539,10 +593,18 @@ fn transcribe_api(t: &ApiTarget, chunk: &Path, seg: Seg, wav: &Path) -> Result<O
         .context("无法切分音频 / Could not split audio")?;
     let bytes = std::fs::read(chunk)
         .with_context(|| format!("读取音频片段 / Reading audio segment: {}", chunk.display()))?;
+    let identity = serde_json::json!({"model":t.model,"mode":t.mode,"audio_sha256":crate::execution::digest(&bytes),"segment_start":seg.start,"segment_end":seg.end,"cut_start":seg.cut_start,"cut_end":seg.cut_end});
     let v = match t.mode {
         crate::settings::AsrApiMode::Transcriptions => {
             let (content_type, body) = transcription_form(t.model, &bytes);
-            post_bytes_retry(t.client, t.url, Some(t.key), &content_type, &body)?
+            post_bytes_retry(
+                t.client,
+                t.url,
+                Some(t.key),
+                &content_type,
+                &body,
+                Some(&identity),
+            )?
         }
         crate::settings::AsrApiMode::Chat => {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -554,7 +616,14 @@ fn transcribe_api(t: &ApiTarget, chunk: &Path, seg: Seg, wav: &Path) -> Result<O
                     {"type": "input_audio", "input_audio": {"data": b64, "format": "wav"}}
                 ]}]
             });
-            post_json_retry(t.client, t.url, Some(t.key), &body)?
+            post_bytes_retry(
+                t.client,
+                t.url,
+                Some(t.key),
+                "application/json",
+                &serde_json::to_vec(&body)?,
+                Some(&identity),
+            )?
         }
     };
     if let Some(e) = v

@@ -14,6 +14,100 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[path = "model_status.rs"]
+pub mod status;
+
+/// Retrieve missing local model files before a large media download. Cached weights are
+/// loaded by the later transcription stage; subtitle-only work never calls this function.
+pub async fn ensure_cache(
+    provider: crate::config::AsrProvider,
+    model: &str,
+    root: &Path,
+) -> Result<()> {
+    use crate::config::AsrProvider;
+    let status = status::inspect(provider, model, root)?;
+    anyhow::ensure!(
+        status.can_prepare,
+        "当前识别方式不支持这个模型，原任务参数已保留"
+    );
+    if matches!(
+        status.state,
+        status::CacheState::Cached | status::CacheState::Loaded
+    ) {
+        return Ok(());
+    }
+    match provider {
+        AsrProvider::Cpu | AsrProvider::Gpu => download_models(root).await,
+        AsrProvider::Coreml => {
+            #[cfg(apple_native)]
+            {
+                let model = model.to_owned();
+                tokio::task::spawn_blocking(move || crate::apple::prepare_cache(&model))
+                    .await
+                    .context("模型缓存准备未完成")?
+            }
+            #[cfg(not(apple_native))]
+            {
+                Err(anyhow::anyhow!("此程序未包含 Apple 原生识别运行时"))
+            }
+        }
+        AsrProvider::Npu => {
+            let model = crate::npu::resolve_npu_model(Some(model));
+            tokio::task::spawn_blocking(move || crate::npu::prepare_npu_model(&model))
+                .await
+                .context("NPU 模型准备未完成")?
+        }
+        AsrProvider::Api => Ok(()),
+    }
+}
+
+/// Prepare the exact selected backend without sending course content or changing settings.
+pub async fn prepare(
+    provider: crate::config::AsrProvider,
+    model: &str,
+    root: &Path,
+) -> Result<status::LocalModelStatus> {
+    use crate::config::AsrProvider;
+    let before = status::inspect(provider, model, root)?;
+    anyhow::ensure!(
+        before.can_prepare,
+        "这种识别方式不支持所选模型，请明确选择其他模型"
+    );
+    crate::progress::stage("model/prepare", "start");
+    let result = match provider {
+        AsrProvider::Cpu | AsrProvider::Gpu => download_models(root).await,
+        AsrProvider::Coreml => {
+            #[cfg(apple_native)]
+            {
+                let model = model.to_owned();
+                tokio::task::spawn_blocking(move || crate::apple::prepare_model(&model))
+                    .await
+                    .context("模型准备进程未完成")?
+            }
+            #[cfg(not(apple_native))]
+            {
+                Err(anyhow::anyhow!("此转换程序未包含 Apple 原生识别运行时"))
+            }
+        }
+        AsrProvider::Npu => {
+            let model = crate::npu::resolve_npu_model(Some(model));
+            tokio::task::spawn_blocking(move || crate::npu::prepare_npu_model(&model))
+                .await
+                .context("NPU 模型准备进程未完成")?
+        }
+        AsrProvider::Api => unreachable!(),
+    };
+    let after = status::inspect(provider, model, root).unwrap_or(before);
+    let loaded = result.is_ok() && matches!(provider, AsrProvider::Coreml | AsrProvider::Npu);
+    let error = result.as_ref().err().map(|error| format!("{error:#}"));
+    if let Err(error) = status::record_result(&after, loaded, error) {
+        tracing::warn!("模型检查结果暂时无法保存：{error:#}");
+    }
+    result?;
+    crate::progress::stage("model/prepare", "done");
+    status::inspect(provider, model, root)
+}
+
 const HF_REPO_PATH: &str = "ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/main";
 
 /// llama GGUF 模型 slug：模型目录名由它派生，身份字符串与它同源
@@ -62,7 +156,7 @@ pub fn llama_ready(root: &Path) -> bool {
 }
 
 /// 文件完整性：有 manifest（下载完成时记录的精确字节数）时按字节数校验；
-/// 无 manifest 的旧缓存退回 >1MB 启发式。
+/// 无 manifest 的旧缓存检查合法 GGUF 文件头及最小大小；这不等于模型已加载成功。
 fn file_complete(path: &Path) -> bool {
     let Ok(md) = fs::metadata(path) else {
         return false;
@@ -70,6 +164,15 @@ fn file_complete(path: &Path) -> bool {
     // >1MB 启发式：GGUF 合法文件头（magic + 版本 + 张量元数据索引）加上任何
     // 可用权重都远超 1MB；≤1MB 必是截断残留或代理/镜像返回的错误页面。
     if !path.is_file() || md.len() <= 1_000_000 {
+        return false;
+    }
+    let mut header = [0_u8; 8];
+    if fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_err()
+        || &header[..4] != b"GGUF"
+        || !matches!(u32::from_le_bytes(header[4..].try_into().unwrap()), 2 | 3)
+    {
         return false;
     }
     let manifest = path.with_extension("manifest.json");
@@ -132,6 +235,10 @@ pub async fn download_models(root: &Path) -> Result<()> {
     );
     model.with_context(mirror_hint)?;
     projector.with_context(mirror_hint)?;
+    anyhow::ensure!(
+        llama_ready(root),
+        "下载文件不是完整的 GGUF 模型，已有文件已保留，可以重试准备"
+    );
     tracing::info!(path = %root.display(), "models ready");
     Ok(())
 }

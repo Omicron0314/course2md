@@ -9,7 +9,7 @@
 //! - **写盘失败不标记完成**：record() 返回 Result，只有落盘成功才计入 done。
 //! - **损坏策略**：最后一行允许是崩溃残留的半截 JSON（容忍恢复）；
 //!   中间任何损坏行都是硬错误（静默跳过会导致转写内容悄悄缺失）。
-//! - **`--no-resume` 清档**：不复用进度时删除旧 checkpoint，
+//! - **不兼容进度归档**：不复用进度时移动旧 checkpoint 到 .previous-asr，
 //!   否则旧记录会与新记录叠加，之后 resume 会输出双份文本。
 //! - 全部完成后原子写 `.asr_done` 标记，重跑完全跳过 ASR。
 
@@ -71,6 +71,18 @@ struct LoadedEvents {
 }
 
 impl Checkpoint {
+    /// Read completed chunks for a failed task's material preview without opening a
+    /// writer, repairing a truncated tail, or marking the transcription complete.
+    pub fn saved_events(out_dir: &Path) -> Result<Vec<TranscriptEvent>> {
+        let mut events = Self::load_events(&out_dir.join("asr.jsonl"))?
+            .events
+            .into_iter()
+            .filter(|event| !event.text.trim().is_empty())
+            .collect::<Vec<_>>();
+        events.sort_by(|a, b| a.start.total_cmp(&b.start));
+        Ok(events)
+    }
+
     /// 在 out_dir 下打开（或按 resume/身份决定作废重开）checkpoint。
     pub fn open(out_dir: &Path, resume: bool, identity: &AsrIdentity) -> Result<Self> {
         let path = out_dir.join("asr.jsonl");
@@ -100,7 +112,7 @@ impl Checkpoint {
             ok
         });
 
-        let usable = resume && identity_matches.unwrap_or(false);
+        let usable = resume && identity_matches?;
         if !usable {
             // 不复用：清掉全部旧进度（否则旧记录会叠加进本次结果）
             Self::clear(&path, &done_path, &identity_path)?;
@@ -172,12 +184,26 @@ impl Checkpoint {
     }
 
     fn clear(path: &Path, done_path: &Path, identity_path: &Path) -> Result<()> {
-        for p in [path, done_path] {
-            if p.exists() && std::fs::remove_file(p).is_err() {
-                anyhow::bail!("无法清除旧 checkpoint {}", p.display());
-            }
+        let old = [path, done_path, identity_path]
+            .into_iter()
+            .filter(|p| p.exists())
+            .collect::<Vec<_>>();
+        if old.is_empty() {
+            return Ok(());
         }
-        let _ = std::fs::remove_file(identity_path);
+        let history = path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(".previous-asr");
+        std::fs::create_dir_all(&history)?;
+        let archive = tempfile::Builder::new()
+            .prefix("checkpoint-")
+            .tempdir_in(&history)?
+            .keep();
+        for file in old {
+            std::fs::rename(file, archive.join(file.file_name().unwrap()))
+                .with_context(|| format!("无法保留旧识别进度 {}", file.display()))?;
+        }
         Ok(())
     }
 
@@ -328,6 +354,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn failed_task_preview_reads_completed_chunks_without_mutating_a_truncated_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"{\"start\":2.0,\"end\":3.0,\"text\":\"second\"}\n{\"start\":0.0,\"end\":1.0,\"text\":\"first\"}\n{\"start\":";
+        let path = dir.path().join("asr.jsonl");
+        std::fs::write(&path, bytes).unwrap();
+        let events = Checkpoint::saved_events(dir.path()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].text, "first");
+        assert_eq!(events[1].text, "second");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(!dir.path().join(".asr_done").exists());
     }
 
     #[test]

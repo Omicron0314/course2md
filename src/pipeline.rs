@@ -1,400 +1,982 @@
-//! 编排：元数据 → 目录 → 下载 → (截图 ∥ 音频) → 识别 → 渲染。
+//! Convert a fixed task into a separately published, immutable note version.
 
-use crate::asr;
-use crate::config::{self, PipelineConfig};
-use crate::fetch::{self, VideoMeta};
-use crate::media;
-use crate::progress;
-use crate::render;
-use crate::scene;
-use crate::timeline;
+use crate::{
+    artifact::{self, Outcome, Outcomes, Status, Target},
+    asr,
+    config::{self, PipelineConfig},
+    execution,
+    fetch::{self, VideoMeta},
+    media, progress, scene, timeline,
+};
 use anyhow::{Context, Result};
-use std::path::Path;
-use std::time::Instant;
+use serde::{Deserialize, Serialize};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
+/// Traditional CLI entry. Its generated task directory is stable for compatible recovery.
+/// New settings or --no-resume use another work directory and never overwrite old notes.
 pub async fn run(cfg: &PipelineConfig) -> Result<()> {
-    let t_total = Instant::now();
-    asr::reset_llama_spawn_args();
+    let started = Instant::now();
     cfg.validate().context("配置预检失败 / Invalid settings")?;
-    crate::error::require_cmd("ffmpeg")?;
-    crate::error::require_cmd("ffprobe")?;
-    // LLM 预检：配置错误应在跑完昂贵的下载/识别之前暴露
-    if cfg.llm.enabled {
-        crate::llm::validate(&cfg.llm)?;
-    }
-
     let local = Path::new(&cfg.url);
     let is_local = local.is_file();
     if !is_local {
         crate::error::require_cmd("yt-dlp")?;
     }
-
-    let mut cfg = cfg.clone();
-
     progress::stage("fetch", "start");
     let meta = if is_local {
-        let dur = media::probe_duration(local).await.unwrap_or(0.0);
-        let stem = local
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("local")
-            .to_string();
         VideoMeta {
-            title: stem.clone(),
+            title: sanitize_stem(local),
             uploader: String::new(),
-            duration: dur,
-            webpage_url: local.display().to_string(),
+            duration: media::probe_duration(local).await.unwrap_or(0.),
+            webpage_url: cfg.url.clone(),
             extractor: "local".into(),
-            id: stem,
+            id: execution::file_digest(local)?,
         }
     } else {
-        tracing::info!("fetch metadata");
         fetch::fetch_meta(&cfg.url).await?
     };
     progress::stage("fetch", "done");
-
-    let id = if is_local {
-        // 本地文件：stem + 内容指纹短哈希，避免同名不同目录的课件互相覆盖
-        let fp = local_fingerprint(local);
-        format!("{}-{fp}", sanitize_stem(local))
-    } else if meta.id.is_empty() {
-        config::infer_slug(&cfg.url)
-    } else {
-        meta.id.clone()
-    };
-    let title = if meta.title.is_empty() {
-        id.clone()
-    } else {
-        meta.title.clone()
-    };
     let platform = config::platform_from(&cfg.url, &meta.extractor);
-    cfg.out_dir = config::course_dir(&cfg.out_root, &platform, &title, &id);
-    tokio::fs::create_dir_all(&cfg.out_dir).await?;
-    let _run_lock = crate::runtime::lock_file(&cfg.out_dir.join(".course2md.lock"))?;
-    meta.save(&cfg.meta_path())?;
-    tracing::info!(
-        title = %meta.title,
-        platform = %platform,
-        id = %id,
-        out = %cfg.out_dir.display(),
-        duration = format_args!("{:.0}s", meta.duration),
-        "video"
-    );
-
-    // out_dir 已确定：此后的失败都写诊断 run.json（issue #12 复测：只有成功才写
-    // run.json 让失败现场无迹可查）。更早的失败（预检/meta）无处安放，不写。
-    let r = run_after_prepare(&cfg, &meta, is_local, &platform, &id, t_total).await;
-    if let Err(e) = &r {
-        write_failure_run_json(&cfg, is_local, &platform, &id, e, t_total);
+    let source_id = if is_local {
+        format!("local:sha256:{}", meta.id)
+    } else {
+        format!(
+            "{}:{}",
+            platform,
+            if meta.id.is_empty() {
+                config::infer_slug(&cfg.url)
+            } else {
+                meta.id.clone()
+            }
+        )
+    };
+    let course_id = execution::digest(source_id.as_bytes());
+    let course_dir = cfg.out_root.join(&platform).join(&course_id);
+    let mut identity_config = cfg.clone();
+    identity_config.llm.api_key.clear();
+    identity_config.asr_api.api_key.clear();
+    let binding =
+        serde_json::json!({"source_id": source_id, "config": identity_config, "title": meta.title});
+    let mut task_id = execution::digest(&serde_json::to_vec(&binding)?);
+    if !cfg.resume {
+        task_id = format!(
+            "{}-{}",
+            &task_id[..24],
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        );
     }
-    r
+    let target = Target {
+        task_id: task_id.clone(),
+        course_id,
+        source_id,
+        version_id: task_id.clone(),
+        course_dir,
+    };
+    let mut cfg = cfg.clone();
+    cfg.out_dir = target.course_dir.join(".work").join(&task_id);
+    if cfg.provider == config::AsrProvider::Api && cfg.asr_api.api_key.is_empty() {
+        if let Some(key) = config::asr_api_key_from_env() {
+            cfg.asr_api.api_key = key;
+        }
+    }
+    cfg.resume = true;
+    let _dispatch = crate::dispatch::install(&cfg.out_dir, None, &Default::default())?;
+    std::fs::create_dir_all(&cfg.out_dir)?;
+    let _lock = crate::runtime::lock_file(&cfg.out_dir.join(".task.lock"))?;
+    execution::bind_work_dir(&cfg.out_dir, &binding)?;
+    let result = run_prepared(
+        &cfg,
+        &meta,
+        &target,
+        is_local,
+        SubtitleInput::Discover,
+        false,
+        false,
+        started,
+    )
+    .await;
+    if let Err(error) = &result {
+        write_failure_run_json(&cfg, is_local, &platform, &meta.id, error, started);
+    }
+    result
 }
 
-/// out_dir 确定之后的主流程（下载 → 截图/音频 → 识别 → 渲染 → 成功 run.json）。
-async fn run_after_prepare(
+/// Desktop entry: all mutable configuration and credentials have already been resolved.
+pub async fn run_task(request: &execution::Request, cfg: &PipelineConfig) -> Result<()> {
+    let started = Instant::now();
+    request.validate()?;
+    let target = Target::from_request(request);
+    std::fs::create_dir_all(&cfg.out_dir)?;
+    let _lock = crate::runtime::lock_file(&cfg.out_dir.join(".task.lock"))?;
+    execution::bind_work_dir(&cfg.out_dir, &request.binding(cfg)?)?;
+    let is_local = Path::new(&request.source).is_file();
+    let meta = VideoMeta {
+        title: request.title.clone(),
+        uploader: request.author.clone(),
+        duration: request.duration,
+        webpage_url: request.source.clone(),
+        extractor: if is_local {
+            "local".into()
+        } else {
+            config::platform_from(&request.source, "")
+        },
+        id: request.source_id.clone(),
+    };
+    if let execution::Operation::Reprocess {
+        base_version_dir,
+        components,
+        prior_work_dir,
+    } = &request.operation
+    {
+        let result = reprocess(
+            request,
+            cfg,
+            &target,
+            base_version_dir,
+            components,
+            prior_work_dir.as_deref(),
+            started,
+        )
+        .await;
+        if let Err(error) = &result {
+            write_failure_run_json(cfg, is_local, &meta.extractor, &meta.id, error, started);
+        }
+        return result;
+    }
+    let subtitle = if let Some(events) = &request.subtitle_events {
+        Some(events.clone())
+    } else if let Some(path) = &request.subtitle {
+        let content = std::fs::read_to_string(path)
+            .context("无法读取已选字幕 / Cannot read selected subtitles")?;
+        Some(crate::subtitle::parse_subtitle(&content))
+    } else {
+        None
+    };
+    let result = run_prepared(
+        cfg,
+        &meta,
+        &target,
+        is_local,
+        SubtitleInput::Selected(subtitle),
+        true,
+        request.allow_unauthenticated_asr,
+        started,
+    )
+    .await;
+    if let Err(error) = &result {
+        write_failure_run_json(cfg, is_local, &meta.extractor, &meta.id, error, started);
+    }
+    result
+}
+
+async fn reprocess(
+    request: &execution::Request,
+    cfg: &PipelineConfig,
+    target: &Target,
+    base_dir: &Path,
+    components: &[String],
+    prior_work: Option<&Path>,
+    started: Instant,
+) -> Result<()> {
+    crate::dispatch::check_control()?;
+    let base = artifact::read_manifest(&base_dir.join("manifest.json"))?;
+    // Reprocessing consumes the internal document, timeline and image assets.
+    // A manually edited presentation file must stay intact, and does not make
+    // these verified inputs unusable.
+    let mut inputs = base.clone();
+    inputs.assets.retain(|asset| {
+        asset.path != base.markdown
+            || asset.path == base.document
+            || base.frames.iter().any(|frame| frame.image == asset.path)
+    });
+    artifact::validate_version(base_dir, &inputs)?;
+    if let Some(markdown) = base.assets.iter().find(|asset| asset.path == base.markdown) {
+        let unchanged = artifact::safe_asset_path(base_dir, &markdown.path)
+            .and_then(|path| execution::file_digest(&path))
+            .is_ok_and(|digest| digest == markdown.sha256);
+        if !unchanged {
+            tracing::info!("原版 Markdown 已有改动；本次补做使用软件保存的正文，原文件保留");
+        }
+    }
+    anyhow::ensure!(
+        base.source_id == request.source_id && base.course_id == request.course_id,
+        "补做任务与原笔记来源不一致 / Reprocessing source does not match the base note"
+    );
+    let has = |name: &str| components.iter().any(|component| component == name);
+    let mut document: artifact::Document =
+        serde_json::from_slice(&std::fs::read(base_dir.join(&base.document))?)?;
+    if components.iter().all(|component| component == "exports") {
+        anyhow::ensure!(
+            !cfg.formats.is_empty(),
+            "请选择需要导出的文件格式 / Select an export format"
+        );
+        let export_root = target
+            .course_dir
+            .join("exports")
+            .join(&base.version_id)
+            .join(&target.task_id);
+        let mut exports = std::collections::BTreeMap::new();
+        let mut outputs = Vec::new();
+        for format in &cfg.formats {
+            let destination = export_root.join(crate::portable::file_name(*format));
+            match export_for_task(base_dir, *format, &destination, &cfg.out_dir) {
+                Ok(path) => {
+                    outputs.push(path);
+                    exports.insert(format.to_string(), Outcome::succeeded());
+                }
+                Err(error) => {
+                    exports.insert(format.to_string(), Outcome::failed(format!("{error:#}")));
+                }
+            }
+        }
+        let partial = exports
+            .values()
+            .any(|outcome| outcome.status == Status::Failed);
+        crate::checkpoint::atomic_write(
+            &cfg.out_dir.join("export-result.json"),
+            &serde_json::to_vec_pretty(
+                &serde_json::json!({"schema":1,"outputs":outputs,"outcomes":exports}),
+            )?,
+        )?;
+        progress::emit(
+            serde_json::json!({"type":"done","operation":"exports","task_id":request.task_id,"course_id":base.course_id,"version_id":base.version_id,"out_dir":base_dir,"manifest":base_dir.join("manifest.json"),"title":document.meta.title,"slides":base.frames.len(),"segments":document.sections.iter().map(|s|s.speech.len()).sum::<usize>(),"chars":document.sections.iter().flat_map(|s|&s.speech).map(|e|e.text.chars().count()).sum::<usize>(),"outputs":outputs,"partial":partial,"outcomes":{"exports":exports},"elapsed_secs":started.elapsed().as_secs_f64()}),
+        );
+        return Ok(());
+    }
+    if let Some(existing) = artifact::published(target)? {
+        emit_done(target, &existing, &document.sections, started);
+        return Ok(());
+    }
+    if has("proofreading") || has("summary") {
+        crate::llm::validate(&cfg.llm)?;
+    }
+    if let Some(prior) = prior_work {
+        let identity: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(prior.join("task-identity.json"))?)?;
+        anyhow::ensure!(
+            identity["source_id"].as_str() == Some(request.source_id.as_str()),
+            "旧进度与此视频来源不符 / Prior work belongs to another source"
+        );
+        anyhow::ensure!(
+            identity["task_id"]
+                .as_str()
+                .is_none_or(|id| id == base.task_id),
+            "旧进度与原笔记任务不符 / Prior work belongs to another task"
+        );
+        let ledger_dir = cfg.out_dir.join("requests");
+        std::fs::create_dir_all(&ledger_dir)?;
+        for mut receipt in crate::dispatch::receipts(prior)? {
+            let needed = (has("proofreading") && receipt.purpose == "proofreading")
+                || (has("summary") && receipt.purpose == "summary");
+            let matching_service = request.service_versions.get("llm").map_or(
+                receipt.service_version.starts_with("snapshot:"),
+                |version| version == &receipt.service_version,
+            );
+            if needed && matching_service && execution::valid_id(&receipt.stable_id) {
+                let destination = ledger_dir.join(format!("{}.json", receipt.stable_id));
+                if !destination.exists() {
+                    // This new task explicitly requests another attempt at selected
+                    // failed components. Persist authorization only while importing;
+                    // restarting this task must never refresh a consumed authorization.
+                    receipt.retry_authorized = matches!(
+                        receipt.state,
+                        crate::dispatch::State::Failed | crate::dispatch::State::Rejected
+                    )
+                    .then(|| receipt.request_id.clone());
+                    crate::checkpoint::atomic_write(
+                        &destination,
+                        &serde_json::to_vec_pretty(&receipt)?,
+                    )?;
+                }
+            }
+        }
+        if !cfg.media_path().exists()
+            && verified_file(&prior.join("media.mp4"), &prior.join("media.sha256"))?
+        {
+            std::fs::copy(prior.join("media.mp4"), cfg.media_path())?;
+            save_file_digest(&cfg.media_path(), &cfg.out_dir.join("media.sha256"))?;
+        }
+    }
+    // Copy verified base images into a separate namespace; a failed new screenshot pass
+    // cannot mix old and new frames or mutate the old version through shared hard links.
+    for section in &mut document.sections {
+        if !section.image.is_empty() {
+            let source = artifact::safe_asset_path(base_dir, &section.image)?;
+            let relative = format!("base/{}", section.image);
+            let dest = cfg.out_dir.join(&relative);
+            std::fs::create_dir_all(dest.parent().unwrap())?;
+            if !dest.exists() {
+                std::fs::copy(source, &dest)?;
+            }
+            section.image = relative;
+        }
+    }
+    if base_dir.join("timeline.jsonl").is_file() {
+        std::fs::copy(base_dir.join("timeline.jsonl"), cfg.timeline_path())?;
+    }
+    let mut outcomes = base.outcomes.clone();
+    outcomes.exports.clear();
+    document.meta.title = request.title.clone();
+    if has("screenshots") {
+        crate::dispatch::check_control()?;
+        crate::error::require_cmd("ffmpeg")?;
+        crate::error::require_cmd("ffprobe")?;
+        let media_path = if Path::new(&request.source).is_file() {
+            PathBuf::from(&request.source)
+        } else {
+            if !verified_file(&cfg.media_path(), &cfg.out_dir.join("media.sha256"))? {
+                anyhow::ensure!(
+                    !Path::new(&request.source).is_absolute()
+                        && !request.source_id.starts_with("local:"),
+                    "原视频已移动或删除，无法补做截图；原笔记仍可阅读 / Original video is unavailable; the saved note remains readable"
+                );
+                anyhow::ensure!(
+                    !cfg.no_download,
+                    "找不到截图所需的视频 / Video required for screenshots is unavailable"
+                );
+                crate::error::require_cmd("yt-dlp")?;
+                progress::stage("download", "start");
+                fetch::download(&cfg.url, &cfg.media_path(), cfg.max_height, false).await?;
+                save_file_digest(&cfg.media_path(), &cfg.out_dir.join("media.sha256"))?;
+                progress::stage("download", "done");
+            }
+            cfg.media_path()
+        };
+        match cached_frames(cfg, &media_path).await {
+            Ok(frames) if !frames.is_empty() => {
+                let speech = document
+                    .sections
+                    .iter()
+                    .flat_map(|section| section.speech.clone())
+                    .collect();
+                document.sections = timeline::merge(frames, speech, document.meta.duration);
+                outcomes.screenshots = Outcome::succeeded();
+            }
+            result => {
+                outcomes.screenshots = Outcome::failed(match result {
+                    Err(error) => format!("{error:#}"),
+                    _ => "没有提取到截图 / No screenshots captured".into(),
+                });
+                if components.len() == 1 {
+                    anyhow::bail!(
+                        "截图尚未完成；原笔记保持可用 / Screenshot extraction failed; the original note remains available"
+                    );
+                }
+            }
+        }
+    }
+    if has("proofreading") {
+        progress::stage("llm", "start");
+        crate::dispatch::check_control()?;
+        // The original complete transcript is an immutable version asset. Rebuild the
+        // original batches (including entries an earlier successful polish removed).
+        if base_dir.join("timeline.jsonl").is_file() {
+            let mut speech = Vec::new();
+            for line in std::fs::read_to_string(base_dir.join("timeline.jsonl"))?
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+            {
+                if let timeline::TimelineEvent::Speech(event) = serde_json::from_str(line)? {
+                    speech.push(event);
+                }
+            }
+            execution::validate_events(&speech)?;
+            let frames = document
+                .sections
+                .iter()
+                .filter(|section| !section.image.is_empty())
+                .map(|section| timeline::FrameEvent {
+                    t: section.t,
+                    image: section.image.clone(),
+                })
+                .collect::<Vec<_>>();
+            document.sections = if frames.is_empty() {
+                vec![timeline::Section {
+                    t: 0.,
+                    end: document.meta.duration,
+                    image: String::new(),
+                    speech,
+                }]
+            } else {
+                timeline::merge(frames, speech, document.meta.duration)
+            };
+            timeline::coalesce_sections(&mut document.sections);
+        } else {
+            for event in document
+                .sections
+                .iter_mut()
+                .flat_map(|section| &mut section.speech)
+            {
+                if let Some(raw) = &event.raw {
+                    event.text = raw.clone();
+                }
+            }
+        }
+        let original = document.sections.clone();
+        let llm = cfg.llm.clone();
+        let root = cfg.out_dir.clone();
+        let mut sections = document.sections;
+        let (sections, report) = tokio::task::spawn_blocking(move || {
+            let report = crate::llm::polish_sections_report(&mut sections, &root, &llm);
+            (sections, report)
+        })
+        .await?;
+        document.sections = if artifact::has_readable_body(&sections) {
+            sections
+        } else {
+            original
+        };
+        outcomes.proofreading = Outcome {
+            status: if report.failed == 0 {
+                Status::Succeeded
+            } else if report.succeeded > 0 {
+                Status::Partial
+            } else {
+                Status::Failed
+            },
+            message: if report.failed > 0 {
+                Some(
+                    "校对未全部完成，原文已保留 / Proofreading incomplete; original text retained"
+                        .into(),
+                )
+            } else {
+                None
+            },
+            completed: Some(report.succeeded),
+            total: Some(report.attempted),
+        };
+        progress::stage("llm", "done");
+    }
+    if has("summary") {
+        crate::dispatch::check_control()?;
+        progress::stage("summary", "start");
+        let events = document
+            .sections
+            .iter()
+            .flat_map(|section| section.speech.clone())
+            .collect::<Vec<_>>();
+        match crate::summarize::summarize(&cfg.llm, &events, &document.meta).await {
+            Ok(summary) => {
+                document.summary = Some(summary);
+                outcomes.summary = Outcome::succeeded();
+                progress::stage("summary", "done");
+            }
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "生成摘要未完成");
+                outcomes.summary = Outcome::failed(crate::summarize::failure_message(&error));
+            }
+        }
+    }
+    crate::dispatch::check_control()?;
+    let formats = if has("exports") {
+        cfg.formats.as_slice()
+    } else {
+        &[]
+    };
+    let manifest = artifact::publish(
+        target,
+        &cfg.out_dir,
+        &document.meta,
+        &document.sections,
+        document.summary.as_ref(),
+        formats,
+        outcomes,
+    )
+    .await?;
+    emit_done(target, &manifest, &document.sections, started);
+    Ok(())
+}
+
+fn export_for_task(
+    base: &Path,
+    format: config::OutputFormat,
+    destination: &Path,
+    work: &Path,
+) -> Result<PathBuf> {
+    let marker = work.join(format!("export-{format}.json"));
+    if destination.exists() {
+        if marker.exists() {
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker)?)?;
+            anyhow::ensure!(
+                saved["sha256"].as_str() == Some(execution::file_digest(destination)?.as_str()),
+                "导出文件已被修改，原文件已保留 / Export file changed; original retained"
+            );
+        } else {
+            // Publication can finish just before a crash loses its receipt. Compare a
+            // fresh local rendering and claim ownership only when the bytes match.
+            let scratch = tempfile::tempdir_in(work)?;
+            let comparison = scratch.path().join(crate::portable::file_name(format));
+            crate::portable::export(base, format, &comparison)?;
+            anyhow::ensure!(
+                execution::file_digest(&comparison)? == execution::file_digest(destination)?,
+                "导出位置已有不同文件，未覆盖 / Existing export differs; not overwritten"
+            );
+        }
+    } else {
+        crate::portable::export(base, format, destination)?;
+    }
+    crate::checkpoint::atomic_write(
+        &marker,
+        &serde_json::to_vec_pretty(
+            &serde_json::json!({"sha256":execution::file_digest(destination)?}),
+        )?,
+    )?;
+    Ok(destination.to_path_buf())
+}
+
+enum SubtitleInput {
+    Discover,
+    Selected(Option<Vec<timeline::TranscriptEvent>>),
+}
+
+async fn subtitles(
+    cfg: &PipelineConfig,
+    local: bool,
+    input: SubtitleInput,
+) -> Result<Option<(Vec<timeline::TranscriptEvent>, String)>> {
+    if let SubtitleInput::Selected(selected) = input {
+        if let Some(events) = selected {
+            execution::validate_events(&events)?;
+            return Ok(Some((events, "selected-subtitle".into())));
+        }
+        anyhow::ensure!(
+            cfg.transcript_source != config::TranscriptSource::Subtitle,
+            "任务缺少已选字幕 / Selected subtitles are missing from this task"
+        );
+        return Ok(None);
+    }
+    if cfg.transcript_source == config::TranscriptSource::Asr {
+        return Ok(None);
+    }
+    let found = if local {
+        fetch::sidecar_subtitle(Path::new(&cfg.url))
+    } else {
+        fetch::fetch_subtitle(&cfg.url, &cfg.out_dir)
+            .await
+            .context("读取视频字幕失败 / Could not read video subtitles")?
+    };
+    match found {
+        Some(file) => {
+            let content = std::fs::read_to_string(&file.path)
+                .context("无法读取字幕文件 / Cannot read subtitle file")?;
+            let events = crate::subtitle::parse_subtitle(&content);
+            execution::validate_events(&events)?;
+            Ok(Some((
+                events,
+                if file.auto {
+                    "auto-caption"
+                } else {
+                    "subtitle"
+                }
+                .into(),
+            )))
+        }
+        None if cfg.transcript_source == config::TranscriptSource::Subtitle => anyhow::bail!(
+            "未找到字幕 / No subtitles found. 请选择已有字幕，或改用语音识别 / Select subtitles or use speech recognition."
+        ),
+        None => Ok(None),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct TranscriptCache {
+    source: String,
+    events: Vec<timeline::TranscriptEvent>,
+}
+
+async fn run_prepared(
     cfg: &PipelineConfig,
     meta: &VideoMeta,
+    target: &Target,
     is_local: bool,
-    platform: &str,
-    id: &str,
-    t_total: Instant,
+    input: SubtitleInput,
+    strict_credentials: bool,
+    allow_unauthenticated_asr: bool,
+    started: Instant,
 ) -> Result<()> {
-    let local = Path::new(&cfg.url);
-    let dest = cfg.media_path();
-    // 文件所有权：只有本次运行真正下载的文件才允许结束时清理。
-    // --no-download 复用的既有 media.mp4 属于用户资产，永远不删。
-    let media_existed = !is_local && dest.is_file();
-    // 本地文件直接原地处理，不拷贝；下载类输入落到 dest。
-    let media: std::path::PathBuf = if is_local {
-        tracing::info!(path = %local.display(), "local video");
-        local.to_path_buf()
-    } else if media_existed {
-        tracing::info!(path = %dest.display(), "media exists, skip download");
-        dest
-    } else if !cfg.no_download {
-        tracing::info!("download video");
+    asr::reset_llama_spawn_args();
+    cfg.validate()?;
+    crate::dispatch::check_control()?;
+    if let Some(manifest) = artifact::published(target)? {
+        // Also finish a publication interrupted between the directory and pointer commits.
+        let document: artifact::Document = serde_json::from_slice(&std::fs::read(
+            target.version_dir().join(&manifest.document),
+        )?)?;
+        let manifest = artifact::publish(
+            target,
+            &cfg.out_dir,
+            &document.meta,
+            &document.sections,
+            document.summary.as_ref(),
+            &cfg.formats,
+            manifest.outcomes,
+        )
+        .await?;
+        emit_done(target, &manifest, &document.sections, started);
+        return Ok(());
+    }
+    if cfg.llm.enabled || cfg.llm.summarize {
+        crate::llm::validate(&cfg.llm)?;
+    }
+    // Subtitle evidence and cloud static validation precede any full media download.
+    progress::stage("subtitle", "start");
+    let selected = subtitles(cfg, is_local, input).await?;
+    progress::stage("subtitle", "done");
+    if selected.is_none() {
+        cfg.validate_asr_with_auth(!allow_unauthenticated_asr, !strict_credentials)?;
+        if !matches!(
+            cfg.provider,
+            config::AsrProvider::Coreml | config::AsrProvider::Api | config::AsrProvider::Npu
+        ) {
+            crate::error::require_cmd("llama-server")?;
+        }
+    }
+    crate::error::require_cmd("ffmpeg")?;
+    crate::error::require_cmd("ffprobe")?;
+    if !is_local {
+        crate::error::require_cmd("yt-dlp")?;
+    }
+    if selected.is_none() && cfg.provider != config::AsrProvider::Api {
+        progress::stage("model/prepare", "start");
+        crate::models::ensure_cache(
+            cfg.provider,
+            cfg.asr_model.as_deref().unwrap_or("qwen3-1.7b"),
+            &cfg.model_dir,
+        )
+        .await?;
+        progress::stage("model/prepare", "done");
+    }
+    meta.save(&cfg.meta_path())?;
+    let media_path = if is_local {
+        PathBuf::from(&cfg.url)
+    } else {
+        cfg.media_path()
+    };
+    let media_existed = !is_local && prepare_cached_media(cfg)?;
+    crate::dispatch::check_control()?;
+    if !is_local && !media_existed {
+        anyhow::ensure!(
+            !cfg.no_download,
+            "找不到已保存的视频 / Cached video missing"
+        );
         progress::stage("download", "start");
         fetch::download(
             &cfg.url,
-            &dest,
+            &media_path,
             cfg.max_height,
             tracing::enabled!(tracing::Level::DEBUG),
         )
         .await?;
+        save_file_digest(&media_path, &cfg.out_dir.join("media.sha256"))?;
         progress::stage("download", "done");
-        dest
-    } else {
-        anyhow::ensure!(
-            dest.is_file(),
-            "找不到缓存视频 / Cached video missing: {}. 移除 --no-download 后重试 / Retry without --no-download",
-            dest.display()
-        );
-        dest
-    };
-
-    // —— 转写来源：平台字幕优先（人工 > 自动），无字幕再走本地 ASR ——
-    // 有字幕时完全不抽音频、不加载模型（issue #1）
-    let subtitle: Option<(Vec<timeline::TranscriptEvent>, &'static str)> = match cfg
-        .transcript_source
-    {
-        config::TranscriptSource::Asr => None,
-        _ => {
-            let fetched = if is_local {
-                fetch::sidecar_subtitle(local)
-            } else {
-                tracing::info!("probe platform subtitles");
-                fetch::fetch_subtitle(&cfg.url, &cfg.out_dir)
-                    .await
-                    .ok()
-                    .flatten()
-            };
-            match fetched {
-                Some(f) => {
-                    let content = std::fs::read_to_string(&f.path)
-                        .with_context(|| format!("读取字幕 {}", f.path.display()))?;
-                    let events = crate::subtitle::parse_subtitle(&content);
-                    if events.is_empty() {
-                        tracing::warn!(path = %f.path.display(), "字幕中没有可用文字 / No usable text found in subtitles");
-                        None
-                    } else {
-                        let source: &'static str = if f.auto { "auto-caption" } else { "subtitle" };
-                        tracing::info!(
-                            events = events.len(),
-                            source,
-                            path = %f.path.display(),
-                            "subtitle transcript"
-                        );
-                        Some((events, source))
-                    }
-                }
-                None => None,
-            }
-        }
-    };
-    if cfg.transcript_source == config::TranscriptSource::Subtitle && subtitle.is_none() {
-        anyhow::bail!(
-            "未找到字幕 / No subtitles found. 本地视频可添加同名 .srt/.vtt，或改用 --transcript-source asr / Add a matching .srt/.vtt sidecar or use --transcript-source asr."
-        );
     }
-
-    if !progress::is_json() && !progress::is_quiet() {
-        if subtitle.is_some() {
-            eprintln!(
-                "使用现有字幕，无需语音识别 / Using subtitles; speech recognition is not needed."
-            );
+    crate::dispatch::check_control()?;
+    let mut outcomes = Outcomes::default();
+    let (frames_result, transcript_result) = tokio::join!(cached_frames(cfg, &media_path), async {
+        let cache_path = cfg.out_dir.join("transcript.json");
+        if cache_path.is_file() {
+            let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
+                .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
+            execution::validate_events(&cache.events)?;
+            return Ok::<_, anyhow::Error>(cache);
+        }
+        let cache = if let Some((events, source)) = selected {
+            TranscriptCache { source, events }
         } else {
-            eprintln!("使用语音识别 / Using speech recognition: {}", cfg.provider);
+            progress::stage("audio", "start");
+            let audio = cfg.audio_path();
+            // A verified marker proves audio extraction completed; a bare WAV may be truncated.
+            if !verified_file(&audio, &cfg.out_dir.join("audio.sha256"))? {
+                media::extract_audio(&media_path, &audio).await?;
+                save_file_digest(&audio, &cfg.out_dir.join("audio.sha256"))?;
+            }
+            progress::stage("audio", "done");
+            crate::dispatch::check_control()?;
+            progress::stage("transcribe", "start");
+            let events = asr::run(cfg, &audio).await?;
+            progress::stage("transcribe", "done");
+            TranscriptCache {
+                source: "asr".into(),
+                events,
+            }
+        };
+        crate::checkpoint::atomic_write(&cache_path, &serde_json::to_vec_pretty(&cache)?)?;
+        Ok(cache)
+    });
+    let frames = match frames_result {
+        Ok(frames) if !frames.is_empty() => {
+            outcomes.screenshots = Outcome::succeeded();
+            frames
         }
-    }
-    let transcript_source_used = subtitle.as_ref().map_or("asr", |(_, s)| *s);
-    let (frames, events) = if let Some((events, _source)) = subtitle {
-        // 字幕路径：只跑场景检测，跳过音频与 ASR
-        progress::stage("scenes", "start");
-        let frames = scene::run(cfg, &media).await?;
-        progress::stage("scenes", "done");
-        (frames, events)
-    } else {
-        cfg.validate_asr()?;
-        use config::AsrProvider;
-        if !matches!(
-            cfg.provider,
-            AsrProvider::Coreml | AsrProvider::Api | AsrProvider::Npu
-        ) {
-            crate::error::require_cmd("llama-server")?;
+        Ok(_) => {
+            outcomes.screenshots = Outcome::failed("未提取到截图 / No screenshots were captured");
+            Vec::new()
         }
-
-        if cfg.provider == AsrProvider::Gpu && config::linux_amd_gpu_present() {
-            tracing::warn!(
-                "检测到 Linux + AMD GPU：若遇 GPU hang/reset，可尝试 --gpu-layers 降载、--no-mmproj-offload，或改用 --provider cpu / api；这些参数不保证解决驱动问题"
+        Err(error) => {
+            outcomes.screenshots = Outcome::failed(format!("{error:#}"));
+            Vec::new()
+        }
+    };
+    let transcript = match transcript_result {
+        Ok(cache) if cache.events.iter().any(|e| !e.text.trim().is_empty()) => {
+            outcomes.transcript = Outcome::succeeded();
+            cache
+        }
+        Ok(_) => {
+            outcomes.transcript = Outcome::failed("没有获得可读文字 / No readable transcript");
+            save_materials(cfg, &frames, &[], &outcomes)?;
+            anyhow::bail!(
+                "没有获得可读文字；已保留可用截图 / No readable transcript; available screenshots were retained"
             );
         }
-
-        tracing::info!("extract slides and audio");
-        let audio_path = cfg.audio_path();
-        progress::stage("scenes", "start");
-        progress::stage("audio", "start");
-        // Transcription depends on audio, not on scene extraction. Keep both branches
-        // alive until completion so subprocess cleanup still runs on either error.
-        let (frames_res, events_res) = tokio::join!(
-            async {
-                let result = scene::run(cfg, &media).await;
-                if result.is_ok() {
-                    progress::stage("scenes", "done");
+        Err(error) => {
+            let completed = match crate::checkpoint::Checkpoint::saved_events(&cfg.out_dir) {
+                Ok(events) => events,
+                Err(_) => {
+                    tracing::warn!(
+                        "已保存的部分文字无法读取，原文件已保留 / Saved partial text could not be read; original files retained"
+                    );
+                    Vec::new()
                 }
-                result
-            },
-            async {
-                media::extract_audio(&media, &audio_path).await?;
-                progress::stage("audio", "done");
-                progress::stage("transcribe", "start");
-                let events = asr::run(cfg, &audio_path).await?;
-                progress::stage("transcribe", "done");
-                Ok::<_, anyhow::Error>(events)
-            }
-        );
-        let frames = frames_res?;
-        let events = events_res?;
-        (frames, events)
+            };
+            outcomes.transcript = if completed.is_empty() {
+                Outcome::failed(format!("{error:#}"))
+            } else {
+                Outcome {
+                    status: Status::Partial,
+                    message: Some(format!("{error:#}")),
+                    completed: Some(completed.len()),
+                    total: None,
+                }
+            };
+            save_materials(cfg, &frames, &completed, &outcomes)?;
+            return Err(error);
+        }
     };
-    anyhow::ensure!(
-        !frames.is_empty(),
-        "未提取到画面，请检查视频是否可播放 / No frames captured; check that the video plays correctly"
-    );
-    // 转写可能合法返回空（静音课件）；由后续正常渲染成"无语音"讲义
-
-    // timeline.jsonl 始终保存 ASR/字幕的原始细粒度事件（段落组织之前），
-    // 供追溯、调试或二次处理。
-    timeline::write_jsonl(&cfg.timeline_path(), &frames, &events)?;
-
-    // 合并 → 段落组织：同一截图内短停顿间的连续片段合并为自然段；
-    // LLM 校对与渲染都作用于组织好的段落（issue #6 的可读性改进）
-    let mut sections = timeline::merge(frames, events, meta.duration);
+    save_materials(cfg, &frames, &transcript.events, &outcomes)?;
+    let mut sections = if frames.is_empty() {
+        vec![timeline::Section {
+            t: 0.,
+            end: meta.duration,
+            image: String::new(),
+            speech: transcript.events,
+        }]
+    } else {
+        timeline::merge(frames, transcript.events, meta.duration)
+    };
     timeline::coalesce_sections(&mut sections);
+    // Save the complete raw body before any optional request.
+    crate::checkpoint::atomic_write(
+        &cfg.out_dir.join("raw-document.json"),
+        &serde_json::to_vec_pretty(&artifact::Document {
+            schema: 1,
+            meta: meta.clone(),
+            sections: sections.clone(),
+            summary: None,
+        })?,
+    )?;
+    crate::dispatch::check_control()?;
     if cfg.llm.enabled {
         progress::stage("llm", "start");
-        tracing::info!(model = %cfg.llm.model, vision = cfg.llm.vision, "llm polish");
-        let ev = cfg.llm.clone();
+        let original_sections = sections.clone();
+        let llm = cfg.llm.clone();
         let root = cfg.out_dir.clone();
         let joined = tokio::task::spawn_blocking(move || {
-            crate::llm::polish_sections(&mut sections, &root, &ev);
-            sections
+            let report = crate::llm::polish_sections_report(&mut sections, &root, &llm);
+            (sections, report)
         })
-        .await;
-        sections = joined.context("LLM 线程 join 失败")?;
+        .await
+        .context("AI 校对工作进程中断 / Proofreading worker interrupted")?;
+        sections = joined.0;
+        let mut report = joined.1;
+        if !artifact::has_readable_body(&sections) {
+            sections = original_sections;
+            report.succeeded = 0;
+            report.failed = report.attempted;
+        }
+        outcomes.proofreading = Outcome {
+            status: if report.failed == 0 {
+                Status::Succeeded
+            } else if report.succeeded > 0 {
+                Status::Partial
+            } else {
+                Status::Failed
+            },
+            message: if report.failed > 0 {
+                Some("部分校对未完成，原始文字已保留 / Some proofreading failed; original text retained".into())
+            } else {
+                None
+            },
+            completed: Some(report.succeeded),
+            total: Some(report.attempted),
+        };
+        progress::stage("llm", "done");
     }
-
-    // 可选的 LLM 视频总结（自动写入 md/html 开头）
-    let summary = if cfg.llm.enabled && cfg.llm.summarize {
-        tracing::info!(model = %cfg.llm.model, "llm summary");
-        let speech: Vec<crate::timeline::TranscriptEvent> = sections
+    crate::dispatch::check_control()?;
+    let summary = if cfg.llm.summarize {
+        progress::stage("summary", "start");
+        let speech = sections
             .iter()
             .flat_map(|s| s.speech.iter().cloned())
-            .collect();
+            .collect::<Vec<_>>();
         match crate::summarize::summarize(&cfg.llm, &speech, meta).await {
-            Ok(sm) => {
-                tracing::info!(
-                    points = sm.key_points.len(),
-                    chapters = sm.outline.len(),
-                    "summary done"
-                );
-                Some(sm)
+            Ok(summary) => {
+                outcomes.summary = Outcome::succeeded();
+                progress::stage("summary", "done");
+                Some(summary)
             }
-            Err(e) => {
-                tracing::warn!(
-                    "AI 总结失败，仍会保存笔记；可稍后用 course2md summarize 重试 / AI summary failed; notes will still be saved. Retry with course2md summarize: {e:#}"
-                );
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "生成摘要未完成");
+                outcomes.summary = Outcome::failed(crate::summarize::failure_message(&error));
                 None
             }
         }
     } else {
         None
     };
-    if cfg.llm.enabled {
-        // llm 阶段覆盖润色 + 总结（summary 属于同一 LLM 阶段）
-        progress::stage("llm", "done");
-    }
-    tracing::info!(sections = sections.len(), "merged");
-
+    crate::dispatch::check_control()?;
     progress::stage("render", "start");
-    render::write_outputs(
+    let manifest = artifact::publish(
+        target,
         &cfg.out_dir,
         meta,
         &sections,
-        &cfg.formats,
         summary.as_ref(),
+        &cfg.formats,
+        outcomes.clone(),
     )
     .await?;
     progress::stage("render", "done");
-    // 只删自己下载的视频；本地输入与既有工作区文件不动。
-    let media_deleted =
-        should_delete_media(is_local, cfg.no_download, media_existed, cfg.keep_video);
-    if media_deleted {
-        let _ = tokio::fs::remove_file(&media).await;
-    }
-
-    #[cfg(unix)]
-    let (peak_mb, child_peak_mb) = (
-        peak_rss_mb(libc::RUSAGE_SELF),
-        peak_rss_mb(libc::RUSAGE_CHILDREN),
-    );
-    #[cfg(not(unix))]
-    let (peak_mb, child_peak_mb) = (peak_rss_mb(0), peak_rss_mb(0));
-    let stats = RunStats {
-        elapsed_secs: t_total.elapsed().as_secs_f64(),
-        peak_mb,
-        child_peak_mb,
-    };
-    print_summary(
-        cfg,
-        meta,
-        &sections,
-        &stats,
-        &media,
-        is_local,
-        media_deleted,
-    );
-
-    // run.json：本次运行溯源（版本/源/转写来源/后端/模型/统计/耗时）。
-    // 「这份文稿到底是什么模型跑的」从此可查；issue 报告请附上此文件。
-    // 失败路径的诊断 run.json 见 write_failure_run_json（issue #12）。
-    let speech_n: usize = sections.iter().map(|s| s.speech.len()).sum();
-    let chars: usize = sections
-        .iter()
-        .flat_map(|s| s.speech.iter())
-        .map(|e| e.text.chars().count())
-        .sum();
-    let run_info = serde_json::json!({
-        "success": true,
-        "course2md_version": env!("CARGO_PKG_VERSION"),
-        "source": {
-            "kind": if is_local { "local" } else { "remote" },
-            "platform": platform,
-            "id": id,
-            "url": cfg.url,
-        },
-        "provider": cfg.provider.as_str(),
-        "gpu_layers": cfg.gpu_layers,
-        "mmproj_offload": cfg.mmproj_offload,
-        "llama_server_args": crate::asr::last_llama_spawn_args(),
-        "transcript_source": transcript_source_used,
-        "asr_model": cfg.asr_model.clone().unwrap_or_else(|| "backend-default".into()),
-        "resume": cfg.resume,
-        "formats": cfg.formats.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
-        "llm_polish": cfg.llm.enabled,
-        "llm_vision": cfg.llm.enabled && cfg.llm.vision,
-        "sections": sections.len(),
-        "speech_segments": speech_n,
-        "chars": chars,
-        "elapsed_secs": (stats.elapsed_secs * 100.0).round() / 100.0,
-    });
-    if let Err(e) = crate::checkpoint::atomic_write(
+    // Diagnostics remain in work space; a failure record can never become a library entry.
+    crate::checkpoint::atomic_write(
         &cfg.out_dir.join("run.json"),
-        serde_json::to_string_pretty(&run_info)?.as_bytes(),
-    ) {
-        tracing::warn!(
-            "无法保存运行信息，笔记已保留 / Could not save run metadata; notes are retained: {e:#}"
+        &serde_json::to_vec_pretty(
+            &serde_json::json!({"success":true,"task_id":target.task_id,"version_id":target.version_id,"transcript_source":transcript.source,"outcomes":manifest.outcomes,"out_dir":target.version_dir()}),
+        )?,
+    )?;
+    if should_delete_media(is_local, cfg.no_download, media_existed, cfg.keep_video) {
+        let _ = std::fs::remove_file(&media_path);
+    }
+    emit_done(target, &manifest, &sections, started);
+    if !progress::is_json() && !progress::is_quiet() {
+        eprintln!(
+            "{}：{}",
+            if manifest.partial {
+                "笔记已保存，部分处理未完成 / Notes saved with unfinished work"
+            } else {
+                "笔记已生成 / Notes ready"
+            },
+            target.version_dir().display()
         );
     }
-
-    // NDJSON done：GUI/脚本靠这一行拿产物清单与统计（human 模式 emit 为 no-op）。
-    // outputs 只列真正写盘成功的格式文件（与 print_summary 的 ✓ 列表同口径）。
-    let outputs: Vec<String> = cfg
-        .formats
-        .iter()
-        .map(|f| f.output_name().to_string())
-        .filter(|name| cfg.out_dir.join(name).is_file())
-        .collect();
-    progress::emit(serde_json::json!({
-        "type": "done",
-        "out_dir": cfg.out_dir.display().to_string(),
-        "title": meta.title,
-        "slides": sections.len(),
-        "segments": speech_n,
-        "chars": chars,
-        "elapsed_secs": (stats.elapsed_secs * 100.0).round() / 100.0,
-        "outputs": outputs,
-    }));
     Ok(())
+}
+
+fn save_materials(
+    cfg: &PipelineConfig,
+    frames: &[timeline::FrameEvent],
+    events: &[timeline::TranscriptEvent],
+    outcomes: &Outcomes,
+) -> Result<()> {
+    timeline::write_jsonl(&cfg.timeline_path(), frames, events)?;
+    crate::checkpoint::atomic_write(
+        &cfg.out_dir.join("materials.json"),
+        &serde_json::to_vec_pretty(
+            &serde_json::json!({"schema":1,"frames":frames,"outcomes":outcomes}),
+        )?,
+    )
+}
+
+#[derive(Serialize, Deserialize)]
+struct FramesCache {
+    frames: Vec<timeline::FrameEvent>,
+    files: Vec<(String, String)>,
+}
+async fn cached_frames(cfg: &PipelineConfig, media: &Path) -> Result<Vec<timeline::FrameEvent>> {
+    let cache_path = cfg.out_dir.join("screenshots.json");
+    if cache_path.is_file() {
+        let cache: FramesCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
+            .context("截图进度损坏，原文件已保留 / Screenshot checkpoint is damaged")?;
+        let valid = cache.files.iter().all(|(path, digest)| {
+            artifact::safe_asset_path(&cfg.out_dir, path)
+                .and_then(|p| execution::file_digest(&p))
+                .is_ok_and(|actual| actual == *digest)
+        });
+        if valid && !cache.frames.is_empty() {
+            return Ok(cache.frames);
+        }
+    }
+    crate::dispatch::check_control()?;
+    let frames = scene::run(cfg, media).await?;
+    let files = frames
+        .iter()
+        .map(|frame| {
+            Ok((
+                frame.image.clone(),
+                execution::file_digest(&artifact::safe_asset_path(&cfg.out_dir, &frame.image)?)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crate::checkpoint::atomic_write(
+        &cache_path,
+        &serde_json::to_vec_pretty(&FramesCache {
+            frames: frames.clone(),
+            files,
+        })?,
+    )?;
+    Ok(frames)
+}
+fn verified_file(path: &Path, marker: &Path) -> Result<bool> {
+    if !path.is_file() || !marker.is_file() {
+        return Ok(false);
+    }
+    Ok(std::fs::read_to_string(marker)? == execution::file_digest(path)?)
+}
+fn save_file_digest(path: &Path, marker: &Path) -> Result<()> {
+    crate::checkpoint::atomic_write(marker, execution::file_digest(path)?.as_bytes())
+}
+
+/// A completed download has a durable content marker. Preserve unverifiable files
+/// separately before the caller downloads again, so recovery never consumes a partial
+/// download or destroys the old bytes while trying to repair it.
+fn prepare_cached_media(cfg: &PipelineConfig) -> Result<bool> {
+    let media = cfg.media_path();
+    if !media.is_file() {
+        return Ok(false);
+    }
+    if verified_file(&media, &cfg.out_dir.join("media.sha256"))? {
+        return Ok(true);
+    }
+    anyhow::ensure!(
+        !cfg.no_download,
+        "已保存的视频无法校验；需要重新下载才能继续 / Cached video cannot be verified; downloading is required"
+    );
+    let archives = cfg.out_dir.join(".previous-media");
+    std::fs::create_dir_all(&archives)?;
+    let archive = tempfile::Builder::new()
+        .prefix("unverified-")
+        .tempdir_in(archives)?;
+    std::fs::rename(&media, archive.path().join("media.mp4"))?;
+    let archive_path = archive.keep();
+    crate::artifact::sync_dir(&archive_path)?;
+    crate::artifact::sync_dir(&cfg.out_dir)?;
+    Ok(false)
+}
+
+fn emit_done(
+    target: &Target,
+    manifest: &artifact::Manifest,
+    sections: &[timeline::Section],
+    started: Instant,
+) {
+    progress::emit(
+        serde_json::json!({"type":"done","task_id":target.task_id,"course_id":target.course_id,"version_id":target.version_id,"out_dir":target.version_dir(),"manifest":target.version_dir().join("manifest.json"),"title":manifest.title,"slides":manifest.frames.len(),"segments":sections.iter().map(|s|s.speech.len()).sum::<usize>(),"chars":sections.iter().flat_map(|s|&s.speech).map(|e|e.text.chars().count()).sum::<usize>(),"outputs":manifest.outputs,"partial":manifest.partial,"outcomes":manifest.outcomes,"elapsed_secs":started.elapsed().as_secs_f64()}),
+    );
 }
 
 /// 失败诊断 run.json（issue #12 复测：只有成功才写 run.json 是诊断缺口）。
@@ -438,98 +1020,6 @@ fn write_failure_run_json(
     }
 }
 
-struct RunStats {
-    elapsed_secs: f64,
-    peak_mb: Option<f64>,
-    child_peak_mb: Option<f64>,
-}
-
-fn print_summary(
-    cfg: &PipelineConfig,
-    meta: &VideoMeta,
-    sections: &[timeline::Section],
-    stats: &RunStats,
-    media: &Path,
-    is_local: bool,
-    media_deleted: bool,
-) {
-    if progress::is_json() || progress::is_quiet() {
-        return;
-    }
-    let out = &cfg.out_dir;
-    let speech_n: usize = sections.iter().map(|s| s.speech.len()).sum();
-    let chars: usize = sections
-        .iter()
-        .flat_map(|s| s.speech.iter())
-        .map(|e| e.text.chars().count())
-        .sum();
-
-    eprintln!();
-    eprintln!("✓ 笔记已生成 / Notes ready");
-    eprintln!("标题 / Title: {}", meta.title);
-    eprintln!("输出目录 / Output: {}", out.display());
-    eprintln!();
-    eprintln!("打开以下文件查看笔记 / Open a file to read your notes:");
-    for f in &cfg.formats {
-        let p = out.join(f.output_name());
-        if p.is_file() {
-            eprintln!("  ✓ {}", p.display());
-        }
-    }
-    eprintln!(
-        "截图 / Slides: {}/frames/ ({} images)",
-        out.display(),
-        sections.len()
-    );
-    // 字幕优先的视频不产生 audio.wav，不存在的路径打出来只会误导
-    let audio = cfg.audio_path();
-    if audio.is_file() {
-        eprintln!("音频 / Audio: {}", audio.display());
-    }
-    if is_local {
-        eprintln!(
-            "视频 / Video: {} (本地原文件 / Original local file)",
-            media.display()
-        );
-    } else if media_deleted {
-        eprintln!(
-            "下载的视频已清理；用 --keep-video 保留 / Downloaded video removed; use --keep-video to keep it"
-        );
-    } else {
-        eprintln!("视频 / Video: {} (已保留 / Kept)", media.display());
-    }
-    eprintln!("时间线 / Timeline: {}", cfg.timeline_path().display());
-    eprintln!();
-    eprintln!(
-        "统计 / Stats: {} slides / {} speech segments / {} characters",
-        sections.len(),
-        speech_n,
-        chars
-    );
-    eprintln!("耗时 / Elapsed: {}", fmt_duration(stats.elapsed_secs));
-    if tracing::enabled!(tracing::Level::INFO) {
-        match (stats.peak_mb, stats.child_peak_mb) {
-            (Some(mb), Some(c)) => {
-                eprintln!("峰值内存 / Peak memory: {mb:.0} MB + child process {c:.0} MB")
-            }
-            (Some(mb), None) => eprintln!("峰值内存 / Peak memory: {mb:.0} MB"),
-            _ => eprintln!("峰值内存不可用 / Peak memory unavailable"),
-        }
-        // 模型目录只对 llama.cpp 后端（gpu/cpu）有意义；coreml 走系统缓存、api 无本地模型
-        if matches!(
-            cfg.provider,
-            config::AsrProvider::Gpu | config::AsrProvider::Cpu
-        ) {
-            eprintln!("模型目录 / Models: {}", cfg.model_dir.display());
-        }
-    }
-    eprintln!("──────────────────────────────");
-    use std::io::IsTerminal as _;
-    if std::io::stderr().is_terminal() && !cfg.llm.enabled && !cfg.llm.disable_hint {
-        crate::llm::write_hint_note(&crate::settings::config_path());
-    }
-}
-
 fn sanitize_stem(p: &Path) -> String {
     p.file_stem()
         .and_then(|s| s.to_str())
@@ -537,36 +1027,6 @@ fn sanitize_stem(p: &Path) -> String {
         .chars()
         .take(40)
         .collect()
-}
-
-/// canonical_path + size + mtime 的稳定指纹（8 hex，FNV-1a）。
-/// 不用 std DefaultHasher：官方明确不保证跨版本稳定，会破坏 resume/cache 键。
-fn local_fingerprint(p: &Path) -> String {
-    const FNV_OFFS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut h = FNV_OFFS;
-    let mut feed = |bytes: &[u8]| {
-        for &b in bytes {
-            h ^= b as u64;
-            h = h.wrapping_mul(FNV_PRIME);
-        }
-    };
-    feed(
-        p.canonicalize()
-            .unwrap_or_else(|_| p.to_path_buf())
-            .to_string_lossy()
-            .as_bytes(),
-    );
-    if let Ok(md) = std::fs::metadata(p) {
-        feed(&md.len().to_le_bytes());
-        if let Ok(m) = md.modified()
-            && let Ok(d) = m.duration_since(std::time::UNIX_EPOCH)
-        {
-            feed(&d.as_secs().to_le_bytes());
-            feed(&d.subsec_nanos().to_le_bytes());
-        }
-    }
-    format!("{h:016x}")[..8].to_string()
 }
 
 /// 结束时是否允许删除媒体文件：仅当「本次运行下载的」且未要求保留。
@@ -580,45 +1040,44 @@ fn should_delete_media(
     !is_local && !no_download && !media_existed && !keep_video
 }
 
-fn fmt_duration(secs: f64) -> String {
-    let s = secs.max(0.0).round() as u64;
-    if s < 60 {
-        format!("{s}s")
-    } else if s < 3600 {
-        format!("{}m{:02}s", s / 60, s % 60)
-    } else {
-        format!("{}h{:02}m{:02}s", s / 3600, (s % 3600) / 60, s % 60)
-    }
-}
-
-/// 峰值常驻集（Linux 为 KB，macOS 为字节）。RUSAGE_CHILDREN 口径含 llama-server/ffmpeg。
-#[cfg(unix)]
-fn peak_rss_mb(who: libc::c_int) -> Option<f64> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    let rc = unsafe { libc::getrusage(who, usage.as_mut_ptr()) };
-    if rc != 0 {
-        return None;
-    }
-    let usage = unsafe { usage.assume_init() };
-    let rss = usage.ru_maxrss as f64;
-    #[cfg(target_os = "macos")]
-    {
-        Some(rss / (1024.0 * 1024.0))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Some(rss / 1024.0)
-    }
-}
-
-#[cfg(not(unix))]
-fn peak_rss_mb(_who: i32) -> Option<f64> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{local_fingerprint, run, sanitize_stem, should_delete_media};
+    use super::{run, should_delete_media};
+
+    #[test]
+    fn recovery_archives_unverified_media_and_reuses_only_matching_content() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cfg = crate::options::resolve(
+            "https://example.invalid/video".into(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        cfg.out_dir = root.path().to_path_buf();
+        cfg.no_download = false;
+        let media = cfg.media_path();
+        std::fs::write(&media, b"unverified original bytes").unwrap();
+        assert!(!super::prepare_cached_media(&cfg).unwrap());
+        assert!(!media.exists());
+        let archive = std::fs::read_dir(root.path().join(".previous-media"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("media.mp4");
+        assert_eq!(
+            std::fs::read(archive).unwrap(),
+            b"unverified original bytes"
+        );
+        std::fs::write(&media, b"completed replacement").unwrap();
+        super::save_file_digest(&media, &root.path().join("media.sha256")).unwrap();
+        assert!(super::prepare_cached_media(&cfg).unwrap());
+        std::fs::write(&media, b"changed externally").unwrap();
+        cfg.no_download = true;
+        assert!(super::prepare_cached_media(&cfg).is_err());
+        assert_eq!(std::fs::read(media).unwrap(), b"changed externally");
+    }
 
     #[test]
     fn never_delete_files_we_did_not_download() {
@@ -649,6 +1108,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let video = dir.join("broken.mp4");
         std::fs::write(&video, b"not a real mp4").unwrap();
+        // This test fails while opening media, before ASR loads any weights. Supply
+        // cache-header fixtures so the earlier model preflight never makes a request.
+        let models = crate::models::llama_paths(&dir);
+        std::fs::create_dir_all(models.model.parent().unwrap()).unwrap();
+        for path in [&models.model, &models.mmproj] {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(path).unwrap();
+            file.set_len(1_100_000).unwrap();
+            file.write_all(b"GGUF\x03\0\0\0").unwrap();
+        }
         use crate::config as c;
         let cfg = c::PipelineConfig {
             url: video.display().to_string(),
@@ -679,9 +1148,21 @@ mod tests {
         let r = tokio::runtime::Runtime::new().unwrap().block_on(run(&cfg));
         assert!(r.is_err(), "损坏视频必须失败");
 
-        let id = format!("{}-{}", sanitize_stem(&video), local_fingerprint(&video));
-        let out = c::course_dir(&dir, "local", "broken", &id);
-        let text = std::fs::read_to_string(out.join("run.json")).expect("失败也应写 run.json");
+        let source_id = format!(
+            "local:sha256:{}",
+            crate::execution::file_digest(&video).unwrap()
+        );
+        let course = dir
+            .join("local")
+            .join(crate::execution::digest(source_id.as_bytes()));
+        let work = std::fs::read_dir(course.join(".work"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let text = std::fs::read_to_string(work.join("run.json")).expect("失败也应写 run.json");
+        assert!(!course.join("current.json").exists());
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["success"], false);
         assert!(!v["error"].as_str().unwrap_or_default().is_empty());
