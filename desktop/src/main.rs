@@ -6,6 +6,9 @@ mod activity;
 mod backend;
 mod course_library;
 mod credentials;
+// Icon helpers ship ahead of the pages that reference them (M3+); same staged
+// token allowance as the theme module.
+#[allow(dead_code)]
 mod icons;
 mod import_ui;
 mod legacy_settings;

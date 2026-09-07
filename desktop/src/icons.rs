@@ -120,6 +120,58 @@ const ICONS: &[(&str, &[u8])] = &[
         "icons/loader-circle.svg",
         include_bytes!("../assets/material/loader-circle.svg"),
     ),
+    (
+        "icons/link.svg",
+        include_bytes!("../assets/material/link.svg"),
+    ),
+    (
+        "icons/movie.svg",
+        include_bytes!("../assets/material/movie.svg"),
+    ),
+    (
+        "icons/search.svg",
+        include_bytes!("../assets/material/search.svg"),
+    ),
+    (
+        "icons/more-horiz.svg",
+        include_bytes!("../assets/material/more-horiz.svg"),
+    ),
+    (
+        "icons/download.svg",
+        include_bytes!("../assets/material/download.svg"),
+    ),
+    (
+        "icons/play-arrow.svg",
+        include_bytes!("../assets/material/play-arrow.svg"),
+    ),
+    (
+        "icons/pause.svg",
+        include_bytes!("../assets/material/pause.svg"),
+    ),
+    (
+        "icons/schedule.svg",
+        include_bytes!("../assets/material/schedule.svg"),
+    ),
+    (
+        "icons/image.svg",
+        include_bytes!("../assets/material/image.svg"),
+    ),
+    (
+        "icons/format-list-bulleted.svg",
+        include_bytes!("../assets/material/format-list-bulleted.svg"),
+    ),
+    (
+        "icons/arrow-forward.svg",
+        include_bytes!("../assets/material/arrow-forward.svg"),
+    ),
+    (
+        "icons/file-upload.svg",
+        include_bytes!("../assets/material/file-upload.svg"),
+    ),
+    (
+        "icons/content-copy.svg",
+        include_bytes!("../assets/material/content-copy.svg"),
+    ),
 ];
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
@@ -147,3 +199,24 @@ pub fn task() -> gpui_component::Icon {
 pub fn refresh() -> gpui_component::Icon {
     gpui_component::Icon::default().path("icons/refresh.svg")
 }
+
+macro_rules! icon_fn {
+    ($name:ident, $path:literal) => {
+        pub fn $name() -> gpui_component::Icon {
+            gpui_component::Icon::default().path($path)
+        }
+    };
+}
+icon_fn!(link, "icons/link.svg");
+icon_fn!(movie, "icons/movie.svg");
+icon_fn!(search, "icons/search.svg");
+icon_fn!(more_horiz, "icons/more-horiz.svg");
+icon_fn!(download, "icons/download.svg");
+icon_fn!(play_arrow, "icons/play-arrow.svg");
+icon_fn!(pause, "icons/pause.svg");
+icon_fn!(schedule, "icons/schedule.svg");
+icon_fn!(image, "icons/image.svg");
+icon_fn!(toc, "icons/format-list-bulleted.svg");
+icon_fn!(arrow_forward, "icons/arrow-forward.svg");
+icon_fn!(file_upload, "icons/file-upload.svg");
+icon_fn!(content_copy, "icons/content-copy.svg");

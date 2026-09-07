@@ -31,6 +31,19 @@
     "window-minimize": "action/minimize",
     "window-restore": "navigation/fullscreen_exit",
     "loader": "action/autorenew",
-    "loader-circle": "action/autorenew"
+    "loader-circle": "action/autorenew",
+    "link": "content/link",
+    "movie": "av/movie",
+    "search": "action/search",
+    "more-horiz": "navigation/more_horiz",
+    "download": "file/download",
+    "play-arrow": "av/play_arrow",
+    "schedule": "action/schedule",
+    "image": "image/image",
+    "format-list-bulleted": "editor/format_list_bulleted",
+    "arrow-forward": "navigation/arrow_forward",
+    "pause": "av/pause",
+    "file-upload": "file/file_upload",
+    "content-copy": "content/content_copy"
   }
 }
