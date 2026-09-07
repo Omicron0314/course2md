@@ -21,6 +21,9 @@ mod source;
 mod storage;
 mod storage_ui;
 mod task_ui;
+// Token items ship ahead of the page milestones that adopt them (M3+); the
+// module-wide allowance keeps staged tokens from tripping the zero-warning bar.
+#[allow(dead_code)]
 mod theme;
 mod views;
 mod workspace;
