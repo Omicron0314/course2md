@@ -2009,6 +2009,18 @@ impl Desktop {
         next.subtitle_languages_draft = None;
         self.commit_generation(next, cx);
     }
+    /// The workbench box's language capsule commits through the same validated
+    /// path as the settings form.
+    pub(crate) fn choose_preferred_subtitle_languages(
+        &mut self,
+        languages: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next = self.generation_edit_base();
+        next.preferred_subtitle_languages = languages;
+        next.subtitle_languages_draft = None;
+        self.commit_generation(next, cx);
+    }
     fn set_settings_feedback(&mut self, group: PreferenceGroup, message: String, error: bool) {
         if group == PreferenceGroup::Generation && error {
             self.settings_ui

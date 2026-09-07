@@ -494,11 +494,13 @@ impl Render for Desktop {
             .min_w_0()
             .min_h_0()
             .w_full()
-            .child(
-                shell_column()
-                    .flex_shrink_0()
-                    .child(self.page_header(window, cx)),
-            )
+            .when(self.page != Page::New, |v| {
+                v.child(
+                    shell_column()
+                        .flex_shrink_0()
+                        .child(self.page_header(window, cx)),
+                )
+            })
             .when(self.page == Page::Library, |v| {
                 v.child(shell_column().child(self.library_toolbar(cx)))
             })
@@ -580,14 +582,7 @@ impl Render for Desktop {
                             .pb_6()
                             .child(content),
                     ),
-            )
-            .when(self.page == Page::New, |view| {
-                view.child(
-                    shell_column()
-                        .pb_3()
-                        .child(self.import_footer(cx)),
-                )
-            });
+            );
         let background = v_flex()
             .size_full()
             .bg(rgb(CANVAS))

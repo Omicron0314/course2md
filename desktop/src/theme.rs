@@ -271,16 +271,19 @@ pub fn outline_pill(id: impl Into<gpui::ElementId>) -> gpui_component::button::B
     control(id).outline().rounded(RADIUS_PILL).px(px(16.))
 }
 
-/// Tertiary inline action: quiet gray text, ink on hover.
+/// Tertiary inline action: quiet gray text.
+///
+/// Do not add a hover text color here: gpui-component's Button applies its own
+/// variant hover during render, and a user-set hover style trips the base
+/// button's `hover style already set` debug assertion (debug builds panic).
 pub fn quiet(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
-    use gpui::{InteractiveElement, Styled};
+    use gpui::Styled;
     use gpui_component::button::ButtonVariants;
     control(id)
         .ghost()
         .rounded(RADIUS_PILL)
         .px(px(12.))
         .text_color(rgb(GRAY))
-        .hover(|style| style.text_color(rgb(INK)))
 }
 
 /// Capsule track for mutually exclusive segments (source, view, tabs).
@@ -328,9 +331,10 @@ pub enum BadgeKind {
     Neutral,
 }
 
-/// Status badge: pill, tinted background, saturated-enough text color.
+/// Status badge: pill, tinted background, saturated-enough text color. The
+/// h_flex wrapper keeps the pill hugging its content inside v_flex parents.
 pub fn badge(kind: BadgeKind) -> gpui::Div {
-    use gpui::{Styled, div};
+    use gpui::{Styled, div, prelude::*};
     let (text, bg) = match kind {
         BadgeKind::Success => (SUCCESS, SUCCESS_BG),
         BadgeKind::Warning => (WARNING, WARNING_BG),
@@ -338,19 +342,21 @@ pub fn badge(kind: BadgeKind) -> gpui::Div {
         BadgeKind::Progress => (BADGE_PROGRESS, BADGE_PROGRESS_BG),
         BadgeKind::Neutral => (GRAY, BADGE_PROGRESS_BG),
     };
-    div()
-        .flex()
-        .items_center()
-        .flex_shrink_0()
-        .min_h(px(20.))
-        .px(px(10.))
-        .py(px(1.))
-        .rounded_full()
-        .bg(rgb(bg))
-        .text_color(rgb(text))
-        .text_size(TEXT_AUX)
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .whitespace_nowrap()
+    gpui_base::h_flex().child(
+        div()
+            .flex()
+            .items_center()
+            .flex_shrink_0()
+            .min_h(px(20.))
+            .px(px(10.))
+            .py(px(1.))
+            .rounded_full()
+            .bg(rgb(bg))
+            .text_color(rgb(text))
+            .text_size(TEXT_AUX)
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .whitespace_nowrap(),
+    )
 }
 
 /// Switches read their checked color from `tokens.primary` (near-black in v2);
