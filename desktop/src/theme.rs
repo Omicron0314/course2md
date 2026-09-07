@@ -183,24 +183,6 @@ pub fn reveal(view: gpui::Div, id: impl Into<gpui::ElementId>, cx: &App) -> gpui
     .into_any_element()
 }
 
-/// Strong selection for mutually exclusive choices and toggle chips.
-pub fn choice(
-    button: gpui_component::button::Button,
-    selected: bool,
-) -> gpui_component::button::Button {
-    use gpui::{Styled, prelude::FluentBuilder};
-    use gpui_component::Selectable;
-    button
-        .selected(selected)
-        .toggled(selected)
-        .h_auto()
-        .min_h(rems(2.6))
-        .bg(rgb(if selected { ACCENT_STRONG } else { SURFACE }))
-        .text_color(rgb(if selected { SURFACE } else { INK }))
-        .border_color(rgb(if selected { ACCENT_STRONG } else { CONTROL }))
-        .when(selected, |b| b.font_weight(gpui::FontWeight::SEMIBOLD))
-}
-
 /// Retargetable expansion keeps the content and neighboring groups spatially connected.
 pub fn disclosure(
     id: impl Into<gpui::ElementId>,

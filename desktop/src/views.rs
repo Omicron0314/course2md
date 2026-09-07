@@ -122,16 +122,7 @@ impl Desktop {
     fn page_title(&self) -> String {
         match self.page {
             Page::New => "生成笔记".into(),
-            Page::Library => self
-                .folder_filter
-                .map(|id| {
-                    if id == 0 {
-                        "未分类".into()
-                    } else {
-                        self.library.folders.get(&id).cloned().unwrap_or_default()
-                    }
-                })
-                .unwrap_or_else(|| "课程库".into()),
+            Page::Library => "我的笔记".into(),
             Page::Task => "任务".into(),
             Page::Settings => "设置".into(),
             Page::Result => self
@@ -178,20 +169,10 @@ impl Desktop {
                     .flex_1()
                     .min_w_0()
                     .whitespace_normal()
-                    .text_size(rems(18. / 14.))
+                    .text_size(TEXT_TITLE)
                     .font_weight(FontWeight::SEMIBOLD),
             );
-        if self.page == Page::Library {
-            row = row.child(
-                control("add-course")
-                    .primary()
-                    .icon(IconName::Plus)
-                    .label("生成笔记")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.new_draft(true, false, window, cx)),
-                    ),
-            );
-        } else if self.page == Page::Result {
+        if self.page == Page::Result {
             row = row.child(self.reader_toolbar(cx));
         }
         v_flex().gap_2().child(row)

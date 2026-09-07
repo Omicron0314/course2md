@@ -302,7 +302,7 @@ impl Desktop {
                 "课程笔记保存位置",
                 output.display().to_string(),
             ),
-            (Field::Search, "搜索课程标题", String::new()),
+            (Field::Search, "搜索笔记标题", String::new()),
             (Field::FolderName, "文件夹名称", String::new()),
             (
                 Field::AsrUrl,
