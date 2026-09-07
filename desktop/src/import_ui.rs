@@ -49,7 +49,7 @@ fn platform_badge(name: &'static str, color: u32) -> Div {
         )
 }
 /// One labeled region inside the workbench box, separated by the card hairline.
-fn box_section(label: &'static str) -> Div {
+pub(crate) fn box_section(label: &'static str) -> Div {
     v_flex()
         .w_full()
         .min_w_0()
@@ -65,7 +65,7 @@ fn box_section(label: &'static str) -> Div {
         )
 }
 /// One fact row inside the plan confirmation inset.
-fn plan_row(value: impl Into<SharedString>, warning: bool) -> Stateful<Div> {
+pub(crate) fn plan_row(value: impl Into<SharedString>, warning: bool) -> Stateful<Div> {
     let value = value.into();
     accessible_text(text_id("plan-row", &value), value)
         .w_full()
@@ -1901,7 +1901,34 @@ impl Desktop {
             .rounded(RADIUS_HERO)
             .shadow(shadow_hero());
         bx = bx.child(self.box_source_input(cx));
-        if self.source_preview.is_none() {
+        let linked_task = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.draft())
+            .and_then(|draft| draft.submitted_task.clone())
+            .and_then(|id| {
+                self.workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.state.task(&id).cloned())
+            })
+            .filter(|task| {
+                // 部分完成仍有可补做的失败项，盒内继续出示这张卡。
+                !task.state.finished()
+                    || (task.state == crate::workspace::TaskState::Partial
+                        && task.artifact.as_ref().is_some_and(|path| {
+                            !crate::task_ui::task_component_outcomes(task, path).is_empty()
+                        }))
+            });
+        if let Some(task) = linked_task {
+            bx = match task.state {
+                crate::workspace::TaskState::Queued
+                | crate::workspace::TaskState::Running
+                | crate::workspace::TaskState::Pausing => {
+                    bx.child(self.box_task_running(&task, cx))
+                }
+                _ => bx.child(self.box_task_attention(&task, cx)),
+            };
+        } else if self.source_preview.is_none() {
             bx = bx.child(self.box_bottom_row(cx));
         } else {
             bx = bx
@@ -1912,6 +1939,9 @@ impl Desktop {
                 .child(self.plan_inset(cx));
         }
         view = view.child(bx);
+        if let Some(recent) = self.recent_notes_section(cx) {
+            view = view.child(recent);
+        }
         if let Some(error) = &self.workspace_error {
             view = view.child(issue(error.clone()));
         }

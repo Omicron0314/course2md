@@ -1117,4 +1117,208 @@ impl Desktop {
                 )
             })
     }
+
+    /// Workbench "最近笔记": attention tasks first, then recent readable notes.
+    /// An empty library renders nothing at all (the hero plus box are the empty state).
+    pub fn recent_notes_section(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let linked = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.state.draft())
+            .and_then(|d| d.submitted_task.clone());
+        let mut attention: Vec<_> = self
+            .workspace
+            .as_ref()
+            .into_iter()
+            .flat_map(|w| w.state.tasks.iter())
+            .filter(|task| {
+                Some(&task.id) != linked.as_ref()
+                    && task.handled_by.is_none()
+                    && (matches!(
+                        task.state,
+                        crate::workspace::TaskState::NeedsAttention
+                            | crate::workspace::TaskState::Uncertain
+                            | crate::workspace::TaskState::Paused
+                    ) || (task.state == crate::workspace::TaskState::Partial
+                        && task.artifact.as_ref().is_some_and(|path| {
+                            !crate::task_ui::task_component_outcomes(*task, path).is_empty()
+                        })))
+            })
+            .cloned()
+            .collect();
+        attention.sort_by_key(|task| std::cmp::Reverse(task.updated));
+        attention.truncate(2);
+        let notes: Vec<Course> = self.courses.iter().take(5).cloned().collect();
+        if attention.is_empty() && notes.is_empty() {
+            return None;
+        }
+        let mut section = v_flex().w_full().min_w_0().gap_2();
+        section = section.child(
+            h_flex()
+                .w_full()
+                .items_baseline()
+                .child(
+                    accessible_text("recent-title", "最近笔记")
+                        .text_size(TEXT_TITLE)
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(div().flex_1())
+                .child(
+                    quiet("recent-all")
+                        .label("查看全部")
+                        .icon(icons::arrow_forward())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.folder_filter = None;
+                            this.navigate(Page::Library, cx);
+                        })),
+                ),
+        );
+        for task in attention {
+            let id = task.id.clone();
+            let resend = task.state == crate::workspace::TaskState::Uncertain;
+            let partial_component: Option<String> = if task.state
+                == crate::workspace::TaskState::Partial
+            {
+                task.artifact.as_ref().and_then(|path| {
+                    crate::task_ui::task_component_outcomes(&task, path)
+                        .first()
+                        .map(|(component, _, _)| component.clone())
+                })
+            } else {
+                None
+            };
+            section = section.child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .p_3()
+                    .gap_3()
+                    .items_center()
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(CARD_LINE))
+                    .rounded(RADIUS_CARD)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(badge(BadgeKind::Warning).child("需要处理"))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(task.plan.title.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(GRAY))
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(
+                                        task.error
+                                            .clone()
+                                            .unwrap_or_else(|| task.state.label().into()),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        outline_pill(SharedString::from(format!("recent-resume-{id}")))
+                            .label("继续处理")
+                            .flex_shrink_0()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(component) = partial_component.clone() {
+                                    this.reprocess_task(
+                                        id.clone(),
+                                        vec![component],
+                                        Vec::new(),
+                                        cx,
+                                    );
+                                } else if resend {
+                                    this.resend_uncertain(id.clone(), cx);
+                                } else {
+                                    this.set_task_intent(id.clone(), crate::workspace::Intent::Run, cx);
+                                }
+                            })),
+                    ),
+            );
+        }
+        for (index, course) in notes.into_iter().enumerate() {
+            section = section.child(self.recent_note_row(course, index, cx));
+        }
+        Some(section)
+    }
+
+    fn recent_note_row(&self, course: Course, index: usize, cx: &mut Context<Self>) -> Div {
+        let mut row = h_flex()
+            .w_full()
+            .min_w_0()
+            .p_3()
+            .gap_3()
+            .items_center()
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(CARD_LINE))
+            .rounded(RADIUS_CARD);
+        if let Some(thumbnail) = &course.thumbnail {
+            row = row.child(
+                img(thumbnail.clone())
+                    .w(rems(6.857))
+                    .h(rems(3.857))
+                    .object_fit(ObjectFit::Cover)
+                    .rounded(RADIUS_SMALL)
+                    .flex_shrink_0(),
+            );
+        }
+        let modified = course
+            .modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        row = row
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w_full()
+                            .whitespace_normal()
+                            .text_ellipsis()
+                            .line_clamp(2)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(course.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .text_color(rgb(GRAY))
+                            .child(format!(
+                                "{} · {}",
+                                course.description(),
+                                crate::reader_navigation::timestamp_utc(modified * 1000)
+                            )),
+                    ),
+            )
+            .child(badge(BadgeKind::Success).child("已完成"))
+            .child(
+                quiet(("recent-read", index)).label("阅读笔记").on_click(cx.listener(
+                    move |this, _, _, cx| this.open_course(course.clone(), cx),
+                )),
+            );
+        row
+    }
+
 }
