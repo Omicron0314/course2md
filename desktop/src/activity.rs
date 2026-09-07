@@ -119,19 +119,6 @@ pub fn quantity(stage: &str, current: u64, total: u64) -> String {
         String::new()
     }
 }
-/// Present actionable feedback while keeping raw tool output in the log.
-pub fn failure_message(message: &str) -> &str {
-    if message.contains("ffmpeg")
-        && (message.contains("does not contain any stream")
-            || message.contains("matches no streams"))
-    {
-        "这个视频没有可提取的音轨。可以选择已有字幕，或更换带声音的视频。"
-    } else if message.trim().is_empty() {
-        "任务中断，已保存的进度仍保留。打开技术详情可以查看处理记录。"
-    } else {
-        message
-    }
-}
 
 /// Older saved outcomes combined a stage label, retention message and English
 /// diagnostics. Keep these records readable without rewriting their evidence.

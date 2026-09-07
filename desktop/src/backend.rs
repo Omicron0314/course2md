@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, SyncSender},
     thread,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -18,10 +18,6 @@ pub struct Completed {
     pub segments: usize,
     #[serde(default)]
     pub partial: Option<bool>,
-    #[serde(default)]
-    pub operation: Option<String>,
-    #[serde(default)]
-    pub outputs: Vec<String>,
     #[serde(default)]
     pub outcomes: Option<serde_json::Value>,
 }
@@ -73,6 +69,7 @@ impl Job {
     pub fn start(args: Vec<String>) -> Result<Self> {
         Self::spawn_input(resolve_cli()?, args, None)
     }
+    #[cfg(test)]
     fn spawn(bin: PathBuf, args: Vec<String>) -> Result<Self> {
         Self::spawn_input(bin, args, None)
     }
@@ -446,9 +443,6 @@ impl Environment {
             npu_runtime,
         }
     }
-    pub fn ready(&self) -> bool {
-        self.engine && self.ffmpeg && self.ffprobe
-    }
 }
 
 /// Bounded, executable checks. Redirect output to a file so a verbose tool cannot
@@ -490,11 +484,13 @@ fn probe(bin: &Path, args: &[&str]) -> Option<String> {
     Some(text)
 }
 
-pub use crate::notes::{Course, Preview, PreviewBlock, default_output, read_preview, scan_library};
+pub use crate::notes::{Course, Preview, default_output, read_preview, scan_library};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notes::PreviewBlock;
+    use std::time::SystemTime;
 
     #[test]
     fn done_event_uses_the_cli_protocol() {

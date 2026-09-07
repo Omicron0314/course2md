@@ -36,12 +36,6 @@ pub struct Source {
     pub subtitle_read_error: Option<course2md::subtitle::SubtitleReadError>,
 }
 impl Source {
-    pub fn selected_subtitle_file(&self) -> Option<&Path> {
-        self.selected_subtitle
-            .as_ref()
-            .map(|subtitle| subtitle.path.as_path())
-    }
-
     pub fn detail(&self) -> String {
         let seconds = self.duration.max(0.) as u64;
         let mut details = Vec::new();

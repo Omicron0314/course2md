@@ -1,9 +1,7 @@
 //! Native pages: stable navigation and actions surround independently scrolling content.
 use super::*;
 use crate::theme::*;
-use gpui_component::{
-    button::*, checkbox::Checkbox, progress::Progress, switch::Switch, text::TextView,
-};
+use gpui_component::{button::*, progress::Progress};
 
 fn muted(text: impl Into<SharedString>) -> Div {
     div().text_sm().text_color(rgb(MUTED)).child(text.into())
@@ -33,38 +31,6 @@ fn card() -> Div {
 }
 
 impl Desktop {
-    pub fn format_choices(&self, cx: &mut Context<Self>) -> Div {
-        let choices = h_flex().gap_4().flex_wrap().children(
-            ["Markdown", "HTML", "JSON"]
-                .into_iter()
-                .enumerate()
-                .map(|(index, label)| {
-                    Checkbox::new(("format", index))
-                        .label(label)
-                        .checked(self.editing_options().formats[index])
-                        .min_h(rems(2.6))
-                        .min_w(px(108.))
-                        .on_click(cx.listener(move |this, value, _, cx| {
-                            this.editing_options_mut().formats[index] = *value;
-                            cx.notify();
-                        }))
-                }),
-        );
-        v_flex().gap_1().child(choices).child(
-            div()
-                .min_h(px(20.))
-                .text_sm()
-                .text_color(rgb(0xa32626))
-                .when(
-                    !self
-                        .editing_options()
-                        .formats
-                        .iter()
-                        .any(|selected| *selected),
-                    |hint| hint.child("请至少选择一种导出格式"),
-                ),
-        )
-    }
     fn active_work(&self) -> Vec<(&str, &activity::Activity)> {
         let preparing = self
             .progress
@@ -449,7 +415,7 @@ impl Render for Desktop {
                                 && (page != Page::Library || self.folder_filter.is_none()),
                         )
                         .on_click(cx.listener(
-                            move |this, _, window, cx| {
+                            move |this, _, _window, cx| {
                                 if page == Page::New {
                                     this.navigate(Page::New, cx);
                                 } else {

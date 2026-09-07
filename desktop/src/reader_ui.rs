@@ -165,9 +165,7 @@ impl Render for ImageDialog {
 }
 fn block_text(block: &PreviewBlock) -> Option<&str> {
     match block {
-        PreviewBlock::Heading { text, .. }
-        | PreviewBlock::Paragraph { text, .. }
-        | PreviewBlock::Markdown(text) => Some(text),
+        PreviewBlock::Heading { text, .. } | PreviewBlock::Paragraph { text, .. } => Some(text),
         _ => None,
     }
 }
@@ -1645,11 +1643,6 @@ impl Desktop {
                     }
                     PreviewBlock::Paragraph { text, anchor } => {
                         paragraph(SharedString::from(anchor.clone()), text.clone(), index)
-                            .when(active, |view| view.bg(rgb(0xfff0db)))
-                            .into_any_element()
-                    }
-                    PreviewBlock::Markdown(text) => {
-                        paragraph(("legacy-note", index), text.clone(), index)
                             .when(active, |view| view.bg(rgb(0xfff0db)))
                             .into_any_element()
                     }

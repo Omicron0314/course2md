@@ -2586,7 +2586,6 @@ impl Desktop {
     pub fn invalid_setting(&self, _cx: &App) -> Option<(Field, &'static str)> {
         None
     }
-    pub fn settings_field_changed(&mut self, _field: Field, _cx: &mut Context<Self>) {}
     pub fn save_settings(&mut self, cx: &mut Context<Self>) {
         let mut next = self.generation_edit_base();
         let mut config = self.preferences.defaults_config();
@@ -2596,22 +2595,5 @@ impl Desktop {
         next.ai_summary = config.llm.summarize;
         next.vision = config.llm.vision;
         self.commit_generation(next, cx);
-    }
-    pub fn sync_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_ui.initialized = false;
-        self.hydrate_settings_inputs(window, cx);
-        self.refresh_preference_defaults(cx);
-    }
-    pub fn directory_field(&self, _id: &'static str, cx: &mut Context<Self>) -> Div {
-        v_flex()
-            .gap_2()
-            .child(text("legacy-directory-heading", "保存位置"))
-            .child(
-                text(
-                    "legacy-directory-display",
-                    self.output(cx).display().to_string(),
-                )
-                .text_sm(),
-            )
     }
 }

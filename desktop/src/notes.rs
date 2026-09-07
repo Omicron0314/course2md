@@ -248,7 +248,6 @@ fn legacy_preview(
         .unwrap_or_default();
     Preview {
         markdown_text: without_image_references(&markdown),
-        markdown,
         course,
         blocks,
         frames,
@@ -260,10 +259,6 @@ fn legacy_preview(
         issues,
         processing_issues,
     }
-}
-
-pub fn library(root: &Path) -> Result<Vec<Course>> {
-    Ok(scan_library(root)?.courses)
 }
 
 pub fn scan_library(root: &Path) -> Result<LibraryScan> {
@@ -370,7 +365,6 @@ pub fn default_output() -> PathBuf {
 
 #[derive(Clone)]
 pub enum PreviewBlock {
-    Markdown(String),
     Image(PathBuf),
     Heading {
         text: String,
@@ -430,7 +424,6 @@ fn processing_issues(manifest: &course2md::artifact::Manifest) -> Vec<Processing
 #[derive(Clone)]
 pub struct Preview {
     pub course: Course,
-    pub markdown: String,
     pub blocks: Vec<PreviewBlock>,
     pub frames: Vec<PathBuf>,
     pub has_markdown: bool,
@@ -542,7 +535,6 @@ pub fn read_preview(mut course: Course) -> Result<Preview> {
         let markdown_text = without_image_references(&markdown);
         return Ok(Preview {
             course,
-            markdown,
             blocks,
             frames,
             has_markdown: true,

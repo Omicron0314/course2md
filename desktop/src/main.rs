@@ -11,7 +11,6 @@ mod import_ui;
 mod legacy_settings;
 mod library_ui;
 mod notes;
-mod onboarding;
 mod organize;
 mod preferences;
 mod reader_navigation;
@@ -72,11 +71,6 @@ const PROVIDERS: [(&str, &str); 6] = [
     ("cpu", "CPU"),
     ("npu", "Intel NPU"),
     ("api", "云端 API"),
-];
-const SOURCES: [(&str, &str); 3] = [
-    ("auto", "字幕优先"),
-    ("subtitle", "仅字幕"),
-    ("asr", "语音识别"),
 ];
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -160,7 +154,6 @@ struct Desktop {
     source_deadline: Option<Instant>,
     quit_deadline: Option<Instant>,
     account: account_ui::AccountUi,
-    collapsed_folders: std::collections::BTreeSet<u64>,
     online: bool,
     last_source_input: String,
     completed_source: Option<String>,
@@ -192,7 +185,6 @@ struct Desktop {
     folder_origin: Option<library_ui::FolderOrigin>,
     folder_error: Option<String>,
     delete_folder: Option<u64>,
-    task_destination: Option<(PathBuf, Option<u64>, source::Source, u64)>,
     page: Page,
     result_origin: Page,
     result_tab: usize,
@@ -200,10 +192,7 @@ struct Desktop {
     show_options: bool,
     show_export_options: bool,
     show_logs: bool,
-    setup_open: bool,
-    setup_return: Option<Page>,
     show_engine_details: bool,
-    show_diagnostics: bool,
     environment: Option<backend::Environment>,
     scrolls: [ScrollHandle; 5],
     inputs: BTreeMap<Field, Entity<InputState>>,
@@ -246,21 +235,6 @@ actions!(
 );
 
 impl Desktop {
-    fn editing_options(&self) -> &ConversionOptions {
-        if self.page == Page::Settings || self.setup_open {
-            &self.settings_options
-        } else {
-            &self.task_options
-        }
-    }
-    fn editing_options_mut(&mut self) -> &mut ConversionOptions {
-        if self.page == Page::Settings || self.setup_open {
-            &mut self.settings_options
-        } else {
-            &mut self.task_options
-        }
-    }
-
     fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.flush_settings_for_exit(cx) || !self.save_current_draft(cx) {
             return false;
@@ -470,7 +444,6 @@ impl Desktop {
             root_focus: Self::install_root_focus(window, cx),
             show_preview_details: false,
             account: account_ui::AccountUi::default(),
-            collapsed_folders: Default::default(),
             library: Default::default(),
             library_root: output,
             library_error: None,
@@ -484,17 +457,13 @@ impl Desktop {
             folder_origin: None,
             folder_error: None,
             delete_folder: None,
-            task_destination: None,
             result_origin: Page::Library,
             result_tab: 0,
             settings_tab: 0,
             show_options: false,
             show_export_options: false,
             show_logs: false,
-            setup_open: false,
-            setup_return: None,
             show_engine_details: false,
-            show_diagnostics: false,
             environment: None,
             scrolls: std::array::from_fn(|_| ScrollHandle::new()),
             inputs,
@@ -616,14 +585,6 @@ impl Desktop {
     }
     fn value(&self, field: Field, cx: &App) -> String {
         self.inputs[&field].read(cx).value().trim().to_string()
-    }
-    fn blur_fields(&self, fields: &[Field], window: &mut Window, cx: &mut App) {
-        if fields
-            .iter()
-            .any(|field| self.inputs[field].focus_handle(cx).is_focused(window))
-        {
-            window.blur(cx);
-        }
     }
     fn field_error(&self, field: Field, cx: &App) -> Option<&'static str> {
         self.settings_status
