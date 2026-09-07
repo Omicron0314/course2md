@@ -1,0 +1,64 @@
+--- a/crates/gpui_macos/src/window.rs
++++ b/crates/gpui_macos/src/window.rs
+@@ -132,6 +132,11 @@
+     unsafe {
+         WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow));
+         PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel));
++        // The AccessKit adapter is on the content view, while GPUI's keyboard
++        // responder is a child GPUIView. Route native window focus queries
++        // through the adapter rather than the unadapted responder.
++        accesskit_macos::add_focus_forwarder_to_window_class("GPUIWindow");
++        accesskit_macos::add_focus_forwarder_to_window_class("GPUIPanel");
+         VIEW_CLASS = {
+             let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
+             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
+@@ -1813,6 +1818,23 @@
+         }
+     }
+ 
++    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
++        let state = Arc::downgrade(&self.0);
++        Some(Rc::new(move || {
++            let Some(state) = state.upgrade() else {
++                return;
++            };
++            let view = state.lock().native_view.clone();
++            // Window invalidation runs on AppKit's main thread. Marking the
++            // view dirty schedules a later native frame and never draws while
++            // the App is borrowed. This also serves AX activation and async
++            // results when initial occlusion has not started CVDisplayLink.
++            unsafe {
++                let _: () = msg_send![view.as_ptr(), setNeedsDisplay: YES];
++            }
++        }))
++    }
++
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
+         self.0.as_ref().lock().request_frame_callback = Some(callback);
+     }
+@@ -2156,7 +2178,7 @@
+         };
+         let action_handler = A11yActionHandler(callbacks.action);
+ 
+-        let adapter = unsafe {
++        let mut adapter = unsafe {
+             accesskit_macos::SubclassingAdapter::for_window(
+                 lock.native_window as *mut c_void,
+                 activation_handler,
+@@ -2164,7 +2186,16 @@
+             )
+         };
+ 
++        // open_window can make the window key before the adapter exists.
++        // Its initial host-focus state must match AppKit immediately, without
++        // requiring the user to activate another window and come back.
++        let events =
++            adapter.update_view_focus_state(unsafe { lock.native_window.isKeyWindow() == YES });
+         lock.accesskit_adapter = Some(adapter);
++        drop(lock);
++        if let Some(events) = events {
++            events.raise();
++        }
+     }
+ 
+     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
