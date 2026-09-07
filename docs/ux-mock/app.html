@@ -2,37 +2,44 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>course2md · 全应用高保真 mock</title>
+<title>course2md · 全应用高保真 mock（居中单栏 IA · v2）</title>
 <!--
-  course2md 桌面应用全页面 mock（GPUI 复刻蓝图）
-  URL 参数：?page=library|generate|tasks|reader|settings & state=… & scale=1|2 & from=generate
-  scale 模拟 GPUI 用户字号倍率：1rem = 14px@scale1 / 28px@scale2（机制同 index.html）。
-  rem ↔ GPUI rems()：承载文字或随文字呼吸的结构尺寸（侧栏宽、控件高、栏宽、封面、字号）。
-  px  ↔ GPUI px()：1px 边框、padding、gap、圆角、固定图标，永不缩放。
+  v2：owner 否决左侧栏五页布局，改为居中单栏（参考 ~/Documents/1.jpg）。
+  URL 参数：?page=home|notes|reader|settings & state=… & scale=1|2 & from=generate
+  scale 机制不变：1rem = 14px@scale1 / 28px@scale2。
+  rem ↔ GPUI rems()：承载文字的结构尺寸；px ↔ GPUI px()：边框、padding、gap、圆角、图标。
 -->
 <style>
-/* ================= 设计 token ================= */
+/* ================= 设计 token（v2 暖奶油语言） ================= */
 :root {
-  /* 色板：ink/gray/control-border/accent 沿用实机验收过的对比度组合
-     （#657184 白底 4.94:1；#315bc5 白字 6.12:1；#485363 白底 7.80:1） */
-  --canvas: #F7F7F5;
+  --canvas: #F6F2EB;          /* 暖奶油画布 */
   --surface: #FFFFFF;
-  --sidebar: #ECEDF0;
-  --sidebar-line: #DCDDE2;
-  --ink: #252A32;
-  --gray: #485363;
-  --faint: #6A7383;
-  --hairline: #E3E5E2;
-  --control-border: #657184;
-  --accent: #315BC5;
-  --accent-hover: #2A4DAB;
-  --accent-soft: #EAF0FF;
-  --ok: #217A46;    --ok-bg: #E4F2E9;
-  --warn: #8F5A0E;  --warn-bg: #FAF1DC;
-  --err: #B4231A;   --err-bg: #FCEDE9;
-  --neutral-bg: #ECEDEF;
-  --progress-fill: #7A8699;   /* 新增：进度条填充（低饱和石板色，不占用 accent） */
-  --mark: #FCEFC7;  --mark-cur: #F7DC8E;  --mark-cur-line: #E3C26A;
+  --cream-inset: #FBF7F0;     /* 白卡内的奶油嵌层（计划确认区） */
+  --ink: #221F1C;             /* 黑墨正文（奶油底 ≈14.5:1） */
+  --gray: #6E6558;            /* 辅助（奶油底 ≈5.1:1，白底 ≈5.7:1） */
+  --faint: #8A8074;           /* 弱化/占位 */
+  --hairline: #E7E0D2;        /* 画布上的分隔 */
+  --card-line: #EDE8DD;       /* 白卡上的分隔 */
+  --control-border: #8A7E68;  /* 控件边界（白底 ≈4.0:1，奶油底 ≈3.5:1） */
+  /* 珊瑚红：装饰（大字/下划线/图形）用 accent；文字与可点击强调用 accent-strong */
+  --accent: #D95D4E;          /* 装饰级（奶油底 3.3:1，仅大字/下划线） */
+  --accent-strong: #C24A3C;   /* 文字/选中标记（白底·白字均 ≈4.8:1） */
+  --accent-soft: #F9E9E5;     /* 选中行浅底 */
+  /* 主按钮近黑胶囊（同参考图；珊瑚红只表「当前/品牌」语义） */
+  --primary: #221F1C;         /* 白字 ≈14.5:1 */
+  --primary-hover: #3A342E;
+  --ok: #256B45;   --ok-bg: #E1F1E6;     /* ≈5.4:1 */
+  --warn: #8A5410; --warn-bg: #FAF0DC;   /* ≈5.5:1 */
+  --err: #B4231A;  --err-bg: #FCEDE9;    /* ≈5.9:1 */
+  --progress: #6E5F4C; --progress-bg: #EFE9DD;  /* 进行中徽章（暖中性） */
+  --progress-fill: #8A7E68;   /* 进度条填充（暖灰，不占 accent） */
+  --mark: #FCEFC7; --mark-cur: #F7DC8E; --mark-cur-line: #E3C26A;
+  --r-hero: 18px;  /* 大卡（输入盒） */
+  --r-card: 12px;  /* 列表行/面板/输入框 */
+  --r-sm: 6px;     /* chip/徽章内图/ts-chip */
+  --sh-hero: 0 1px 2px rgba(60,50,40,.05), 0 16px 40px rgba(60,50,40,.08);
+  --sh-pill: 0 1px 2px rgba(60,50,40,.12);
+  --sh-pop: 0 12px 32px rgba(60,50,40,.16);
 }
 html { font-size: calc(14px * var(--scale, 1)); }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -43,142 +50,119 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+input { font: inherit; }
 
-/* ================= 窗口框架 ================= */
-.titlebar {
-  height: 28px; flex-shrink: 0; display: flex; align-items: center;
-  padding: 0 12px; position: relative; background: var(--canvas);
-  border-bottom: 1px solid var(--hairline);
+/* ================= 顶栏（居中栏对齐，无侧栏） ================= */
+.topbar { padding: 12px 24px; }
+.topbar-inner {
+  max-width: 51.429rem; margin: 0 auto;
+  display: flex; align-items: center; gap: 16px;
 }
-.tl-dots { display: flex; gap: 8px; }
-.tl-dot { width: 12px; height: 12px; border-radius: 50%; }
-.tl-title {
-  position: absolute; left: 0; right: 0; text-align: center;
-  font-size: 0.857rem; color: var(--faint); pointer-events: none;
+.logo { font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
+.logo .num { color: var(--accent); }
+.nav-tabs { flex: 1; display: flex; justify-content: center; gap: 24px; }
+.nav-tab { padding: 6px 2px; color: var(--gray); position: relative; white-space: nowrap; }
+.nav-tab.on { color: var(--ink); font-weight: 600; }
+.nav-tab.on::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: -1px;
+  height: 2px; border-radius: 1px; background: var(--accent);
 }
-.app { display: flex; min-height: calc(100vh - 28px); }
+.gear-btn {
+  width: 2.286rem; height: 2.286rem; border-radius: 999px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--gray); font-size: 15px;
+}
+.gear-btn:hover { background: rgba(34,31,28,.06); }
+.gear-btn.on { color: var(--ink); background: #EDE7DA; }
 
-/* ================= 侧栏（200px = 14.286rem） ================= */
-.sidebar {
-  width: 14.286rem; flex-shrink: 0;
-  background: var(--sidebar); border-right: 1px solid var(--sidebar-line);
-  padding: 12px; display: flex; flex-direction: column; gap: 16px;
-  position: sticky; top: 0; height: calc(100vh - 28px);
-}
-.main-nav { display: flex; flex-direction: column; gap: 2px; }
-.nav-item {
-  display: flex; align-items: center; gap: 8px;
-  min-height: 2.286rem; padding: 2px 8px; border-radius: 6px;
-  color: var(--ink);
-}
-.nav-item.selected { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.nav-icon { width: 20px; flex-shrink: 0; text-align: center; font-size: 15px; line-height: 1.4; }
-.nav-label { min-width: 0; }
-.nav-badge {
-  margin-left: auto; flex-shrink: 0; min-width: 20px; height: 20px;
-  padding: 0 6px; border-radius: 10px; background: var(--err); color: #fff;
-  font-size: 0.857rem; font-weight: 600; display: inline-flex;
-  align-items: center; justify-content: center;
-}
-.group-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 4px 0 8px;
-}
-.group-title { font-size: 0.857rem; color: var(--gray); }
-.folder-list { display: flex; flex-direction: column; gap: 2px; }
-.folder-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 6px; }
-.folder-icon { width: 18px; flex-shrink: 0; text-align: center; font-size: 14px; line-height: 1.45; }
-.folder-name {
-  flex: 1; min-width: 0; font-size: 0.857rem;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  overflow: hidden; word-break: break-all;
-}
-.folder-count { font-size: 0.857rem; color: var(--gray); white-space: nowrap; flex-shrink: 0; }
-.sidebar-bottom { margin-top: auto; }
+/* ================= 居中单栏 ================= */
+.content { max-width: 51.429rem; margin: 0 auto; padding: 24px; }
+.content.narrow { max-width: 48.571rem; }  /* 设置 680 */
 
-/* ================= 通用控件（唯一语法，全站一致） ================= */
-/* 主按钮：accent 填充。每页/每个独立区域最多一个 */
+/* ================= 控件语法（v2：胶囊化，角色与 v1 相同） ================= */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  min-height: 2.571rem; padding: 2px 14px; border-radius: 6px;
-  border: 1px solid transparent; font-size: 1rem; flex-shrink: 0;
+  min-height: 2.571rem; padding: 2px 16px; border-radius: 999px;
+  border: 1px solid transparent; font-size: 1rem; flex-shrink: 0; white-space: nowrap;
 }
-.btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
-.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary { background: var(--primary); color: #fff; font-weight: 600; }
+.btn-primary:hover { background: var(--primary-hover); }
 .btn-outline { background: var(--surface); border-color: var(--control-border); }
-.btn-quiet { color: var(--ink); padding-left: 10px; padding-right: 10px; }
-.btn-quiet:hover { background: rgba(37,42,50,.06); }
-.btn.compact, .compact.btn { min-height: 2.286rem; padding: 2px 10px; }
-.btn .caret { font-size: 0.857rem; color: inherit; opacity: .8; }
+.btn-quiet { color: var(--ink); padding-left: 12px; padding-right: 12px; }
+.btn-quiet:hover { background: rgba(34,31,28,.05); }
+.btn.compact { min-height: 2.286rem; padding: 2px 12px; }
+.btn .arrow { font-weight: 400; }
+.btn .caret { font-size: 0.857rem; opacity: .7; }
 .icon-btn {
   width: 2rem; height: 2rem; min-height: 2rem; flex-shrink: 0; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 6px; color: var(--gray); font-size: 1rem;
+  border-radius: 999px; color: var(--gray); font-size: 1rem;
 }
-.icon-btn:hover { background: rgba(37,42,50,.06); }
+.icon-btn:hover { background: rgba(34,31,28,.05); }
 
-/* 分段控件：互斥选择（视图/来源/页签），选中 = 蓝底白字（沿设置复审约定） */
-.seg { display: inline-flex; background: var(--surface); border: 1px solid var(--control-border); border-radius: 6px; overflow: hidden; flex-shrink: 0; max-width: 100%; }
+/* 胶囊分段控件：互斥选择（来源/视图/页签），选中 = 白胶囊+柔和影（参考图语言） */
+.seg {
+  display: inline-flex; background: #ECE6D9; border-radius: 999px;
+  padding: 2px; gap: 2px; flex-shrink: 0; max-width: 100%;
+}
 .seg-btn {
-  min-height: 2.571rem; padding: 2px 14px; display: inline-flex;
-  align-items: center; justify-content: center; white-space: nowrap;
+  min-height: 2.286rem; padding: 2px 14px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--gray); white-space: nowrap;
 }
-.seg-btn + .seg-btn { border-left: 1px solid var(--control-border); }
-.seg-btn.selected { background: var(--accent); color: #fff; font-weight: 600; }
-.seg.compact .seg-btn { min-height: 2.286rem; padding: 2px 12px; }
+.seg-btn.selected { background: #fff; color: var(--ink); font-weight: 600; box-shadow: var(--sh-pill); }
 
-/* 独立开关按钮：开/关一个选项（按文件夹、目录），与分段控件明确区分 */
+/* 独立开关项（按文件夹/目录）：与 seg 明确区分 */
 .toggle-btn {
   display: inline-flex; align-items: center; gap: 6px;
-  min-height: 2.286rem; padding: 2px 10px; border-radius: 6px;
+  min-height: 2.286rem; padding: 2px 12px; border-radius: 999px;
   border: 1px solid var(--control-border); background: var(--surface);
   flex-shrink: 0; white-space: nowrap;
 }
 .toggle-btn .tick { width: 14px; text-align: center; color: transparent; flex-shrink: 0; }
-.toggle-btn.on { background: var(--neutral-bg); font-weight: 600; }
+.toggle-btn.on { background: #EFE9DD; font-weight: 600; }
 .toggle-btn.on .tick { color: var(--ink); }
 
-/* 开关：尾部对齐，胶囊形为平台惯例（圆角 6 的组件例外） */
-.switch { width: 32px; height: 20px; border-radius: 10px; background: #C6CAD1; position: relative; flex-shrink: 0; margin-top: 2px; }
+/* 开关/单选/勾选：选中用 accent-strong（文字级对比度） */
+.switch { width: 32px; height: 20px; border-radius: 999px; background: #D8D0BF; position: relative; flex-shrink: 0; margin-top: 2px; }
 .switch::after {
   content: ''; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px;
-  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2);
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.18);
 }
-.switch.on { background: var(--accent); }
+.switch.on { background: var(--accent-strong); }
 .switch.on::after { left: 14px; }
 .switch.dim { opacity: .45; }
-
-/* 勾选 / 单选：选中标记用 accent（选择语义，同「当前导航」） */
 .check {
-  width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0; margin-top: 2px;
+  width: 16px; height: 16px; border-radius: 5px; flex-shrink: 0; margin-top: 2px;
   border: 1px solid var(--control-border); background: var(--surface);
   display: inline-flex; align-items: center; justify-content: center;
   color: transparent; font-size: 12px;
 }
-.check.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.check.on { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
 .radio { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--control-border); background: var(--surface); flex-shrink: 0; position: relative; margin-top: 2px; }
-.radio.on { border-color: var(--accent); }
-.radio.on::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--accent); }
+.radio.on { border-color: var(--accent-strong); }
+.radio.on::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--accent-strong); }
 
-/* 状态徽章：低饱和状态色各一；进行中用石板色，不占用 accent */
+/* 状态徽章：胶囊 + 低饱和状态色 */
 .badge {
-  display: inline-flex; align-items: center; min-height: 20px; padding: 1px 8px;
-  border-radius: 6px; font-size: 0.857rem; font-weight: 600;
+  display: inline-flex; align-items: center; min-height: 20px; padding: 1px 10px;
+  border-radius: 999px; font-size: 0.857rem; font-weight: 600;
   flex-shrink: 0; white-space: nowrap;
 }
-.badge.progress { background: #E8ECF2; color: #41506B; }
+.badge.progress { background: var(--progress-bg); color: var(--progress); }
 .badge.ok { background: var(--ok-bg); color: var(--ok); }
 .badge.warn { background: var(--warn-bg); color: var(--warn); }
 .badge.err { background: var(--err-bg); color: var(--err); }
-.badge.neutral { background: var(--neutral-bg); color: var(--gray); }
+.badge.neutral { background: #EFE9DD; color: var(--gray); }
 
-/* 文件夹 chip：只在可改归属处出现，分组视图内不重复 */
+/* 文件夹 chip：只在可改归属处出现 */
 .chip {
   display: inline-flex; align-items: center; gap: 6px; height: 2rem;
-  max-width: min(16rem, 100%); min-width: 0; padding: 0 8px;
-  border-radius: 6px; color: var(--gray); flex: 0 1 auto;
+  max-width: min(16rem, 100%); min-width: 0; padding: 0 10px;
+  border-radius: 999px; border: 1px solid var(--card-line); background: var(--surface);
+  color: var(--gray); flex: 0 1 auto;
 }
-.chip:hover { background: rgba(37,42,50,.06); }
+.chip:hover { background: rgba(34,31,28,.04); }
 .chip-icon { flex-shrink: 0; font-size: 13px; }
 .chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip-caret { flex-shrink: 0; font-size: 0.857rem; }
@@ -190,57 +174,51 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .field-desc { font-size: 0.857rem; color: var(--gray); }
 .input, .select {
   width: 100%; min-height: 2.571rem; border: 1px solid var(--control-border);
-  border-radius: 6px; background: var(--surface); padding: 2px 12px;
+  background: var(--surface); padding: 2px 12px;
   font-size: 1rem; color: var(--ink); display: flex; align-items: center;
 }
+.input { border-radius: var(--r-card); }
 .input::placeholder { color: var(--faint); }
-.select { justify-content: space-between; gap: 8px; }
+.select { border-radius: 999px; justify-content: space-between; gap: 8px; }
 .select .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .select .chev { color: var(--gray); flex-shrink: 0; font-size: 0.857rem; }
 .input.err { border-color: var(--err); }
 .field-error { font-size: 0.857rem; color: var(--err); }
 .input-row { display: flex; gap: 8px; align-items: center; }
-.input-row .input, .input-row .field { flex: 1; min-width: 0; }
+.input-row .input, .input-row .field, .input-row .select { flex: 1; min-width: 0; }
 
-/* 折叠入口：技术详情 / 来源详情 / 同时导出文件 */
-.disclosure { display: flex; align-items: center; gap: 8px; min-height: 2.286rem; color: var(--gray); font-size: 1rem; border-radius: 6px; }
+/* 折叠入口 */
+.disclosure { display: flex; align-items: center; gap: 8px; min-height: 2.286rem; color: var(--gray); font-size: 1rem; border-radius: 8px; }
 .disclosure .disc-arrow { font-size: 0.857rem; width: 14px; text-align: center; flex-shrink: 0; }
 .disclosure .disc-extra { font-size: 0.857rem; }
 
-/* 卡片与提示 */
-.card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 16px; }
-.notice { border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+/* 提示块 */
+.notice { border-radius: var(--r-card); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .notice.warn { background: var(--warn-bg); }
-.notice.neutral { background: var(--neutral-bg); }
+.notice.neutral { background: #F1EBDF; }
 .notice-title { font-weight: 600; }
 .notice.warn .notice-title { color: var(--warn); }
 .notice-body { font-size: 0.857rem; }
 .notice-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
-/* 偏好行：名称+说明在左，开关尾部对齐，行至少 44px（3.143rem） */
+/* 偏好行：名称+说明在左，开关尾部对齐，行至少 44px */
 .pref-row { display: flex; align-items: flex-start; gap: 16px; min-height: 3.143rem; padding: 6px 0; }
 .pref-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pref-name { font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pref-desc { font-size: 0.857rem; color: var(--gray); }
 .pref-row.dim .pref-name, .pref-row.dim .pref-desc { color: var(--faint); }
 .check-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; }
-.check-row .pref-main { gap: 0; }
 
-/* ================= 页面骨架 ================= */
-.main { flex: 1; min-width: 0; padding: 24px; }
+/* ================= 通用布局件 ================= */
 .page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .page-title { font-size: 1.286rem; font-weight: 600; }
-.page-note { font-size: 0.857rem; color: var(--gray); margin: -8px 0 16px; }
-.col-form { max-width: 48.571rem; }  /* 680px@1x：表单/设置 */
-.col-read { max-width: 51.429rem; }  /* 720px@1x：阅读 */
-.section { margin-top: 24px; }
 .section-label { font-size: 0.857rem; color: var(--gray); font-weight: 600; margin-bottom: 8px; }
-.divider { height: 1px; background: var(--hairline); margin: 12px 0; }
 .back-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
 .back-hint { font-size: 0.857rem; color: var(--faint); }
 .link-quiet { font-size: 0.857rem; color: var(--gray); text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.857em; }
 
-/* 合成封面：CSS 绘制的低饱和「课件/视频帧」，非占位色块；无封面数据时整块省略 */
+/* 合成封面：低饱和「课件帧」；无封面数据时整块省略 */
 .art { position: relative; overflow: hidden; }
 .art::before { content: ''; position: absolute; left: 9%; top: 15%; width: 46%; height: 11%; border-radius: 2px; background: var(--band, #B9C9E4); }
 .art::after {
@@ -248,17 +226,111 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   background: repeating-linear-gradient(to bottom, var(--lines, #C9D1DC) 0 5px, transparent 5px 12px);
 }
 .art-a { background: #EEF1F6; --band: #B9C9E4; --lines: #C9D1DC; }
-.art-b { background: #F3F0E9; --band: #DECFB2; --lines: #D9D2C3; }
+.art-b { background: #F3EEE4; --band: #D9C4A8; --lines: #DBD2C0; }
 .art-c { background: #ECF1EC; --band: #B8CDBB; --lines: #CBD5CC; }
 .art-d { background: #323947; --band: #8EA3C8; --lines: #4D5769; }
-.art-e { background: #DDDED9; --band: #ADB2B8; --lines: #C3C6C8; }
+.art-e { background: #EDE8DE; --band: #C3927F; --lines: #D3C9BC; }
 
-/* ================= 课程库 ================= */
+/* ================= 工作台：hero + 大输入盒 + 最近笔记 ================= */
+.hero { text-align: center; margin-top: 32px; margin-bottom: 24px; }
+.wordmark { font-size: 3rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+.wordmark .num { color: var(--accent); }
+.tagline { color: var(--gray); margin-top: 8px; }
+.box {
+  background: var(--surface); border-radius: var(--r-hero);
+  box-shadow: var(--sh-hero); padding: 16px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.box-mode { display: flex; justify-content: center; }
+.box-input { position: relative; min-height: 6rem; padding: 4px; display: flex; }
+.box-input .link-ic { color: var(--faint); flex-shrink: 0; padding: 4px 8px 0 4px; }
+.box-input textarea, .box-input .input-static {
+  flex: 1; min-width: 0; border: 0; outline: 0; background: transparent;
+  font-size: 1rem; color: var(--ink); resize: none; line-height: 1.6; padding: 2px 0;
+}
+.box-input .input-static.ph { color: var(--faint); }
+.platform-badges { position: absolute; top: 4px; right: 4px; display: flex; gap: 12px; }
+.pb { display: inline-flex; align-items: center; gap: 5px; font-size: 0.857rem; color: var(--gray); white-space: nowrap; }
+.pb-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.box-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.box-foot .select { width: auto; flex: 0 1 auto; max-width: 16rem; }
+.box-foot .spacer { flex: 1; }
+.box-sec { border-top: 1px solid var(--card-line); padding-top: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.reading-row { display: flex; align-items: center; gap: 8px; color: var(--gray); padding: 4px 0; }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--hairline); border-top-color: var(--gray); flex-shrink: 0; }
+.def-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.def-k { color: var(--gray); flex-shrink: 0; }
+.def-v { font-weight: 600; min-width: 0; }
+
+/* 所选视频行（盒内，无嵌套卡） */
+.video-row { display: flex; gap: 12px; align-items: flex-start; }
+.video-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.video-title { font-weight: 600; }
+.video-meta { font-size: 0.857rem; color: var(--gray); }
+.cover { width: 6.857rem; height: 3.857rem; border-radius: var(--r-sm); flex-shrink: 0; }
+
+/* 分集/字幕单选面板 */
+.ep-panel { border: 1px solid var(--card-line); border-radius: var(--r-card); background: var(--surface); overflow: hidden; }
+.ep-head { padding: 8px 12px; font-size: 0.857rem; color: var(--gray); border-bottom: 1px solid var(--card-line); }
+.ep-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; min-height: 2.286rem; }
+.ep-row + .ep-row { border-top: 1px solid var(--card-line); }
+.ep-row.selected { background: var(--accent-soft); }
+.ep-num { color: var(--gray); font-size: 0.857rem; width: 28px; flex-shrink: 0; }
+.ep-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ep-dur, .ep-tag { font-size: 0.857rem; color: var(--gray); flex-shrink: 0; white-space: nowrap; }
+.panel-note { font-size: 0.857rem; color: var(--gray); }
+
+/* 计划确认区：奶油嵌层，全盒视觉权重最高 */
+.plan {
+  background: var(--cream-inset); border: 1px solid var(--hairline);
+  border-radius: var(--r-card); padding: 16px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.plan-label { font-size: 0.857rem; color: var(--gray); font-weight: 600; }
+.plan-row { display: flex; gap: 12px; }
+.plan-k { width: 56px; flex-shrink: 0; color: var(--gray); font-size: 0.857rem; padding-top: 2px; }
+.plan-v { flex: 1; min-width: 0; }
+.plan-v .warn-text { color: var(--warn); font-weight: 600; }
+.plan-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.plan-note { font-size: 0.857rem; color: var(--gray); }
+
+/* 盒内进度卡（running/failed 共用零件） */
+.box-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.box-head .badge { margin-top: 1px; }
+.box-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 1px; }
+.box-meta { font-size: 0.857rem; color: var(--gray); }
+.work-list { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--card-line); padding-top: 12px; }
+.work-item { display: flex; flex-direction: column; gap: 6px; }
+.work-line { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.work-name { font-weight: 600; flex-shrink: 0; }
+.work-stats { font-size: 0.857rem; color: var(--gray); flex: 1; min-width: 8rem; }
+.bar { height: 6px; border-radius: 999px; background: var(--progress-bg); overflow: hidden; }
+.bar-fill { height: 100%; background: var(--progress-fill); border-radius: 999px; }
+.milestone { font-size: 0.857rem; color: var(--gray); display: flex; gap: 6px; align-items: baseline; }
+.milestone .mk { color: var(--ok); flex-shrink: 0; }
+.box-actions { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--card-line); padding-top: 12px; }
+.err-text { color: var(--err); font-weight: 600; }
+
+/* 最近笔记 */
+.recent-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin: 32px 0 12px; }
+.recent-title { font-size: 1.286rem; font-weight: 600; }
+.recent-list { display: flex; flex-direction: column; gap: 8px; }
+.rec-row {
+  background: var(--surface); border: 1px solid var(--card-line);
+  border-radius: var(--r-card); padding: 12px;
+  display: flex; align-items: center; gap: 12px; min-width: 0;
+}
+.rec-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rec-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rec-meta { font-size: 0.857rem; color: var(--gray); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rec-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+/* ================= 我的笔记 ================= */
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
 .search {
   flex: 1; min-width: 10rem; display: flex; align-items: center; gap: 8px;
   background: var(--surface); border: 1px solid var(--control-border);
-  border-radius: 6px; padding: 0 12px; min-height: 2.286rem;
+  border-radius: 999px; padding: 0 12px; min-height: 2.286rem;
 }
 .search-icon { color: var(--gray); font-size: 13px; flex-shrink: 0; }
 .search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 1rem; color: var(--ink); }
@@ -271,101 +343,20 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .fg-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fg-count { font-size: 0.857rem; color: var(--gray); flex-shrink: 0; }
 .note-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
-.note-row {
-  display: flex; align-items: center; gap: 12px; flex-wrap: nowrap;
-  background: var(--surface); border: 1px solid var(--hairline);
-  border-radius: 6px; padding: 12px; min-width: 0;
-}
-.cover { width: 6.857rem; height: 3.857rem; border-radius: 4px; flex-shrink: 0; }
-.note-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .note-title { font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .note-meta { font-size: 0.857rem; color: var(--gray); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .note-grid { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 8px; }
 .note-card {
   flex: 1 1 13rem; min-width: 13rem; max-width: 20rem;
-  background: var(--surface); border: 1px solid var(--hairline);
-  border-radius: 6px; overflow: hidden; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--card-line);
+  border-radius: var(--r-card); overflow: hidden; display: flex; flex-direction: column;
 }
 .card-cover { aspect-ratio: 16 / 9; }
 .card-body { padding: 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .card-foot { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
 .card-foot .chip { flex: 1; min-width: 0; max-width: none; }
-.empty-block { margin-top: 32px; display: flex; flex-direction: column; gap: 16px; align-items: flex-start; }
 
-/* ================= 生成笔记 ================= */
-.video-card { display: flex; gap: 12px; align-items: flex-start; background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 12px; }
-.video-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.video-title { font-weight: 600; }
-.video-meta { font-size: 0.857rem; color: var(--gray); }
-.video-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
-.reading-row { display: flex; align-items: center; gap: 8px; color: var(--gray); padding: 8px 0; }
-.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--hairline); border-top-color: var(--gray); flex-shrink: 0; }
-.def-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.def-k { font-size: 1rem; color: var(--gray); flex-shrink: 0; }
-.def-v { font-weight: 600; min-width: 0; }
-.ep-panel { border: 1px solid var(--hairline); border-radius: 6px; background: var(--surface); overflow: hidden; margin-top: 8px; }
-.ep-head { padding: 8px 12px; font-size: 0.857rem; color: var(--gray); border-bottom: 1px solid var(--hairline); }
-.ep-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; min-height: 2.286rem; }
-.ep-row + .ep-row { border-top: 1px solid var(--hairline); }
-.ep-row.selected { background: var(--accent-soft); }
-.ep-num { color: var(--gray); font-size: 0.857rem; width: 28px; flex-shrink: 0; }
-.ep-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ep-dur, .ep-tag { font-size: 0.857rem; color: var(--gray); flex-shrink: 0; white-space: nowrap; }
-.panel-note { font-size: 0.857rem; color: var(--gray); margin-top: 8px; }
-
-/* 底部计划卡：全页视觉权重最高的确认区 */
-.plan-card {
-  background: var(--surface); border: 1px solid var(--control-border);
-  border-radius: 6px; padding: 16px; margin-top: 32px;
-  box-shadow: 0 1px 2px rgba(16,24,40,.06);
-  display: flex; flex-direction: column; gap: 12px;
-}
-.plan-label { font-size: 0.857rem; color: var(--gray); font-weight: 600; }
-.plan-rows { display: flex; flex-direction: column; gap: 8px; }
-.plan-row { display: flex; gap: 12px; }
-.plan-k { width: 56px; flex-shrink: 0; color: var(--gray); font-size: 0.857rem; padding-top: 2px; }
-.plan-v { flex: 1; min-width: 0; }
-.plan-v .warn-text { color: var(--warn); font-weight: 600; }
-.plan-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
-.plan-note { font-size: 0.857rem; color: var(--gray); }
-
-/* 就地配置面板：覆盖层 + 面板对齐页面左边线（不单独居中） */
-.modal-backdrop { position: fixed; inset: 0; background: rgba(28,32,38,.22); display: block; }
-.modal {
-  margin-left: calc(14.286rem + 24px); margin-top: 72px;
-  width: 40rem; max-width: calc(100vw - 14.286rem - 48px);
-  background: var(--surface); border-radius: 6px;
-  box-shadow: 0 12px 32px rgba(16,24,40,.18);
-  padding: 16px; display: flex; flex-direction: column; gap: 12px;
-}
-.modal-title { font-size: 1rem; font-weight: 600; }
-.modal-note { font-size: 0.857rem; color: var(--gray); }
-.form-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
-
-/* ================= 任务 ================= */
-.task-group-label { font-size: 0.857rem; color: var(--gray); font-weight: 600; margin: 24px 0 8px; }
-.task-group-label:first-child { margin-top: 0; }
-.task-card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-.task-card + .task-card { margin-top: 8px; }
-.task-card.dim { background: transparent; }
-.task-card.dim .task-title { color: var(--gray); }
-.task-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
-.task-head .badge { margin-top: 1px; }
-.task-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 1px; }
-.task-meta { font-size: 0.857rem; color: var(--gray); }
-.work-list { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--hairline); padding-top: 12px; }
-.work-item { display: flex; flex-direction: column; gap: 6px; }
-.work-line { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
-.work-name { font-weight: 600; flex-shrink: 0; }
-.work-stats { font-size: 0.857rem; color: var(--gray); flex: 1; min-width: 8rem; }
-.bar { height: 6px; border-radius: 3px; background: var(--neutral-bg); overflow: hidden; }
-.bar-fill { height: 100%; background: var(--progress-fill); border-radius: 3px; }
-.milestone { font-size: 0.857rem; color: var(--gray); display: flex; gap: 6px; align-items: baseline; }
-.milestone .mk { color: var(--ok); flex-shrink: 0; }
-.task-actions { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--hairline); padding-top: 12px; }
-.err-text { color: var(--err); font-weight: 600; }
-
-/* ================= 阅读 ================= */
+/* ================= 阅读页 ================= */
 .reader-head { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
 .reader-title { font-size: 1.286rem; font-weight: 600; line-height: 1.35; }
 .reader-meta { font-size: 0.857rem; color: var(--gray); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -373,94 +364,83 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .reader-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .reader-toolbar .spacer { flex: 1; }
 .reader-layout { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
-.article { flex: 1 1 24rem; min-width: 0; max-width: 51.429rem; font-size: 1.143rem; line-height: 1.75; }
+.article { flex: 1 1 24rem; min-width: 0; font-size: 1.143rem; line-height: 1.75; }
 .article p { margin-bottom: 16px; }
 .chapter { display: flex; align-items: baseline; gap: 8px; font-size: 1.143rem; font-weight: 600; line-height: 1.5; margin: 24px 0 12px; }
 .ts-chip {
   display: inline-flex; align-items: center; min-height: 1.571rem; padding: 0 6px;
-  border-radius: 4px; border: 1px solid var(--hairline); background: var(--surface);
+  border-radius: var(--r-sm); border: 1px solid var(--hairline); background: var(--surface);
   font-size: 0.857rem; font-weight: 400; color: var(--gray); flex-shrink: 0; white-space: nowrap;
 }
-.summary { background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 16px; font-size: 1rem; line-height: 1.6; margin-bottom: 8px; }
+.summary { background: var(--surface); border: 1px solid var(--card-line); border-radius: var(--r-card); padding: 16px; font-size: 1rem; line-height: 1.6; margin-bottom: 8px; }
 .summary-label { font-size: 0.857rem; color: var(--gray); font-weight: 600; margin-bottom: 8px; }
-.figure { border: 1px solid var(--hairline); border-radius: 6px; overflow: hidden; margin: 0 0 16px; background: var(--surface); }
+.figure { border: 1px solid var(--card-line); border-radius: var(--r-card); overflow: hidden; margin: 0 0 16px; background: var(--surface); }
 .fig-img { aspect-ratio: 16 / 9; }
-.fig-cap { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--hairline); font-size: 0.857rem; color: var(--gray); flex-wrap: wrap; }
+.fig-cap { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--card-line); font-size: 0.857rem; color: var(--gray); flex-wrap: wrap; }
 .fig-cap .spacer { flex: 1; }
 mark { background: var(--mark); padding: 0 1px; border-radius: 2px; }
 mark.cur { background: var(--mark-cur); box-shadow: 0 0 0 1px var(--mark-cur-line); }
-.toc-panel { flex: 0 1 16rem; min-width: 12rem; background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 12px; position: sticky; top: 24px; }
+.toc-panel { flex: 0 1 16rem; min-width: 12rem; background: var(--surface); border: 1px solid var(--card-line); border-radius: var(--r-card); padding: 12px; position: sticky; top: 24px; }
 .toc-title { font-size: 0.857rem; color: var(--gray); font-weight: 600; margin-bottom: 8px; }
-.toc-item { display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 1rem; }
+.toc-item { display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; border-radius: 8px; font-size: 1rem; }
 .toc-item .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toc-item .ts { font-size: 0.857rem; color: var(--gray); flex-shrink: 0; }
-.toc-item.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.toc-item.on .ts { color: var(--accent); }
-.find-bar { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--control-border); border-radius: 6px; padding: 6px 12px; margin-bottom: 16px; min-height: 2.571rem; }
+.toc-item.on { background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+.toc-item.on .ts { color: var(--accent-strong); }
+.find-bar { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--control-border); border-radius: 999px; padding: 6px 12px; margin-bottom: 16px; min-height: 2.571rem; }
 .find-input { flex: 1; min-width: 6rem; border: 0; outline: 0; font-size: 1rem; background: transparent; color: var(--ink); }
 .find-count { font-size: 0.857rem; color: var(--gray); white-space: nowrap; }
-.shot-grid { display: flex; flex-wrap: wrap; gap: 16px; max-width: 51.429rem; }
+.shot-grid { display: flex; flex-wrap: wrap; gap: 16px; }
 .shot { flex: 1 1 12rem; min-width: 12rem; max-width: 17rem; display: flex; flex-direction: column; gap: 6px; }
 .shot .figure { margin: 0; }
 .shot-cap { font-size: 0.857rem; color: var(--gray); display: flex; justify-content: space-between; align-items: center; }
 
 /* ================= 设置 ================= */
-.tabbar { display: inline-flex; background: var(--surface); border: 1px solid var(--control-border); border-radius: 6px; overflow: hidden; margin-bottom: 24px; max-width: 100%; }
-.tab { min-height: 2.571rem; padding: 2px 16px; display: inline-flex; align-items: center; white-space: nowrap; }
-.tab + .tab { border-left: 1px solid var(--control-border); }
-.tab.on { background: var(--accent); color: #fff; font-weight: 600; }
-.scope-note { background: var(--neutral-bg); border-radius: 6px; padding: 12px; font-size: 0.857rem; color: var(--gray); margin-bottom: 24px; }
+.scope-note { background: #F1EBDF; border-radius: var(--r-card); padding: 12px; font-size: 0.857rem; color: var(--gray); margin-bottom: 24px; }
 .set-group { margin-bottom: 24px; }
 .set-group .section-label { display: flex; align-items: baseline; gap: 8px; }
 .saved-hint { font-size: 0.857rem; color: var(--ok); font-weight: 400; }
-.svc-card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.svc-card { background: var(--surface); border: 1px solid var(--card-line); border-radius: var(--r-card); padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .svc-card + .svc-card, .svc-card + .btn, .btn + .svc-card { margin-top: 8px; }
 .svc-card.editing { border-color: var(--control-border); }
 .svc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .svc-name { font-weight: 600; }
 .svc-sub { font-size: 0.857rem; color: var(--gray); }
 .svc-actions { margin-left: auto; display: flex; gap: 4px; flex-wrap: wrap; }
-.banner { background: var(--neutral-bg); border-radius: 6px; padding: 8px 12px; font-size: 0.857rem; }
+.banner { background: #F1EBDF; border-radius: var(--r-card); padding: 8px 12px; font-size: 0.857rem; }
 .diag-line { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; }
 .diag-ic { width: 16px; flex-shrink: 0; text-align: center; }
 .diag-ok { color: var(--ok); }
 .diag-opt { color: var(--gray); }
-.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.857em; }
+.set-tabs { margin-bottom: 24px; }
+
+/* 就地配置面板：覆盖层 + 居中面板 */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(34,29,24,.24); display: block; }
+.modal {
+  margin: 72px auto 0; width: 40rem; max-width: calc(100vw - 48px);
+  background: var(--surface); border-radius: var(--r-hero);
+  box-shadow: var(--sh-pop); padding: 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.modal-title { font-size: 1rem; font-weight: 600; }
+.modal-note { font-size: 0.857rem; color: var(--gray); }
+.form-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
 </style>
 </head>
 <body>
-<div class="titlebar">
-  <div class="tl-dots">
-    <div class="tl-dot" style="background:#FF5F57"></div>
-    <div class="tl-dot" style="background:#FEBC2E"></div>
-    <div class="tl-dot" style="background:#29C33F"></div>
-  </div>
-  <div class="tl-title">course2md</div>
-</div>
-<div class="app">
-  <aside class="sidebar">
-    <nav class="main-nav">
-      <div class="nav-item" data-nav="library"><span class="nav-icon">📖</span><span class="nav-label">课程库</span></div>
-      <div class="nav-item" data-nav="generate"><span class="nav-icon">＋</span><span class="nav-label">生成笔记</span></div>
-      <div class="nav-item" data-nav="tasks"><span class="nav-icon">▤</span><span class="nav-label">任务</span><span class="nav-badge" id="taskBadge" style="display:none">1</span></div>
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="logo">course<span class="num">2</span>md</div>
+    <nav class="nav-tabs">
+      <button class="nav-tab" data-nav="home">工作台</button>
+      <button class="nav-tab" data-nav="notes">我的笔记</button>
     </nav>
-    <div class="group-header">
-      <span class="group-title">课程库</span>
-      <button class="icon-btn" title="新建文件夹" style="width:1.6rem;min-width:1.6rem;height:1.6rem;min-height:1.6rem">＋</button>
-    </div>
-    <div class="folder-list">
-      <div class="folder-item"><span class="folder-icon">📁</span><span class="folder-name">未分类</span><span class="folder-count">2</span></div>
-      <div class="folder-item"><span class="folder-icon">📁</span><span class="folder-name">2026 年秋季学期金融风险管理与衍生品定价专题课程</span><span class="folder-count">4</span></div>
-      <div class="folder-item"><span class="folder-icon">📁</span><span class="folder-name">机器学习公开课</span><span class="folder-count">2</span></div>
-    </div>
-    <div class="sidebar-bottom">
-      <div class="nav-item" data-nav="settings"><span class="nav-icon">⚙</span><span class="nav-label">设置</span></div>
-    </div>
-  </aside>
-  <main class="main" id="main"></main>
+    <button class="gear-btn" data-nav="settings" title="设置">⚙</button>
+  </div>
 </div>
+<main class="content" id="main"></main>
 <script>
-/* ================= 数据（真实感 fixture + 补充） ================= */
+/* ================= 数据（沿用 v1 体系） ================= */
 var FOLDER_LONG = '2026 年秋季学期金融风险管理与衍生品定价专题课程';
 var FOLDER_ML = '机器学习公开课';
 var NOTES = [
@@ -526,29 +506,313 @@ function selectEl(val) {
   return '<button class="select"><span class="val">' + val + '</span><span class="chev">▾</span></button>';
 }
 function coverCls(art, cls) { return '<div class="cover art ' + art + (cls ? ' ' + cls : '') + '"></div>'; }
+var BADGE_RUNNING = '<span class="badge progress">进行中</span>';
+var BADGE_WARN = '<span class="badge warn">需要处理</span>';
+var BADGE_DONE = '<span class="badge ok">已完成</span>';
 
-/* ================= 课程库 ================= */
-function libToolbar(state) {
+/* ================= 工作台 ================= */
+function hero() {
+  return '<div class="hero"><div class="wordmark">course<span class="num">2</span>md</div>'
+    + '<div class="tagline">课程视频，整理成笔记。</div></div>';
+}
+function boxTop(state) {
+  var filled = state !== 'empty' && state !== 'recent-empty';
+  return '<div class="box-mode"><div class="seg">'
+    + '<button class="seg-btn selected">视频链接</button><button class="seg-btn">本地文件</button></div></div>'
+    + '<div class="box-input"><span class="link-ic">🔗</span>'
+    + (filled
+      ? '<div class="input-static">' + VIDEO_URL + '</div>'
+      : '<div class="input-static ph">粘贴 YouTube 或 Bilibili 视频链接…</div>')
+    + '<div class="platform-badges">'
+    + '<span class="pb"><span class="pb-dot" style="background:#E23D28"></span>YouTube</span>'
+    + '<span class="pb"><span class="pb-dot" style="background:#F0699A"></span>Bilibili</span>'
+    + '</div></div>'
+    + (state === 'reading'
+      ? '<div class="reading-row"><span class="spin"></span><span>正在读取视频信息…</span>'
+        + '<button class="btn btn-quiet compact">取消读取</button></div>' : '');
+}
+function boxFoot(primaryLabel) {
+  return '<div class="box-foot">'
+    + '<button class="select compact" style="min-height:2.286rem;max-width:16rem"><span class="val">首选字幕语言：简体中文</span><span class="chev">▾</span></button>'
+    + '<span class="spacer"></span>'
+    + (primaryLabel ? '<button class="btn btn-primary">' + primaryLabel + ' <span class="arrow">→</span></button>' : '')
+    + '</div>';
+}
+function videoSec(opts) {
+  return '<div class="box-sec"><div class="section-label">所选视频</div>'
+    + '<div class="video-row">' + coverCls(opts.art || 'art-a')
+    + '<div class="video-body"><div class="video-title">' + opts.title + '</div>'
+    + '<div class="video-meta">' + opts.meta + '</div>'
+    + '<div>' + (opts.scope ? '<span class="badge neutral">' + opts.scope + '</span>' : '') + '</div>'
+    + '</div></div>' + (opts.after || '') + '</div>';
+}
+function subtitlePanel() {
+  var rows = [
+    { name: '简体中文', tag: '人工字幕', on: true },
+    { name: '中文', tag: '自动字幕' },
+    { name: 'English', tag: '自动字幕' },
+    { name: '识别视频声音', tag: '无字幕可用时，在这台电脑上识别' }
+  ];
+  return '<div class="ep-panel"><div class="ep-head">更换文字来源 — 选择本次使用的文字</div>'
+    + rows.map(function (r) {
+      return '<div class="ep-row' + (r.on ? ' selected' : '') + '"><span class="radio' + (r.on ? ' on' : '') + '"></span>'
+        + '<span class="ep-title">' + r.name + '</span><span class="ep-tag">' + r.tag + '</span></div>';
+    }).join('')
+    + '</div><div class="panel-note">更换后会先读取新正文，确认前保持当前选择。</div>';
+}
+function contentSec(state) {
+  var h = '<div class="box-sec"><div class="section-label">笔记内容</div>';
+  if (state === 'subtitle-failed') {
+    return h + '<div class="notice warn"><div class="notice-title">字幕未读取成功，尚不能确认是否可用。</div>'
+      + '<div class="notice-body">读取字幕时网络请求超时；这并不代表视频本身没有字幕。</div>'
+      + '<div class="notice-actions"><button class="btn btn-outline compact">重新读取字幕</button>'
+      + '<button class="btn btn-quiet compact">改用语音识别</button></div></div>'
+      + prefRow('AI 校对', '修正识别错误和标点，保留原意。', false)
+      + prefRow('生成摘要', '提炼课程要点，正文继续保留。', false)
+      + '</div>';
+  }
+  h += '<div class="def-row"><span class="def-k">文字来源</span>'
+    + '<span class="def-v">简体中文 · 人工字幕</span>'
+    + '<button class="btn btn-quiet compact">更换</button></div>'
+    + (state === 'loaded' ? subtitlePanel() : '')
+    + prefRow('AI 校对', '修正识别错误和标点，保留原意。', state !== 'collection', {
+        tag: (state === 'loaded' || state === 'no-service' || state === 'plan') ? '<span class="badge neutral">仅用于这次笔记</span>' : '',
+        extra: state === 'no-service'
+          ? '<div class="notice warn" style="margin-top:8px"><div class="notice-title">AI 服务尚未设置。</div>'
+            + '<div class="notice-body">开启 AI 校对需要把文字发送到一个 AI 服务。</div>'
+            + '<div class="notice-actions"><button class="btn btn-outline compact">设置 AI 服务</button></div></div>'
+          : (state !== 'collection'
+            ? '<div class="pref-desc" style="margin-top:4px">校对文字将发送到「ux-fixture」（127.0.0.1）。<button class="link-quiet" style="margin-left:4px">恢复默认</button></div>'
+            : '')
+      })
+    + prefRow('发送截图辅助校对', state !== 'collection' ? '文字及对应截图会发送到「ux-fixture」。' : '开启 AI 校对后可用；开启后文字及对应截图会发送到所选服务。', false, { dim: state === 'collection' })
+    + prefRow('生成摘要', '提炼课程要点，正文继续保留。', state === 'plan');
+  return h + '</div>';
+}
+function nameSaveSec() {
+  return '<div class="box-sec"><div class="section-label">名称与保存</div>'
+    + field('笔记名称', inputEl('金融市场与衍生品定价 第 3 讲：期权定价模型与风险管理实务'))
+    + '<div class="field"><div class="field-label">保存到</div>'
+    + '<div class="input-row"><span style="flex-shrink:0;color:var(--gray)">默认课程库 ·</span>'
+    + selectEl(FOLDER_LONG) + '</div>'
+    + '<div class="field-desc">存储位置 · ~/Documents/course2md</div></div></div>';
+}
+function productsSec(state) {
+  return '<div class="box-sec"><div class="section-label">可选产物</div>'
+    + (state === 'plan'
+      ? '<div class="check-row"><span class="check on">✓</span><div class="pref-main"><div class="pref-name" style="font-weight:400">网页文件</div><div class="pref-desc">在浏览器中阅读和分享，内嵌本版图片。</div></div></div>'
+      : disc('同时导出文件', '· 未选择'))
+    + prefRow('保留视频供离线播放', '生成后保留下载的视频，会占用额外空间。', false)
+    + '</div>';
+}
+function planArea(rows, actions, note) {
+  return '<div class="plan"><div class="plan-label">本次计划</div>'
+    + rows.map(function (r) {
+      return '<div class="plan-row"><div class="plan-k">' + r[0] + '</div><div class="plan-v">' + r[1] + '</div></div>';
+    }).join('')
+    + '<div class="plan-actions">' + actions + '</div>'
+    + (note ? '<div class="plan-note">' + note + '</div>' : '') + '</div>';
+}
+function runningBox() {
+  return boxTop('filled')
+    + '<div class="box-sec"><div class="box-head">' + BADGE_RUNNING
+    + '<div class="box-title">' + VIDEO_TITLE + '</div></div>'
+    + '<div class="box-meta">2026-09-07 14:32 开始 · 校对将发送到「ux-fixture」（127.0.0.1）</div>'
+    + '<div class="work-list">'
+    + '<div class="work-item"><div class="work-line"><span class="work-name">正在下载视频</span>'
+    + '<span class="work-stats">fixture_ep3.mp4 · 182.4 MB / 305.1 MB · 8.2 MB/s · 约 15 秒</span></div>'
+    + '<div class="bar"><div class="bar-fill" style="width:60%"></div></div></div>'
+    + '<div class="work-item"><div class="work-line"><span class="work-name">正在识别视频声音</span>'
+    + '<span class="work-stats">已完成片段 41 / 96 · 估算剩余约 2 分钟</span></div>'
+    + '<div class="bar"><div class="bar-fill" style="width:43%"></div></div></div>'
+    + '<div class="work-item"><div class="work-line"><span class="work-name">正在提取截图</span>'
+    + '<span class="work-stats">已保存 12 张 · 与识别并行进行</span></div></div>'
+    + '<div class="milestone"><span class="mk">✓</span><span>已读取字幕：简体中文 · 人工字幕</span></div>'
+    + '</div>'
+    + '<div class="box-actions"><button class="btn btn-outline compact">暂停生成</button>'
+    + '<button class="btn btn-quiet compact">取消任务</button></div>'
+    + '<div class="box-meta">关闭窗口后任务会继续；退出应用会暂停任务。</div></div>';
+}
+function failedBox() {
+  return boxTop('filled')
+    + '<div class="box-sec"><div class="box-head">' + BADGE_WARN
+    + '<div class="box-title">财务报表分析 第 2 讲：现金流量表与盈利质量识别</div></div>'
+    + '<div><span class="err-text">服务拒绝了 API Key，已保留识别进度。</span></div>'
+    + '<div class="box-meta">语音识别使用「ux-fixture」（127.0.0.1）· 2026-09-07 14:02 停止 · 已保存 41 / 96 个识别片段</div>'
+    + '<div class="box-actions"><button class="btn btn-primary">更新凭据</button>'
+    + '<button class="btn btn-outline">调整后生成</button>'
+    + '<button class="btn btn-quiet">取消任务</button></div>'
+    + disc('技术详情', '· 阶段：语音识别 · HTTP 401 · 请求 ID req_9f2c71 · 2026-09-07 14:02:11')
+    + '</div>';
+}
+function recRow(opts) {
+  return '<div class="rec-row">'
+    + (opts.art ? coverCls(opts.art) : '')
+    + '<div class="rec-body"><div class="rec-title">' + opts.title + '</div>'
+    + '<div class="rec-meta">' + opts.meta + '</div></div>'
+    + '<div class="rec-actions">' + (opts.badge || '') + opts.action + '</div></div>';
+}
+function recentSection(withFailed) {
+  var rows = '';
+  if (withFailed) {
+    rows += recRow({
+      art: 'art-b', title: '财务报表分析 第 2 讲：现金流量表与盈利质量识别',
+      meta: '语音识别 · ux-fixture · 已保存 41 / 96 个识别片段',
+      badge: BADGE_WARN, action: '<button class="btn btn-outline compact">继续处理</button>'
+    });
+  }
+  rows += recRow({
+    art: 'art-a', title: VIDEO_TITLE,
+    meta: 'Bilibili · 5 张截图 · 42:18 · 2026-09-07',
+    badge: BADGE_DONE, action: '<button class="btn btn-quiet compact">阅读笔记</button>'
+  });
+  rows += recRow({
+    art: 'art-c', title: '机器学习导论 第 5 讲：梯度下降与损失函数的可视化直觉',
+    meta: 'Bilibili · 8 张截图 · 49:31 · 2026-09-06',
+    badge: BADGE_DONE, action: '<button class="btn btn-quiet compact">阅读笔记</button>'
+  });
+  rows += recRow({
+    art: null, title: '我的手工笔记名',
+    meta: 'Bilibili · 1 张截图 · 00:18 · 2026-09-07',
+    badge: BADGE_DONE, action: '<button class="btn btn-quiet compact">阅读笔记</button>'
+  });
+  return '<div class="recent-head"><div class="recent-title">最近笔记</div>'
+    + '<button class="btn btn-quiet compact">查看全部 <span class="arrow">→</span></button></div>'
+    + '<div class="recent-list">' + rows + '</div>';
+}
+function renderHome(state) {
+  if (state === 'recent-empty') {
+    return hero() + '<div class="box">' + boxTop('recent-empty') + boxFoot('读取视频') + '</div>';
+  }
+  var box;
+  if (state === 'running') box = runningBox();
+  else if (state === 'failed') box = failedBox();
+  else if (state === 'collection') {
+    box = boxTop(state)
+      + videoSec({
+          title: '金融风险管理系列公开课：从风险度量到衍生品定价',
+          meta: 'Bilibili · 合成测试讲师 · 合集共 8 个视频',
+          after: '<div class="ep-panel"><div class="ep-head">选择本次要处理的单集</div>'
+            + EPISODES.map(function (e) {
+              return '<div class="ep-row' + (e.on ? ' selected' : '') + '"><span class="radio' + (e.on ? ' on' : '') + '"></span>'
+                + '<span class="ep-num">' + e.n + '</span><span class="ep-title">' + e.t + '</span>'
+                + '<span class="ep-dur">' + e.d + '</span></div>';
+            }).join('')
+            + '</div><div class="panel-note" style="font-weight:600;color:var(--ink)">本次处理 1 个视频：P3 · 期权定价模型与风险管理实务</div>'
+        })
+      + contentSec('collection')
+      + nameSaveSec()
+      + productsSec('collection')
+      + planArea([
+          ['视频', '下载 P3「期权定价模型与风险管理实务」并提取画面 · 本次处理 1 个视频'],
+          ['文字', '使用简体中文字幕（人工字幕）'],
+          ['保存', '默认课程库 · ' + FOLDER_LONG]
+        ], '<button class="btn btn-primary">生成笔记 <span class="arrow">→</span></button>');
+  } else if (state === 'duplicate') {
+    box = boxTop(state)
+      + videoSec({
+          title: VIDEO_TITLE, meta: 'Bilibili · 合成测试讲师 · 42:18', scope: '本次处理 1 个视频',
+          after: '<div class="notice neutral" style="margin-top:8px"><div class="notice-title">这个视频已经有笔记。</div>'
+            + '<div class="notice-body">版本 2 · 2026-09-07 生成 · 保存在 默认课程库 · ' + FOLDER_LONG + '</div></div>'
+        })
+      + contentSec('collection')
+      + nameSaveSec()
+      + productsSec('duplicate')
+      + planArea([
+          ['已有笔记', '版本 2 · 2026-09-07 生成 · 默认课程库 · ' + FOLDER_LONG],
+          ['新生成', '文字：简体中文 · 人工字幕 · 不使用 AI 服务 · 保存到同一文件夹']
+        ],
+        '<button class="btn btn-primary">打开已有笔记</button>'
+          + '<button class="btn btn-outline">生成新版笔记</button>',
+        '生成新版会保留旧版本，完成后两个版本都可阅读。');
+  } else if (state === 'subtitle-failed') {
+    box = boxTop(state)
+      + videoSec({ title: VIDEO_TITLE, meta: 'Bilibili · 合成测试讲师 · 42:18', scope: '本次处理 1 个视频' })
+      + contentSec('subtitle-failed')
+      + nameSaveSec()
+      + productsSec('subtitle-failed')
+      + planArea([
+          ['视频', '下载所选视频并提取画面 · 本次处理 1 个视频'],
+          ['文字', '<span class="warn-text">尚未确定：重新读取字幕，或改用语音识别</span>'],
+          ['保存', '默认课程库 · ' + FOLDER_LONG]
+        ], '<button class="btn btn-primary">生成笔记 <span class="arrow">→</span></button>');
+  } else if (state === 'loaded' || state === 'plan' || state === 'no-service') {
+    box = boxTop(state)
+      + videoSec({
+          title: VIDEO_TITLE, meta: 'Bilibili · 合成测试讲师 · 42:18', scope: '本次处理 1 个视频',
+          after: disc('来源详情', '· Bilibili：已登录 · 合成测试讲师')
+        })
+      + contentSec(state)
+      + nameSaveSec()
+      + productsSec(state);
+    if (state === 'plan') {
+      box += planArea([
+          ['视频', '下载所选视频并提取画面 · 本次处理 1 个视频'],
+          ['文字', '使用简体中文字幕（人工字幕）'],
+          ['AI', '校对文字将发送到「ux-fixture」（127.0.0.1）· 同时生成摘要'],
+          ['导出', '同时导出网页文件到该笔记版本的导出目录'],
+          ['保存', '默认课程库 · ' + FOLDER_LONG]
+        ], '<button class="btn btn-primary">加入队列</button>',
+        '已有任务正在生成，本任务将排入队列；不预测等待时长。');
+    } else {
+      box += planArea([
+          ['视频', '下载所选视频并提取画面 · 本次处理 1 个视频'],
+          ['文字', '使用简体中文字幕（人工字幕）'],
+          ['AI', state === 'no-service' ? '<span class="warn-text">AI 校对已开启，但尚未设置 AI 服务</span>' : '校对文字将发送到「ux-fixture」（127.0.0.1）'],
+          ['保存', '默认课程库 · ' + FOLDER_LONG]
+        ], '<button class="btn btn-primary">生成笔记 <span class="arrow">→</span></button>');
+    }
+  } else {
+    /* empty / filled / reading：读取前下一步是「读取视频」，读取中不保留生成动作 */
+    box = boxTop(state) + boxFoot(state === 'reading' ? null : '读取视频');
+  }
+  var h = hero() + '<div class="box">' + box + '</div>';
+  /* 盒内承载运行/失败任务时，最近区不再重复该任务 */
+  var activeInBox = state === 'running' || state === 'failed';
+  h += recentSection(!activeInBox);
+  if (state === 'no-service') {
+    h += '<div class="modal-backdrop"><div class="modal">'
+      + '<div class="modal-title">为这次笔记设置 AI 服务</div>'
+      + '<div class="modal-note">保存后用于本次笔记；不改变默认服务。</div>'
+      + field('服务名称', inputEl('本地 AI 服务'))
+      + field('接口类型', selectEl('聊天补全（/chat/completions）'))
+      + field('服务地址', inputEl('http://127.0.0.1:8788'),
+          '将请求 <span class="mono">http://127.0.0.1:8788/v1/chat/completions</span>')
+      + field('模型 ID', inputEl('fixture-llm-01'))
+      + field('认证方式',
+          '<div class="seg"><button class="seg-btn">API Key</button><button class="seg-btn selected">无需认证</button></div>')
+      + '<div class="check-row"><span class="check">✓</span><div class="pref-main"><div class="pref-name" style="font-weight:400">同时设为默认服务</div></div></div>'
+      + '<div class="modal-note">测试会发送应用内置的测试内容，不包含你的课程；服务可能按其规则计费。</div>'
+      + '<div class="form-actions"><button class="btn btn-quiet">取消</button>'
+      + '<button class="btn btn-outline">测试服务</button>'
+      + '<button class="btn btn-primary">保存服务</button></div>'
+      + '</div></div>';
+  }
+  return h;
+}
+
+/* ================= 我的笔记 ================= */
+function notesToolbar(state) {
   var searching = state === 'search';
   return '<div class="toolbar">'
     + '<div class="search"><span class="search-icon">⌕</span>'
-    + '<input placeholder="搜索课程标题" value="' + (searching ? '衍生品' : '') + '" readonly>'
+    + '<input placeholder="搜索笔记标题" value="' + (searching ? '衍生品' : '') + '" readonly>'
     + (searching ? '<button class="search-clear" title="清空搜索">✕</button>' : '')
     + '</div>'
-    + '<button class="toggle-btn' + (state === 'grouped' || searching ? ' on' : '') + '"><span class="tick">✓</span>按文件夹</button>'
-    + '<div class="seg compact">'
+    + '<button class="toggle-btn' + (state !== 'cards' ? ' on' : '') + '"><span class="tick">✓</span>按文件夹</button>'
+    + '<div class="seg">'
     + '<button class="seg-btn' + (state !== 'cards' ? ' selected' : '') + '">列表</button>'
     + '<button class="seg-btn' + (state === 'cards' ? ' selected' : '') + '">卡片</button>'
     + '</div>'
-    + '<button class="icon-btn" title="刷新" style="width:2.286rem;min-height:2.286rem;height:2.286rem">⟳</button>'
+    + '<button class="icon-btn" title="刷新">⟳</button>'
     + '</div>';
 }
 function noteRow(n) {
-  return '<div class="note-row">'
+  return '<div class="rec-row">'
     + (n.art ? coverCls(n.art) : '')
-    + '<div class="note-body"><div class="note-title">' + n.title + '</div>'
+    + '<div class="rec-body"><div class="note-title" style="white-space:normal">' + n.title + '</div>'
     + '<div class="note-meta">' + n.meta + '</div></div>'
-    + '<button class="icon-btn row-actions" title="更多操作">⋯</button></div>';
+    + '<button class="icon-btn" title="更多操作">⋯</button></div>';
 }
 function groupBlock(folder, notes) {
   return '<div class="group-block"><button class="folder-group"><span class="fg-caret">▾</span>'
@@ -564,20 +828,13 @@ function noteCard(n) {
     + '<div class="card-foot">' + chip(n.folder) + '<button class="icon-btn" title="更多操作">⋯</button></div>'
     + '</div></div>';
 }
-function renderLibrary(state) {
-  if (state === 'empty') {
-    return '<div class="page-header"><div class="page-title">课程库</div></div>'
-      + '<div class="empty-block"><div>把视频变成可阅读的课程笔记。</div>'
-      + '<button class="btn btn-primary">＋ 生成第一篇笔记</button></div>';
-  }
-  var h = '<div class="page-header"><div class="page-title">课程库</div>'
-    + '<button class="btn btn-primary">＋ 生成笔记</button></div>' + libToolbar(state);
+function renderNotes(state) {
+  var h = '<div class="page-header"><div class="page-title">我的笔记</div></div>' + notesToolbar(state);
   if (state === 'search') {
     var hits = NOTES.filter(function (n) { return n.title.indexOf('衍生品') >= 0; });
-    h += '<div class="search-scope"><span>在全部课程中搜索「衍生品」，找到 ' + hits.length + ' 篇笔记。</span>'
+    return h + '<div class="search-scope"><span>在全部笔记中搜索「衍生品」，找到 ' + hits.length + ' 篇笔记。</span>'
       + '<button class="link-quiet">清空搜索</button></div>'
       + groupBlock(FOLDER_LONG, hits);
-    return h;
   }
   if (state === 'cards') {
     return h + '<div class="note-grid">' + NOTES.map(noteCard).join('') + '</div>';
@@ -588,304 +845,11 @@ function renderLibrary(state) {
   }).join('');
 }
 
-/* ================= 生成笔记 ================= */
-function genSource(state, opts) {
-  opts = opts || {};
-  var h = '<div class="section" style="margin-top:0"><div class="section-label">来源</div>'
-    + '<div class="seg compact" style="margin-bottom:12px">'
-    + '<button class="seg-btn selected">在线链接</button><button class="seg-btn">本地视频</button></div>';
-  if (state === 'empty') {
-    h += field('视频链接',
-      '<div class="input-row">' + inputEl('', '') + '<button class="btn btn-outline">读取视频</button></div>',
-      '粘贴视频页面链接，会自动读取视频信息。');
-  } else {
-    h += field('视频链接',
-      '<div class="input-row">' + inputEl(opts.url || VIDEO_URL) + '<button class="btn btn-quiet compact">重新读取视频信息</button></div>');
-  }
-  if (state === 'reading') {
-    h += '<div class="reading-row"><span class="spin"></span><span>正在读取视频信息…</span>'
-      + '<button class="btn btn-quiet compact">取消读取</button></div>';
-  }
-  return h + '</div>';
-}
-function genVideoCard(opts) {
-  opts = opts || {};
-  var h = '<div class="section"><div class="section-label">所选视频</div>'
-    + '<div class="video-card">' + coverCls(opts.art || 'art-a')
-    + '<div class="video-body"><div class="video-title">' + opts.title + '</div>'
-    + '<div class="video-meta">' + opts.meta + '</div>'
-    + '<div class="video-actions">'
-    + (opts.scope ? '<span class="badge neutral">' + opts.scope + '</span>' : '')
-    + opts.extraActions + '</div></div></div>';
-  if (opts.after) h += opts.after;
-  return h + '</div>';
-}
-function genSubtitlePanel() {
-  var rows = [
-    { name: '简体中文', tag: '人工字幕', on: true },
-    { name: '中文', tag: '自动字幕' },
-    { name: 'English', tag: '自动字幕' },
-    { name: '识别视频声音', tag: '无字幕可用时，在这台电脑上识别' }
-  ];
-  return '<div class="ep-panel" style="margin-top:8px"><div class="ep-head">更换文字来源 — 选择本次使用的文字</div>'
-    + rows.map(function (r) {
-      return '<div class="ep-row' + (r.on ? ' selected' : '') + '"><span class="radio' + (r.on ? ' on' : '') + '"></span>'
-        + '<span class="ep-title">' + r.name + '</span><span class="ep-tag">' + r.tag + '</span></div>';
-    }).join('')
-    + '</div><div class="panel-note">更换后会先读取新正文，确认前保持当前选择。</div>';
-}
-function genContent(state) {
-  var h = '<div class="section"><div class="section-label">笔记内容</div>';
-  if (state === 'subtitle-failed') {
-    h += '<div class="notice warn"><div class="notice-title">字幕未读取成功，尚不能确认是否可用。</div>'
-      + '<div class="notice-body">读取字幕时网络请求超时；这并不代表视频本身没有字幕。</div>'
-      + '<div class="notice-actions"><button class="btn btn-outline compact">重新读取字幕</button>'
-      + '<button class="btn btn-quiet compact">改用语音识别</button></div></div>'
-      + '<div class="divider"></div>'
-      + prefRow('AI 校对', '修正识别错误和标点，保留原意。', false)
-      + prefRow('生成摘要', '提炼课程要点，正文继续保留。', false);
-  } else {
-    h += '<div class="def-row"><span class="def-k">文字来源</span>'
-      + '<span class="def-v">简体中文 · 人工字幕</span>'
-      + '<button class="btn btn-quiet compact">更换</button></div>'
-      + (state === 'loaded' ? genSubtitlePanel() : '')
-      + '<div class="divider"></div>'
-      + prefRow('AI 校对', '修正识别错误和标点，保留原意。', state !== 'collection', {
-          tag: state === 'loaded' || state === 'no-service' ? '<span class="badge neutral">仅用于这次笔记</span>' : '',
-          extra: state === 'no-service'
-            ? '<div class="notice warn" style="margin-top:8px"><div class="notice-title">AI 服务尚未设置。</div>'
-              + '<div class="notice-body">开启 AI 校对需要把文字发送到一个 AI 服务。</div>'
-              + '<div class="notice-actions"><button class="btn btn-outline compact">设置 AI 服务</button></div></div>'
-            : (state !== 'collection'
-              ? '<div class="pref-desc" style="margin-top:4px">校对文字将发送到「ux-fixture」（127.0.0.1）。<button class="link-quiet" style="margin-left:4px">恢复默认</button></div>'
-              : '')
-        })
-      + prefRow('发送截图辅助校对', state !== 'collection' ? '文字及对应截图会发送到「ux-fixture」。' : '开启 AI 校对后可用；开启后文字及对应截图会发送到所选服务。', false, { dim: state === 'collection' })
-      + prefRow('生成摘要', '提炼课程要点，正文继续保留。', false);
-  }
-  return h + '</div>';
-}
-function genNameSave() {
-  return '<div class="section"><div class="section-label">名称与保存</div>'
-    + field('笔记名称', inputEl('金融市场与衍生品定价 第 3 讲：期权定价模型与风险管理实务'))
-    + '<div class="field" style="margin-top:12px"><div class="field-label">保存到</div>'
-    + '<div class="input-row"><span style="flex-shrink:0;color:var(--gray)">默认课程库 ·</span>'
-    + selectEl(FOLDER_LONG) + '</div>'
-    + '<div class="field-desc">存储位置 · ~/Documents/course2md</div></div></div>';
-}
-function genProducts() {
-  return '<div class="section"><div class="section-label">可选产物</div>'
-    + disc('同时导出文件', '· 未选择')
-    + prefRow('保留视频供离线播放', '生成后保留下载的视频，会占用额外空间。', false)
-    + '</div>';
-}
-function planCard(rows, actions, note) {
-  return '<div class="plan-card"><div class="plan-label">本次计划</div>'
-    + '<div class="plan-rows">'
-    + rows.map(function (r) {
-      return '<div class="plan-row"><div class="plan-k">' + r[0] + '</div><div class="plan-v">' + r[1] + '</div></div>';
-    }).join('')
-    + '</div><div class="plan-actions">' + actions + '</div>'
-    + (note ? '<div class="plan-note">' + note + '</div>' : '') + '</div>';
-}
-function renderGenerate(state) {
-  var h = '<div class="page-header"><div class="page-title">生成笔记</div></div><div class="col-form">';
-  if (state === 'empty') return h + genSource('empty') + '</div>';
-  if (state === 'reading') return h + genSource('reading') + '</div>';
-
-  if (state === 'collection') {
-    h += genSource(state)
-      + genVideoCard({
-          title: '金融风险管理系列公开课：从风险度量到衍生品定价',
-          meta: 'Bilibili · 合成测试讲师 · 合集共 8 个视频',
-          extraActions: '',
-          after: '<div class="ep-panel"><div class="ep-head">选择本次要处理的单集</div>'
-            + EPISODES.map(function (e) {
-              return '<div class="ep-row' + (e.on ? ' selected' : '') + '"><span class="radio' + (e.on ? ' on' : '') + '"></span>'
-                + '<span class="ep-num">' + e.n + '</span><span class="ep-title">' + e.t + '</span>'
-                + '<span class="ep-dur">' + e.d + '</span></div>';
-            }).join('')
-            + '</div><div class="panel-note" style="font-weight:600;color:var(--ink)">本次处理 1 个视频：P3 · 期权定价模型与风险管理实务</div>'
-        })
-      + genContent('collection')
-      + genNameSave()
-      + genProducts()
-      + planCard([
-          ['视频', '下载 P3「期权定价模型与风险管理实务」并提取画面 · 本次处理 1 个视频'],
-          ['文字', '使用简体中文字幕（人工字幕）'],
-          ['保存', '默认课程库 · ' + FOLDER_LONG]
-        ], '<button class="btn btn-primary">生成笔记</button>');
-    return h + '</div>';
-  }
-
-  /* loaded / subtitle-failed / duplicate / no-service 共用单集确认卡 */
-  h += genSource(state)
-    + genVideoCard({
-        title: VIDEO_TITLE,
-        meta: 'Bilibili · 合成测试讲师 · 42:18',
-        scope: '本次处理 1 个视频',
-        extraActions: '',
-        after: state === 'duplicate'
-          ? '<div class="notice neutral" style="margin-top:8px"><div class="notice-title">这个视频已经有笔记。</div>'
-            + '<div class="notice-body">版本 2 · 2026-09-07 生成 · 保存在 默认课程库 · ' + FOLDER_LONG + '</div></div>'
-          : disc('来源详情', '· Bilibili：已登录 · 合成测试讲师')
-      });
-
-  if (state === 'duplicate') {
-    h += genContent('collection') + genNameSave() + genProducts()
-      + planCard([
-          ['已有笔记', '版本 2 · 2026-09-07 生成 · 默认课程库 · ' + FOLDER_LONG],
-          ['新生成', '文字：简体中文 · 人工字幕 · 不使用 AI 服务 · 保存到同一文件夹']
-        ],
-        '<button class="btn btn-primary">打开已有笔记</button>'
-          + '<button class="btn btn-outline">生成新版笔记</button>',
-        '生成新版会保留旧版本，完成后两个版本都可阅读。');
-    return h + '</div>';
-  }
-
-  h += genContent(state) + genNameSave() + genProducts();
-
-  if (state === 'subtitle-failed') {
-    h += planCard([
-        ['视频', '下载所选视频并提取画面 · 本次处理 1 个视频'],
-        ['文字', '<span class="warn-text">尚未确定：重新读取字幕，或改用语音识别</span>'],
-        ['保存', '默认课程库 · ' + FOLDER_LONG]
-      ], '<button class="btn btn-primary">生成笔记</button>');
-  } else {
-    h += planCard([
-        ['视频', '下载所选视频并提取画面 · 本次处理 1 个视频'],
-        ['文字', '使用简体中文字幕（人工字幕）'],
-        ['AI', '校对文字将发送到「ux-fixture」（127.0.0.1）'],
-        ['保存', '默认课程库 · ' + FOLDER_LONG]
-      ], '<button class="btn btn-primary">生成笔记</button>');
-  }
-  h += '</div>';
-
-  if (state === 'no-service') {
-    h += '<div class="modal-backdrop"><div class="modal">'
-      + '<div class="modal-title">为这次笔记设置 AI 服务</div>'
-      + '<div class="modal-note">保存后用于本次笔记；不改变默认服务。</div>'
-      + field('服务名称', inputEl('本地 AI 服务'))
-      + field('接口类型', selectEl('聊天补全（/chat/completions）'))
-      + field('服务地址', inputEl('http://127.0.0.1:8788'),
-          '将请求 <span class="mono">http://127.0.0.1:8788/v1/chat/completions</span>')
-      + field('模型 ID', inputEl('fixture-llm-01'))
-      + field('认证方式',
-          '<div class="seg compact"><button class="seg-btn">API Key</button><button class="seg-btn selected">无需认证</button></div>')
-      + '<div class="check-row"><span class="check">✓</span><div class="pref-main"><div class="pref-name" style="font-weight:400">同时设为默认服务</div></div></div>'
-      + '<div class="modal-note">测试会发送应用内置的测试内容，不包含你的课程；服务可能按其规则计费。</div>'
-      + '<div class="form-actions"><button class="btn btn-quiet">取消</button>'
-      + '<button class="btn btn-outline">测试服务</button>'
-      + '<button class="btn btn-primary">保存服务</button></div>'
-      + '</div></div>';
-  }
-  return h;
-}
-
-/* ================= 任务 ================= */
-function taskHead(badge, title) {
-  return '<div class="task-head">' + badge + '<div class="task-title">' + title + '</div></div>';
-}
-var BADGE_RUNNING = '<span class="badge progress">进行中</span>';
-var BADGE_QUEUED = '<span class="badge neutral">已入队</span>';
-var BADGE_WARN = '<span class="badge warn">需要处理</span>';
-var BADGE_DONE = '<span class="badge ok">已完成</span>';
-var BADGE_SUPER = '<span class="badge neutral">已有后续任务</span>';
-var BADGE_CANCEL = '<span class="badge neutral">已取消</span>';
-
-function runningCard() {
-  return '<div class="task-card">'
-    + taskHead(BADGE_RUNNING, VIDEO_TITLE)
-    + '<div class="task-meta">2026-09-07 14:32 开始 · 校对将发送到「ux-fixture」（127.0.0.1）</div>'
-    + '<div class="work-list">'
-    + '<div class="work-item"><div class="work-line"><span class="work-name">正在下载视频</span>'
-    + '<span class="work-stats">fixture_ep3.mp4 · 182.4 MB / 305.1 MB · 8.2 MB/s · 约 15 秒</span></div>'
-    + '<div class="bar"><div class="bar-fill" style="width:60%"></div></div></div>'
-    + '<div class="work-item"><div class="work-line"><span class="work-name">正在识别视频声音</span>'
-    + '<span class="work-stats">已完成片段 41 / 96 · 估算剩余约 2 分钟</span></div>'
-    + '<div class="bar"><div class="bar-fill" style="width:43%"></div></div></div>'
-    + '<div class="work-item"><div class="work-line"><span class="work-name">正在提取截图</span>'
-    + '<span class="work-stats">已保存 12 张 · 与识别并行进行</span></div></div>'
-    + '<div class="milestone"><span class="mk">✓</span><span>已读取字幕：简体中文 · 人工字幕</span></div>'
-    + '</div>'
-    + '<div class="task-actions"><button class="btn btn-outline compact">暂停生成</button>'
-    + '<button class="btn btn-quiet compact">取消任务</button></div>'
-    + '</div>';
-}
-function failedCard() {
-  return '<div class="task-card">'
-    + taskHead(BADGE_WARN, '财务报表分析 第 2 讲：现金流量表与盈利质量识别')
-    + '<div><span class="err-text">服务拒绝了 API Key，已保留识别进度。</span></div>'
-    + '<div class="task-meta">语音识别使用「ux-fixture」（127.0.0.1）· 2026-09-07 14:02 停止 · 已保存 41 / 96 个识别片段</div>'
-    + '<div class="task-actions"><button class="btn btn-primary">更新凭据</button>'
-    + '<button class="btn btn-outline">调整后生成</button>'
-    + '<button class="btn btn-quiet">取消任务</button></div>'
-    + disc('技术详情', '· 阶段：语音识别 · HTTP 401 · 请求 ID req_9f2c71 · 2026-09-07 14:02:11')
-    + '</div>';
-}
-function doneCard(title, meta, sub) {
-  return '<div class="task-card">'
-    + taskHead(BADGE_DONE, title)
-    + '<div>' + meta + '</div>'
-    + '<div class="task-meta">' + sub + '</div>'
-    + '<div class="task-actions"><button class="btn btn-outline">阅读笔记</button>'
-    + '<button class="btn btn-quiet">导出</button></div>'
-    + '</div>';
-}
-function supersededCard() {
-  return '<div class="task-card dim">'
-    + taskHead(BADGE_SUPER, '金融风险管理 第 1 讲：风险度量基础与 VaR 模型实务')
-    + '<div style="color:var(--gray)">上次生成未完成：找不到原视频。</div>'
-    + '<div class="task-meta">2026-09-05 停止 · 恢复已由 2026-09-06 的任务继续</div>'
-    + '<div class="task-actions"><button class="btn btn-quiet compact">查看后续任务</button></div>'
-    + '</div>';
-}
-function queuedCard() {
-  return '<div class="task-card">'
-    + taskHead(BADGE_QUEUED, '2026 秋季学期课程导论：教学安排、参考书目与考核方式说明')
-    + '<div class="task-meta">等待处理 · 前面有 1 个任务</div>'
-    + '<div class="task-actions"><button class="btn btn-quiet compact">取消任务</button></div>'
-    + '</div>';
-}
-function canceledCard() {
-  return '<div class="task-card dim">'
-    + taskHead(BADGE_CANCEL, '神经网络基础：反向传播算法逐行推导')
-    + '<div class="task-meta">已取消 · 2026-09-04 · 已保留完整正文缓存，重新生成时继续使用</div>'
-    + '<div class="task-actions"><button class="btn btn-outline compact">重新生成</button></div>'
-    + '</div>';
-}
-function renderTasks(state) {
-  var h = '<div class="page-header"><div class="page-title">任务</div></div>'
-    + '<div class="page-note">关闭窗口后任务会继续；退出应用会暂停任务。</div>';
-  if (state === 'running') {
-    return h + '<div class="task-group-label">进行中</div>' + runningCard();
-  }
-  if (state === 'failed') {
-    return h + '<div class="task-group-label">需要处理</div>' + failedCard();
-  }
-  if (state === 'done') {
-    return h + '<div class="task-group-label">历史记录</div>'
-      + doneCard('机器学习导论 第 5 讲：梯度下降与损失函数的可视化直觉', '笔记已生成。', '2026-09-06 21:14 完成 · 用时 6 分 12 秒 · 保存到 默认课程库 · 机器学习公开课');
-  }
-  if (state === 'superseded') {
-    return h + '<div class="task-group-label">历史记录</div>'
-      + doneCard('衍生品定价专题：Black-Scholes 公式推导与 Python 数值实现', '笔记已生成。', '2026-09-03 16:40 完成 · 保存到 默认课程库 · ' + FOLDER_LONG)
-      + supersededCard();
-  }
-  /* mixed */
-  return h
-    + '<div class="task-group-label">进行中</div>' + runningCard() + queuedCard()
-    + '<div class="task-group-label">需要处理</div>' + failedCard()
-    + '<div class="task-group-label">历史记录</div>'
-    + doneCard('机器学习导论 第 5 讲：梯度下降与损失函数的可视化直觉', '笔记已生成。', '2026-09-06 21:14 完成 · 保存到 默认课程库 · 机器学习公开课')
-    + supersededCard() + canceledCard();
-}
-
 /* ================= 阅读 ================= */
 function readerHead(state) {
-  return '<div class="back-row"><button class="btn btn-quiet compact">‹ 返回课程库</button>'
+  return '<div class="back-row"><button class="btn btn-quiet compact">‹ 我的笔记</button>'
     + '<span class="back-hint">保留当前筛选与阅读位置</span></div>'
-    + '<div class="reader-head col-read">'
+    + '<div class="reader-head">'
     + '<div class="reader-title">' + VIDEO_TITLE + '</div>'
     + '<div class="reader-meta"><span>合成测试讲师</span><span class="meta-sep">·</span><span>42:18</span>'
     + '<span class="meta-sep">·</span><span>Bilibili BV1UXCCC3</span>'
@@ -894,8 +858,8 @@ function readerHead(state) {
     + '<button class="link-quiet">选择版本</button>'
     + '<button class="link-quiet">课程信息</button></div>'
     + '</div>'
-    + '<div class="reader-toolbar col-read">'
-    + '<div class="seg compact">'
+    + '<div class="reader-toolbar">'
+    + '<div class="seg">'
     + '<button class="seg-btn' + (state !== 'shots' ? ' selected' : '') + '">笔记</button>'
     + '<button class="seg-btn' + (state === 'shots' ? ' selected' : '') + '">截图</button>'
     + '</div><span class="spacer"></span>'
@@ -906,7 +870,7 @@ function readerHead(state) {
     + '</div>';
 }
 function findBar() {
-  return '<div class="find-bar col-read"><span class="search-icon">⌕</span>'
+  return '<div class="find-bar"><span class="search-icon">⌕</span>'
     + '<input class="find-input" value="波动率" readonly>'
     + '<span class="find-count">第 2 处，共 5 处</span>'
     + '<button class="icon-btn" title="上一处">↑</button>'
@@ -965,9 +929,9 @@ function renderReader(state) {
 /* ================= 设置 ================= */
 function setTabs(on) {
   var tabs = [['general', '生成笔记'], ['services', '服务与账号'], ['storage', '存储'], ['app', '应用']];
-  return '<div class="tabbar">' + tabs.map(function (t) {
-    return '<button class="tab' + (t[0] === on ? ' on' : '') + '">' + t[1] + '</button>';
-  }).join('') + '</div>';
+  return '<div class="set-tabs"><div class="seg">' + tabs.map(function (t) {
+    return '<button class="seg-btn' + (t[0] === on ? ' selected' : '') + '">' + t[1] + '</button>';
+  }).join('') + '</div></div>';
 }
 function svcRow(name, sub, badge, actions) {
   return '<div class="svc-card"><div class="svc-head"><span class="svc-name">' + name + '</span>'
@@ -975,13 +939,10 @@ function svcRow(name, sub, badge, actions) {
     + '<div class="svc-sub">' + sub + '</div></div>';
 }
 function renderSettings(state, from) {
-  var h = '';
-  if (from === 'generate') {
-    h += '<div class="back-row"><button class="btn btn-quiet compact">‹ 返回生成笔记</button>'
-      + '<span class="back-hint">当前草稿与填写位置已保留</span></div>';
-  }
-  h += '<div class="page-header"><div class="page-title">设置</div></div>'
-    + setTabs(state) + '<div class="col-form">';
+  var h = '<div class="back-row"><button class="btn btn-quiet compact">‹ 返回工作台</button>'
+    + (from === 'generate' ? '<span class="back-hint">当前草稿与填写位置已保留</span>' : '') + '</div>'
+    + '<div class="page-header"><div class="page-title">设置</div></div>'
+    + setTabs(state);
 
   if (state === 'general') {
     h += '<div class="scope-note">这里的默认选项会同步到准备中笔记尚未单独修改的选项。已排队或开始生成的笔记保持原设置。</div>'
@@ -1005,7 +966,7 @@ function renderSettings(state, from) {
       + '<div class="check-row"><span class="check">✓</span><div class="pref-main"><div class="pref-name" style="font-weight:400">JSON 数据</div><div class="pref-desc">供程序处理，不含图片文件。</div></div></div>'
       + prefRow('保留在线下载的视频', '生成后保留下载的视频供离线播放，会占用额外空间。', false)
       + '</div>';
-    return h + '</div>';
+    return h;
   }
 
   if (state === 'services') {
@@ -1018,7 +979,6 @@ function renderSettings(state, from) {
       + svcRow('ux-fixture', '127.0.0.1 · 聊天补全（/chat/completions）· 模型 fixture-llm-01 · 尚未测试',
           '<span class="badge neutral">配置已保存</span>',
           '<button class="btn btn-quiet compact">测试服务</button><button class="btn btn-quiet compact">编辑</button>')
-      /* 正在编辑的服务表单：两处字段错误 */
       + '<div class="svc-card editing">'
       + '<div class="svc-name">编辑 AI 服务 · ux-fixture</div>'
       + '<div class="banner">修改尚未启用；当前仍使用 127.0.0.1 · fixture-llm-01（版本 1）。</div>'
@@ -1027,7 +987,7 @@ function renderSettings(state, from) {
       + field('服务地址', inputEl('127.0.0.1:8788', '', true), null, '请输入包含 http:// 或 https:// 的服务地址')
       + field('模型 ID', inputEl('fixture-llm-01'))
       + field('认证方式',
-          '<div class="seg compact"><button class="seg-btn selected">API Key</button><button class="seg-btn">无需认证</button></div>')
+          '<div class="seg"><button class="seg-btn selected">API Key</button><button class="seg-btn">无需认证</button></div>')
       + field('API Key', inputEl('', '粘贴服务提供的 Key', true), null, '此认证方式需要 API Key')
       + '<div class="modal-note">测试会发送应用内置的测试内容，不包含你的课程；服务可能按其规则计费。</div>'
       + '<div class="form-actions"><button class="btn btn-quiet">取消</button>'
@@ -1039,7 +999,7 @@ function renderSettings(state, from) {
       + '<div class="svc-card"><div class="svc-head"><span class="svc-name">Bilibili：已登录 · 合成测试讲师</span>'
       + '<span class="svc-actions"><button class="btn btn-quiet compact">管理账号</button></span></div>'
       + '<div class="svc-sub">读取需要权限的视频时使用此登录。</div></div></div>';
-    return h + '</div>';
+    return h;
   }
 
   if (state === 'storage') {
@@ -1062,7 +1022,7 @@ function renderSettings(state, from) {
       + '<span class="svc-actions"><button class="btn btn-quiet compact">删除模型</button></span></div>'
       + '<div class="svc-sub">132 MB · 当前没有任务使用</div></div></div>'
       + disc('技术详情', '· 库 ID、索引版本与完整路径');
-    return h + '</div>';
+    return h;
   }
 
   /* app */
@@ -1084,7 +1044,7 @@ function renderSettings(state, from) {
     + '<div style="margin-top:8px"><button class="btn btn-outline compact">重新诊断</button></div>'
     + disc('技术详情', '· 模型文件路径与缺失文件清单')
     + '</div></div>';
-  return h + '</div>';
+  return h;
 }
 
 /* ================= 初始化 ================= */
@@ -1093,25 +1053,24 @@ function renderSettings(state, from) {
   var scale = parseFloat(q.get('scale') || '1');
   if (!isFinite(scale) || scale <= 0) scale = 1;
   document.documentElement.style.setProperty('--scale', String(scale));
-  var page = q.get('page') || 'library';
-  var defaults = { library: 'grouped', generate: 'empty', tasks: 'running', reader: 'notes', settings: 'general' };
+  var page = q.get('page') || 'home';
+  var defaults = { home: 'empty', notes: 'list', reader: 'notes', settings: 'general' };
   var state = q.get('state') || defaults[page] || '';
   var from = q.get('from') || '';
-  var renderers = { library: renderLibrary, generate: renderGenerate, tasks: renderTasks, reader: renderReader };
-  var html = page === 'settings' ? renderSettings(state, from) : (renderers[page] || renderLibrary)(state);
-  document.getElementById('main').innerHTML = html;
-  /* 侧栏选中态：阅读归入课程库；任务徽章在未查看时显示（不在任务页自身） */
-  var navSel = page === 'reader' ? 'library' : page;
-  var navEl = document.querySelector('.nav-item[data-nav="' + navSel + '"]');
-  if (navEl) navEl.classList.add('selected');
-  if (page !== 'tasks') document.getElementById('taskBadge').style.display = '';
-  /* 首次空态：还没有文件夹和未查看任务，侧栏只留主导航 */
-  if (page === 'library' && state === 'empty') {
-    document.querySelector('.group-header').style.display = 'none';
-    document.querySelector('.folder-list').style.display = 'none';
-    document.getElementById('taskBadge').style.display = 'none';
+  var main = document.getElementById('main');
+  if (page === 'settings') {
+    main.classList.add('narrow');
+    main.innerHTML = renderSettings(state, from);
+  } else {
+    var renderers = { home: renderHome, notes: renderNotes, reader: renderReader };
+    main.innerHTML = (renderers[page] || renderHome)(state);
   }
-  document.title = 'course2md mock · ' + page + '/' + state;
+  /* 顶栏选中态：阅读归入我的笔记；设置无页签归属，齿轮亮起 */
+  var navSel = page === 'reader' ? 'notes' : page;
+  var tab = document.querySelector('.nav-tab[data-nav="' + navSel + '"]');
+  if (tab) tab.classList.add('on');
+  if (page === 'settings') document.querySelector('.gear-btn').classList.add('on');
+  document.title = 'course2md mock v2 · ' + page + '/' + state;
 })();
 </script>
 </body>
