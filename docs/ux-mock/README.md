@@ -51,3 +51,11 @@
   --window-size=1280,800 --screenshot=/tmp/ux-mock-shots/list-1x.png \
   "file:///…/docs/ux-mock/index.html?view=list&scale=1"
 ```
+
+## GPUI 复刻注意事项（第六轮实机复刻实测）
+
+1. **省略号不靠 `line_clamp`**：本仓库 GPUI 的 `line_clamp(n)` 只限制行数、不补「…」，末行越界部分被元素硬裁、可撕裂字形。单行省略用 `whitespace_nowrap() + text_ellipsis()`；多行截断用 `whitespace_normal() + line_clamp(n) + text_ellipsis()`（`text.rs` 里 `truncate_wrapped_line` 才负责补省略号）。
+2. **gpui-component Button 的 `flex_1` 不可靠**：按钮内含长文本 child 时，实测卡片底栏的 ⋯ 被挤出卡片（实例样式会被 render 内的默认 `flex_shrink_0` 等覆盖链稀释）。chip 宽度必须由布局方显式算 `max_w`：列表行 `min(16rem, 行宽 26%)`，卡片 `卡宽 - 76px`。
+3. **Button 内容容器默认 `nowrap + overflow_hidden`**：按钮内文本要换行必须显式 `whitespace_normal()`，否则硬裁。
+4. **父链每一级都要 `w_full + min_w_0`**：v_flex 子项不自动铺满/收缩，缺一级就会按内容天然宽度撑破（卡片底栏曾因此溢出）。
+5. **CSS container query 在 GPUI 里手动算**：窄区降级的三条规则用主区宽度判断（窗口宽 − 侧栏 rem − 页面 48px padding），阈值 24rem 同样随字号缩放。

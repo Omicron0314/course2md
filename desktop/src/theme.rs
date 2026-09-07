@@ -8,6 +8,7 @@ pub use choice_group::SingleChoiceGroup;
 pub const CANVAS: u32 = 0xf8f8f6;
 pub const SURFACE: u32 = 0xffffff;
 pub const SIDEBAR: u32 = 0xe8ebf0;
+pub const COVER: u32 = 0xdfe7f7;
 pub const INK: u32 = 0x252a32;
 pub const MUTED: u32 = 0x485363;
 pub const LINE: u32 = 0xe3e5e2;

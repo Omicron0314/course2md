@@ -6,6 +6,16 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 
+/// Geometry shared by the list and card layouts, mirroring docs/ux-mock: rem-based
+/// dimensions resolve to `14 * scale` px; hairlines, paddings and gaps stay fixed.
+#[derive(Clone, Copy)]
+struct LibraryLayout {
+    columns: usize,
+    chip_max: Pixels,
+    card_chip_max: Pixels,
+    compact: bool,
+}
+
 struct CourseRenameDialog {
     desktop: Entity<Desktop>,
     input: Entity<InputState>,
@@ -190,7 +200,9 @@ impl Desktop {
         let entity = cx.entity().downgrade();
         control(("course-actions", index))
             .ghost()
-            .label("笔记操作")
+            .icon(IconName::Ellipsis)
+            .min_h(rems(2.))
+            .tooltip("笔记操作")
             .accessibility_label(format!("《{}》的笔记操作", course.title))
             .dropdown_menu(move |menu, _, _| {
                 let rename = entity.clone();
@@ -364,10 +376,16 @@ impl Desktop {
     }
 
     pub fn library_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let columns = ((f32::from(window.bounds().size.width) - 272.)
-            / (264. * self.preferences.application().font_scale))
-            .floor()
-            .max(1.) as usize;
+        let scale = self.preferences.application().font_scale;
+        let content = (f32::from(window.bounds().size.width) - 208. * scale - 48.).max(0.);
+        let columns = ((content + 16.) / (196. * scale + 16.)).floor().max(1.) as usize;
+        let card_w = (content - 16. * columns.saturating_sub(1) as f32) / columns as f32;
+        let layout = LibraryLayout {
+            columns,
+            chip_max: px(f32::min(224. * scale, 0.26 * content)),
+            card_chip_max: px((card_w - 76.).max(48.)),
+            compact: content < 336. * scale,
+        };
         let query = self.value(Field::Search, cx).to_lowercase();
         let roots = self
             .workspace
@@ -672,11 +690,20 @@ impl Desktop {
                                     } else {
                                         IconName::ChevronDown
                                     })
-                                    .size_4(),
+                                    .size_4()
+                                    .flex_shrink_0(),
                                 )
-                                .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(name),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
                                         .text_sm()
                                         .text_color(rgb(MUTED))
                                         .child(entries.len().to_string()),
@@ -697,7 +724,7 @@ impl Desktop {
                             cx.notify();
                         })),
                 );
-                let collection = self.course_collection(&entries, columns, cx);
+                let collection = self.course_collection(&entries, layout, cx);
                 group = group.child(disclosure(
                     ("folder-disclosure", group_index),
                     !collapsed,
@@ -708,7 +735,7 @@ impl Desktop {
                 view = view.child(group);
             }
         } else {
-            view = view.child(self.course_collection(&courses, columns, cx));
+            view = view.child(self.course_collection(&courses, layout, cx));
         }
         view.into_any_element()
     }
@@ -817,19 +844,23 @@ impl Desktop {
     fn course_collection(
         &self,
         courses: &[(usize, Course)],
-        columns: usize,
+        layout: LibraryLayout,
         cx: &mut Context<Self>,
     ) -> Div {
         if !self.desktop_settings.library_cards {
+            let (cover_w, cover_h, gap) = if layout.compact {
+                (rems(48. / 14.), rems(27. / 14.), px(8.))
+            } else {
+                (rems(96. / 14.), rems(54. / 14.), px(12.))
+            };
             return v_flex()
                 .gap_2()
                 .children(courses.iter().map(|(index, course)| {
                     h_flex()
                         .w_full()
-                        .flex_wrap()
-                        .min_h(px(88.))
+                        .items_center()
                         .p_3()
-                        .gap_4()
+                        .gap(gap)
                         .bg(rgb(SURFACE))
                         .border_1()
                         .border_color(rgb(LINE))
@@ -837,7 +868,7 @@ impl Desktop {
                         .child(
                             control(("read-course", *index))
                                 .ghost()
-                                .w_full()
+                                .flex_1()
                                 .min_w_0()
                                 .h_auto()
                                 .p_0()
@@ -846,11 +877,13 @@ impl Desktop {
                                 .child(
                                     h_flex()
                                         .w_full()
-                                        .gap_3()
+                                        .min_w_0()
+                                        .items_center()
+                                        .gap(gap)
                                         .child(
                                             self.course_cover(course)
-                                                .w(px(96.))
-                                                .h(px(54.))
+                                                .w(cover_w)
+                                                .h(cover_h)
                                                 .flex_shrink_0(),
                                         )
                                         .child(
@@ -860,12 +893,18 @@ impl Desktop {
                                                 .gap_1()
                                                 .child(
                                                     div()
+                                                        .w_full()
+                                                        .whitespace_normal()
+                                                        .text_ellipsis()
                                                         .line_clamp(2)
                                                         .font_weight(FontWeight::SEMIBOLD)
                                                         .child(course.title.clone()),
                                                 )
                                                 .child(
                                                     div()
+                                                        .w_full()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis()
                                                         .text_sm()
                                                         .text_color(rgb(MUTED))
                                                         .child(course.description()),
@@ -879,17 +918,19 @@ impl Desktop {
                                     })
                                 }),
                         )
-                        .child(div().w(rems(9.5)).flex_shrink_0().child(self.folder_picker(
+                        .child(self.folder_chip(
                             Some(course.dir.clone()),
                             index + 1,
+                            Some(layout.chip_max),
+                            layout.compact,
                             cx,
-                        )))
+                        ))
                         .child(self.course_actions(course.clone(), *index, cx))
                 }));
         }
         v_flex()
             .gap_4()
-            .children(courses.chunks(columns).map(|row| {
+            .children(courses.chunks(layout.columns).map(|row| {
                 h_flex()
                     .gap_4()
                     .items_stretch()
@@ -920,8 +961,10 @@ impl Desktop {
                             )
                             .child(
                                 v_flex()
+                                    .w_full()
+                                    .min_w_0()
                                     .p_4()
-                                    .gap_3()
+                                    .gap_2()
                                     .child(
                                         control(("read-title", *index))
                                             .accessibility_label(format!("阅读 {}", course.title))
@@ -934,6 +977,8 @@ impl Desktop {
                                             .child(
                                                 div()
                                                     .w_full()
+                                                    .whitespace_normal()
+                                                    .text_ellipsis()
                                                     .line_clamp(2)
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .child(course.title.clone()),
@@ -947,26 +992,39 @@ impl Desktop {
                                     )
                                     .child(
                                         div()
+                                            .w_full()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .text_sm()
                                             .text_color(rgb(MUTED))
                                             .child(course.description()),
                                     )
-                                    .child(self.folder_picker(
-                                        Some(course.dir.clone()),
-                                        index + 1,
-                                        cx,
-                                    ))
-                                    .child(self.course_actions(course.clone(), *index, cx)),
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .min_w_0()
+                                            .pt_2()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(self.folder_chip(
+                                                Some(course.dir.clone()),
+                                                index + 1,
+                                                Some(layout.card_chip_max),
+                                                false,
+                                                cx,
+                                            ))
+                                            .child(self.course_actions(course.clone(), *index, cx)),
+                                    ),
                             )
                     }))
-                    .children((row.len()..columns).map(|_| div().flex_1()))
+                    .children((row.len()..layout.columns).map(|_| div().flex_1()))
             }))
     }
 
     fn course_cover(&self, course: &Course) -> Div {
         div()
             .overflow_hidden()
-            .bg(rgb(SIDEBAR))
+            .bg(rgb(COVER))
             .border_1()
             .border_color(rgba(0x0000001a))
             .flex()

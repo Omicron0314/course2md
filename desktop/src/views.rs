@@ -376,7 +376,7 @@ impl Render for Desktop {
             .child(content);
         let settings_problem = self.settings_have_problem();
         let sidebar = v_flex()
-            .w(px(208.))
+            .w(rems(208. / 14.))
             .h_full()
             .flex_shrink_0()
             .p_3()
@@ -410,7 +410,14 @@ impl Render for Desktop {
                                 .min_w_0()
                                 .gap_2()
                                 .child(icon.size(px(20.)).flex_shrink_0())
-                                .child(div().flex_1().min_w_0().whitespace_normal().child(label)),
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(label),
+                                ),
                         )
                         .selected(
                             self.page == page

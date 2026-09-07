@@ -2,7 +2,7 @@ use super::*;
 use crate::theme::*;
 use gpui_component::{
     button::*,
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
 };
 use std::sync::{
     Arc,
@@ -13,6 +13,16 @@ use std::sync::{
 pub struct FolderOrigin {
     pub root: PathBuf,
     pub draft_id: Option<String>,
+}
+
+/// Resolved picker state shared by the full picker and the compact chip.
+struct FolderContext {
+    storage: Option<PathBuf>,
+    origin: FolderOrigin,
+    folder: Option<u64>,
+    load_error: Option<String>,
+    label: String,
+    folders: BTreeMap<u64, String>,
 }
 
 struct FolderDialog {
@@ -641,6 +651,7 @@ impl Desktop {
                     .child(
                         h_flex()
                             .w_full()
+                            .items_start()
                             .gap_2()
                             .child(Icon::new(IconName::Folder).size(px(18.)).flex_shrink_0())
                             .child(
@@ -648,6 +659,7 @@ impl Desktop {
                                     .flex_1()
                                     .min_w_0()
                                     .whitespace_normal()
+                                    .text_ellipsis()
                                     .line_clamp(2)
                                     .child(name),
                             )
@@ -672,12 +684,7 @@ impl Desktop {
         view
     }
 
-    pub fn folder_picker(
-        &self,
-        course: Option<PathBuf>,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn folder_context(&self, course: Option<PathBuf>) -> FolderContext {
         let storage = course.as_ref().map(|path| {
             self.courses
                 .iter()
@@ -733,12 +740,81 @@ impl Desktop {
         } else {
             "未分类".into()
         };
-        let folders = organization.folders;
-        let entity = cx.entity().downgrade();
+        FolderContext {
+            storage,
+            origin,
+            folder,
+            load_error,
+            label,
+            folders: organization.folders,
+        }
+    }
+
+    fn folder_menu(
+        entity: WeakEntity<Desktop>,
+        origin: FolderOrigin,
+        storage: Option<PathBuf>,
+        folders: BTreeMap<u64, String>,
+        current: Option<u64>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        move |menu, _, _| {
+            let mut entries = vec![(None, "未分类".to_owned())];
+            entries.extend(folders.iter().map(|(id, name)| (Some(*id), name.clone())));
+            entries.into_iter().fold(menu, |menu, (id, name)| {
+                let entity = entity.clone();
+                let storage = storage.clone();
+                let origin = origin.clone();
+                menu.item(PopupMenuItem::new(name).checked(id == current).on_click(
+                    move |_, _, cx| {
+                        let _ = entity.update(cx, |this, cx| {
+                            if let Some(path) = &storage {
+                                match organize::Library::edit(&origin.root, |library| {
+                                    library.assign(&origin.root, path, id)
+                                }) {
+                                    Ok(library) => {
+                                        if this.library_root == origin.root {
+                                            this.library = library.clone();
+                                        }
+                                        this.library_indexes
+                                            .insert(origin.root.clone(), library);
+                                    }
+                                    Err(error) => {
+                                        this.message = Some(format!("无法移动笔记：{error:#}"))
+                                    }
+                                }
+                            } else if this
+                                .workspace
+                                .as_ref()
+                                .and_then(|workspace| workspace.state.draft())
+                                .is_some_and(|draft| {
+                                    Some(&draft.id) == origin.draft_id.as_ref()
+                                })
+                            {
+                                this.target_folder = id;
+                                this.save_current_draft(cx);
+                            }
+                            cx.notify();
+                        });
+                    },
+                ))
+            })
+        }
+    }
+
+    pub fn folder_picker(
+        &self,
+        course: Option<PathBuf>,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let has_course = course.is_some();
+        let context = self.folder_context(course);
+        let load_error = context.load_error.clone();
+        let label = context.label.clone();
         let picker = control(("folder-picker", index))
             .w_full()
             .min_w_0()
-            .when(course.is_some(), |button| button.ghost())
+            .when(has_course, |button| button.ghost())
             .h_auto()
             .min_h(rems(2.6))
             .py_2()
@@ -746,50 +822,23 @@ impl Desktop {
             .icon(IconName::Folder)
             .accessibility_label(format!("保存到文件夹：{label}"))
             .tooltip(label.clone())
-            .child(div().flex_1().min_w_0().whitespace_normal().line_clamp(2).child(label))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .text_ellipsis()
+                    .line_clamp(2)
+                    .child(label),
+            )
             .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
-            .dropdown_menu(move |menu, _, _| {
-                let mut entries = vec![(None, "未分类".to_owned())];
-                entries.extend(folders.iter().map(|(id, name)| (Some(*id), name.clone())));
-                entries.into_iter().fold(menu, |menu, (id, name)| {
-                    let entity = entity.clone();
-                    let storage = storage.clone();
-                    let origin = origin.clone();
-                    menu.item(PopupMenuItem::new(name).checked(id == folder).on_click(
-                        move |_, _, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                if let Some(path) = &storage {
-                                    match organize::Library::edit(&origin.root, |library| {
-                                        library.assign(&origin.root, path, id)
-                                    }) {
-                                        Ok(library) => {
-                                            if this.library_root == origin.root {
-                                                this.library = library.clone();
-                                            }
-                                            this.library_indexes
-                                                .insert(origin.root.clone(), library);
-                                        }
-                                        Err(error) => {
-                                            this.message = Some(format!("无法移动笔记：{error:#}"))
-                                        }
-                                    }
-                                } else if this
-                                    .workspace
-                                    .as_ref()
-                                    .and_then(|workspace| workspace.state.draft())
-                                    .is_some_and(|draft| {
-                                        Some(&draft.id) == origin.draft_id.as_ref()
-                                    })
-                                {
-                                    this.target_folder = id;
-                                    this.save_current_draft(cx);
-                                }
-                                cx.notify();
-                            });
-                        },
-                    ))
-                })
-            });
+            .dropdown_menu(Self::folder_menu(
+                cx.entity().downgrade(),
+                context.origin,
+                context.storage,
+                context.folders,
+                context.folder,
+            ));
         v_flex()
             .gap_1()
             .child(picker)
@@ -800,5 +849,51 @@ impl Desktop {
                         .text_color(rgb(0xa32626)),
                 )
             })
+    }
+
+    /// Compact folder assignment for library rows and card footers, mirroring
+    /// docs/ux-mock: one-line truncated label capped by `max_w`, or icon-only
+    /// when the content column is narrow.
+    pub fn folder_chip(
+        &self,
+        course: Option<PathBuf>,
+        index: usize,
+        max_w: Option<Pixels>,
+        icon_only: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let context = self.folder_context(course);
+        let label = context.label.clone();
+        control(("folder-picker", index))
+            .ghost()
+            .h_auto()
+            .min_h(rems(2.))
+            .min_w_0()
+            .flex_shrink(1.)
+            .when_some(max_w, |button, width| button.max_w(width))
+            .when(max_w.is_none(), |button| button.flex_1())
+            .px_2()
+            .text_color(rgb(MUTED))
+            .disabled(context.load_error.is_some())
+            .icon(IconName::Folder)
+            .accessibility_label(format!("保存到文件夹：{label}"))
+            .tooltip(label.clone())
+            .when(!icon_only, |button| {
+                button.child(
+                    div()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                )
+            })
+            .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
+            .dropdown_menu(Self::folder_menu(
+                cx.entity().downgrade(),
+                context.origin,
+                context.storage,
+                context.folders,
+                context.folder,
+            ))
     }
 }
