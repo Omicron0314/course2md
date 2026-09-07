@@ -73,6 +73,7 @@ pub(crate) struct State {
     find_open: bool,
     info_open: bool,
     processing_details_open: bool,
+    toc_open: bool,
     find_return_focus: Option<FocusHandle>,
     matches: Vec<Match>,
     match_index: usize,
@@ -131,6 +132,7 @@ impl State {
             find_open: false,
             info_open: false,
             processing_details_open: false,
+            toc_open: false,
             find_return_focus: None,
             matches: Vec::new(),
             match_index: 0,
@@ -178,7 +180,6 @@ fn block_anchor(block: &PreviewBlock, index: usize) -> String {
             "image:{index}:{}",
             path.file_name().unwrap_or_default().to_string_lossy()
         ),
-        _ => format!("block-{index}"),
     }
 }
 fn block_time(blocks: &[PreviewBlock], index: usize) -> Option<f64> {
@@ -196,15 +197,187 @@ fn frame_label(title: &str, frame: &Frame, index: usize) -> String {
         None => format!("{title}，第 {} 张图片", index + 1),
     }
 }
-fn paragraph(id: impl Into<ElementId>, text: String, order: usize) -> Stateful<Div> {
+/// Selectable paragraph text with word-level find highlights. Selection plumbing
+/// mirrors gpui_base::SelectableText (which accepts no highlight runs).
+struct ReaderText {
+    id: ElementId,
+    handle: Option<gpui_base::TextSelectionHandle>,
+    text: SharedString,
+    styled_text: StyledText,
+    document_order: u64,
+}
+impl ReaderText {
+    fn new(
+        id: impl Into<ElementId>,
+        text: impl Into<SharedString>,
+        document_order: u64,
+        highlights: Vec<(Range<usize>, HighlightStyle)>,
+    ) -> Self {
+        let text = text.into();
+        let styled = StyledText::new(text.clone());
+        ReaderText {
+            id: id.into(),
+            handle: None,
+            styled_text: if highlights.is_empty() {
+                styled
+            } else {
+                styled.with_highlights(highlights)
+            },
+            text,
+            document_order,
+        }
+    }
+}
+impl IntoElement for ReaderText {
+    type Element = Self;
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+impl Element for ReaderText {
+    type RequestLayoutState = gpui_base::TextSelectionHandle;
+    type PrepaintState = Hitbox;
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let handle = self.handle.clone().unwrap_or_else(|| {
+            window.with_element_state(
+                global_id.expect("ReaderText must have a stable element id"),
+                |retained: Option<gpui_base::TextSelectionHandle>, _| {
+                    let handle = retained.unwrap_or_else(|| {
+                        gpui_base::TextSelectionHandle::new(self.text.clone(), cx)
+                    });
+                    (handle.clone(), handle)
+                },
+            )
+        });
+        let (layout_id, ()) =
+            self.styled_text
+                .request_layout(global_id, inspector_id, window, cx);
+        (layout_id, handle)
+    }
+    fn prepaint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        handle: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.styled_text
+            .prepaint(global_id, inspector_id, bounds, &mut (), window, cx);
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        handle.register(
+            gpui_base::TextSelectionRegistration::new(hitbox.clone(), bounds)
+                .with_document_order(self.document_order)
+                .with_text_bounds(vec![bounds]),
+            window,
+            cx,
+        );
+        hitbox
+    }
+    fn paint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        handle: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let layout = self.styled_text.layout().clone();
+        let selected_text_before = gpui_base::TextSelection::selected_text(window, cx);
+        let projection = handle.update_runs(
+            &[gpui_base::TextSelectionRun::new(self.text.clone(), layout.clone(), bounds)
+                .with_document_order(self.document_order)],
+            cx,
+        );
+        if selected_text_before != gpui_base::TextSelection::selected_text(window, cx) {
+            window.refresh();
+        }
+        for range in projection.ranges().iter().flatten().cloned() {
+            paint_text_selection(&layout, range, window);
+        }
+        self.styled_text.paint(
+            global_id,
+            inspector_id,
+            bounds,
+            &mut (),
+            &mut (),
+            window,
+            cx,
+        );
+    }
+}
+/// Quad painting identical to gpui_base::SelectableText's selection pass.
+fn paint_text_selection(layout: &gpui::TextLayout, range: Range<usize>, window: &mut Window) {
+    let (Some(start), Some(end)) = (
+        layout.position_for_index(range.start),
+        layout.position_for_index(range.end),
+    ) else {
+        return;
+    };
+    let line_height = layout.line_height();
+    let bounds = layout.bounds();
+    let quads = if start.y == end.y {
+        vec![Bounds::from_corners(
+            start,
+            Point::new(end.x, end.y + line_height),
+        )]
+    } else {
+        let mut quads = vec![Bounds::from_corners(
+            start,
+            Point::new(bounds.right(), start.y + line_height),
+        )];
+        if end.y > start.y + line_height {
+            quads.push(Bounds::from_corners(
+                Point::new(bounds.left(), start.y + line_height),
+                Point::new(bounds.right(), end.y),
+            ));
+        }
+        quads.push(Bounds::from_corners(
+            Point::new(bounds.left(), end.y),
+            Point::new(end.x, end.y + line_height),
+        ));
+        quads
+    };
+    for quad in quads {
+        window.paint_quad(PaintQuad {
+            bounds: quad,
+            background: rgb(SELECTION).into(),
+            corner_radii: gpui::Corners::default(),
+            border_widths: gpui::Edges::default(),
+            border_color: transparent_black(),
+            border_style: gpui::BorderStyle::default(),
+        });
+    }
+}
+fn paragraph(
+    id: impl Into<ElementId>,
+    text: String,
+    order: usize,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+) -> Stateful<Div> {
     let id = id.into();
     div()
         .id(id.clone())
         .role(Role::Paragraph)
         .aria_label(text.clone())
-        .text_size(rems(16. / 14.))
-        .line_height(relative(1.7))
-        .child(gpui_base::SelectableText::new(id, text).document_order(order as u64))
+        .text_size(TEXT_READER)
+        .line_height(relative(1.75))
+        .child(ReaderText::new(id, text, order as u64, highlights))
 }
 impl Desktop {
     pub fn save_library_presentation(&mut self, cx: &mut Context<Self>) {
@@ -413,6 +586,7 @@ impl Desktop {
         self.reader_ui.find_open = false;
         self.reader_ui.info_open = false;
         self.reader_ui.processing_details_open = false;
+        self.reader_ui.toc_open = false;
         self.reader_ui.clear_find = true;
         self.reader_ui.layout = None;
         self.refresh_reader_data(cx);
@@ -801,98 +975,6 @@ impl Desktop {
         })
         .detach();
     }
-    pub fn reader_toolbar(&self, cx: &mut Context<Self>) -> Div {
-        let weak = cx.entity().downgrade();
-        let export_weak = weak.clone();
-        h_flex()
-            .gap_2()
-            .flex_wrap()
-            .child(
-                control("find-note")
-                    .label("查找")
-                    .accessibility_label("在笔记中查找，Command F")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_reader_find(window, cx))),
-            )
-            .child(
-                control("copy-note")
-                    .label("复制纯文本")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(preview) = &this.preview {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                preview.plain_text.clone(),
-                            ));
-                            this.message = Some("已复制纯文本，不含图片。".into());
-                            cx.notify();
-                        }
-                    })),
-            )
-            .child(
-                control("copy-note-format")
-                    .icon(IconName::ChevronDown)
-                    .accessibility_label("选择复制格式")
-                    .dropdown_menu(move |menu, _, _| {
-                        let weak = weak.clone();
-                        menu.item(PopupMenuItem::new("复制 Markdown 文本").on_click(
-                            move |_, _, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    if let Some(preview) = &this.preview {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            preview.markdown_text.clone(),
-                                        ));
-                                        this.message =
-                                            Some("已复制 Markdown 文本，不含图片引用。".into());
-                                        cx.notify();
-                                    }
-                                });
-                            },
-                        ))
-                    }),
-            )
-            .child(
-                control("export-note")
-                    .label(if self.exporting {
-                        "正在导出…"
-                    } else {
-                        "导出"
-                    })
-                    .disabled(self.exporting || self.preview.is_none())
-                    .dropdown_menu(move |menu, _, _| {
-                        let mut menu = menu;
-                        for (format, label) in [
-                            (course2md::config::OutputFormat::Md, "Markdown 包（含图片）"),
-                            (
-                                course2md::config::OutputFormat::Html,
-                                "网页文件（可独立阅读）",
-                            ),
-                            (
-                                course2md::config::OutputFormat::Json,
-                                "JSON 数据（不含图片文件）",
-                            ),
-                        ] {
-                            let weak = export_weak.clone();
-                            menu = menu.item(PopupMenuItem::new(label).on_click(
-                                move |_, window, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.export_note(format, window, cx)
-                                    });
-                                },
-                            ));
-                        }
-                        menu
-                    }),
-            )
-            .child(
-                control("note-files")
-                    .ghost()
-                    .icon(IconName::FolderOpen)
-                    .accessibility_label("在文件夹中显示这份笔记")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(preview) = &this.preview {
-                            cx.reveal_path(&preview.course.dir);
-                        }
-                    })),
-            )
-    }
     pub fn export_note(
         &mut self,
         format: course2md::config::OutputFormat,
@@ -1049,105 +1131,206 @@ impl Desktop {
             }))
             .h_full()
             .min_h_0()
+            .w_full()
             .gap_3();
-        let mut page = v_flex()
-            .id("reader-controls")
-            .gap_3()
-            .flex_shrink_0()
-            .max_h(px((f32::from(window.bounds().size.height) * 0.34).max(140.)))
-            .overflow_y_scroll();
-        let mut navigation = h_flex().gap_2().flex_wrap().child(
-            gpui_base::Tabs::new("reader-tabs")
-                .tab_group()
-                .key_context("ReaderViews")
-                .on_action(cx.listener(|this, _: &NextReaderView, window, cx| {
-                    this.select_reader_view((this.result_tab + 1) % 2, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &PreviousReaderView, window, cx| {
-                    this.select_reader_view((this.result_tab + 1) % 2, window, cx)
-                }))
-                .flex()
-                .gap_2()
-                .children(
-                    ["笔记", "截图"]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, label)| {
-                            let selected = self.result_tab == index;
-                            gpui_base::Tab::new(("reader-view", index))
-                                .selected(selected)
-                                .accessibility_label(label)
-                                .set_position(index + 1, 2)
-                                .track_focus(&self.reader_ui.view_focus[index])
-                                .tab_stop(selected)
-                                .min_h(rems(2.6))
-                                .h_auto()
-                                .px_3()
-                                .py_2()
-                                .text_size(rems(1.))
-                                .rounded_md()
-                                .border_2()
-                                .border_color(rgb(if selected { BLUE } else { LINE }))
-                                .bg(rgb(if selected { TINT } else { SURFACE }))
-                                .focus(|style| style.border_color(rgb(INK)).shadow_sm())
-                                .child(label)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.select_reader_view(index, window, cx)
-                                }))
-                        }),
-                ),
-        );
-        let headings = preview
+        let mut page = v_flex().id("reader-controls").w_full().min_w_0().gap_3().flex_shrink_0();
+        // 大字号下头区不再压进 34% 滚动帽：全部展开，正文区自己滚。
+        if self.preferences.application().font_scale < 1.5 {
+            page = page
+                .max_h(px((f32::from(window.bounds().size.height) * 0.34).max(140.)))
+                .overflow_y_scroll();
+        }
+        // v2 reader head (docs/ux-mock renderReader): back row, title, two meta
+        // lines and the capsule toolbar sit above the scrolling article.
+        let outline: Vec<(f64, String)> = preview
+            .document
+            .as_ref()
+            .and_then(|document| document.summary.as_ref())
+            .map(|summary| {
+                summary
+                    .outline
+                    .iter()
+                    .map(|item| (item.t, item.title.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let chapter_title = |seconds: Option<f64>| -> Option<String> {
+            let seconds = seconds?;
+            outline
+                .iter()
+                .find(|(time, _)| (time - seconds).abs() < 1.5)
+                .map(|(_, title)| title.clone())
+        };
+        let headings: Vec<(usize, String, Option<f64>)> = preview
             .blocks
             .iter()
             .enumerate()
             .filter_map(|(index, block)| {
-                if let PreviewBlock::Heading { text, .. } = block {
-                    Some((index, text.clone()))
+                if let PreviewBlock::Heading { text, seconds, .. } = block {
+                    Some((
+                        index,
+                        chapter_title(*seconds).unwrap_or_else(|| text.clone()),
+                        *seconds,
+                    ))
                 } else {
                     None
                 }
             })
-            .collect::<Vec<_>>();
-        if !headings.is_empty() {
-            let weak = cx.weak_entity();
-            navigation = navigation.child(control("note-contents").label("目录").dropdown_menu(
-                move |menu, _, _| {
-                    let mut menu = menu;
-                    for (index, text) in &headings {
-                        let index = *index;
-                        let weak = weak.clone();
-                        menu = menu.item(PopupMenuItem::new(text.clone()).on_click(
-                            move |_, _, cx| {
-                                let _ = weak
-                                    .update(cx, |this, cx| this.jump_reader_block(index, 0., cx));
-                            },
-                        ));
-                    }
-                    menu
-                },
-            ));
+            .collect();
+        page = page.child(
+            h_flex()
+                .gap_3()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    quiet("reader-back")
+                        .icon(IconName::ArrowLeft)
+                        .label("我的笔记")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.navigate(this.result_origin, cx)
+                        })),
+                )
+                .child(
+                    theme::accessible_text("reader-back-hint", "保留当前筛选与阅读位置")
+                        .text_size(TEXT_AUX)
+                        .text_color(rgb(FAINT)),
+                ),
+        );
+        page = page.child(
+            theme::accessible_text("reader-title", preview.course.title.clone())
+                .role(Role::Heading)
+                .w_full()
+                .whitespace_normal()
+                .text_size(TEXT_TITLE)
+                .font_weight(FontWeight::SEMIBOLD),
+        );
+        // Meta line 1: 作者 · 时长 · 平台 BV 号 · 打开原视频；无数据的字段省略。
+        let mut facts: Vec<String> = Vec::new();
+        for (label, value) in &preview.metadata {
+            if label == "来源" || value.trim().is_empty() {
+                continue;
+            }
+            facts.push(if label == "原稿" {
+                format!("{label}：{value}")
+            } else {
+                value.clone()
+            });
         }
+        if let Some(document) = &preview.document {
+            // meta.id 是内部来源身份（online:bilibili:9:BV…），展示用最末段。
+            let id = document.meta.id.rsplit(':').next().unwrap_or("").trim();
+            let platform = match document.meta.extractor.as_str() {
+                "local" => "本地视频".to_owned(),
+                "bilibili" if !id.is_empty() => format!("Bilibili {id}"),
+                "youtube" if !id.is_empty() => format!("YouTube {id}"),
+                "" => String::new(),
+                other => {
+                    let mut chars = other.chars();
+                    let name = chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>())
+                        .unwrap_or_default()
+                        + chars.as_str();
+                    if id.is_empty() { name } else { format!("{name} {id}") }
+                }
+            };
+            if !platform.is_empty() {
+                facts.push(platform);
+            }
+        }
+        let mut meta_facts = h_flex().gap_2().flex_wrap().items_baseline();
+        if !facts.is_empty() {
+            meta_facts = meta_facts.child(
+                theme::accessible_text("reader-facts", facts.join(" · "))
+                    .text_size(TEXT_AUX)
+                    .text_color(rgb(GRAY)),
+            );
+        }
+        if let Some(source) = self.reader_source() {
+            match &source {
+                nav::SourceTarget::Web(url) => {
+                    meta_facts = meta_facts.child(
+                        quiet("reader-source")
+                            .icon(icons::external_link())
+                            .label("打开原视频")
+                            .min_h(rems(1.6))
+                            .accessibility_label(format!("打开原视频：{url}"))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.open_reader_source(None, cx)),
+                            ),
+                    );
+                }
+                nav::SourceTarget::Local(path) => {
+                    let exists = path.is_file();
+                    meta_facts = meta_facts
+                        .child(
+                            theme::accessible_text(
+                                "local-video-path",
+                                format!("原视频：{}", path.display()),
+                            )
+                            .text_size(TEXT_AUX)
+                            .text_color(rgb(GRAY))
+                            .min_w_0(),
+                        )
+                        .when(exists, |row| {
+                            row.child(
+                                quiet("reader-source")
+                                    .label("打开原视频")
+                                    .min_h(rems(1.6))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_reader_source(None, cx)
+                                    })),
+                            )
+                        })
+                        .when(!exists, |row| {
+                            row.child(
+                                theme::accessible_text(
+                                    "missing-original-video",
+                                    "原视频已移动或暂时不可访问；笔记仍可阅读。",
+                                )
+                                .text_size(TEXT_AUX)
+                                .text_color(rgb(GRAY)),
+                            )
+                        })
+                        .child(
+                            quiet("relocate-reader-source")
+                                .label(if self.reader_ui.source_loading {
+                                    "正在核对视频…"
+                                } else {
+                                    "重新定位原视频"
+                                })
+                                .min_h(rems(1.6))
+                                .disabled(self.reader_ui.source_loading)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.relocate_reader_source(window, cx)
+                                })),
+                        );
+                }
+            }
+        }
+        if !facts.is_empty() || self.reader_source().is_some() {
+            page = page.child(meta_facts);
+        }
+        // Meta line 2: 版本 · 生成日期 · 选择版本 · 课程信息。
         if let Some(manifest) = &preview.course.manifest {
-            navigation = navigation.child(
+            let stamp = nav::timestamp_utc(manifest.created_at_ms);
+            let date = stamp.get(..10).unwrap_or(&stamp).to_owned();
+            let mut meta_version = h_flex().gap_2().flex_wrap().items_baseline().child(
                 theme::accessible_text(
                     "reading-version",
-                    format!(
-                        "版本 {} · {}",
-                        manifest.revision,
-                        nav::timestamp_utc(manifest.created_at_ms)
-                    ),
+                    format!("版本 {} · {date} 生成", manifest.revision),
                 )
-                .text_sm()
-                .text_color(rgb(MUTED)),
+                .text_size(TEXT_AUX)
+                .text_color(rgb(GRAY)),
             );
             if self.reader_ui.versions.len() > 1 {
                 let weak = cx.weak_entity();
                 let versions = self.reader_ui.versions.clone();
                 let current = preview.course.dir.clone();
-                navigation = navigation.child(
-                    control("choose-note-version")
+                meta_version = meta_version.child(
+                    quiet("choose-note-version")
                         .label("选择版本")
+                        .min_h(rems(1.6))
                         .disabled(self.reading)
                         .dropdown_menu(move |menu, _, _| {
                             let mut menu = menu;
@@ -1171,96 +1354,199 @@ impl Desktop {
                         }),
                 );
             }
-        }
-        page = page.child(navigation);
-        let mut metadata = h_flex().gap_3().flex_wrap();
-        for (index, (label, value)) in preview
-            .metadata
-            .iter()
-            .filter(|(label, value)| label != "来源" && !value.trim().is_empty())
-            .enumerate()
-        {
-            metadata = metadata.child(
-                theme::accessible_text(("note-metadata", index), format!("{label}：{value}"))
-                    .text_sm()
-                    .text_color(rgb(MUTED)),
-            );
-        }
-        if let Some(source) = self.reader_source() {
-            match &source {
-                nav::SourceTarget::Web(url) => {
-                    metadata = metadata.child(
-                        control("reader-source")
-                            .ghost()
-                            .label("打开原视频")
-                            .accessibility_label(format!("打开原视频：{url}"))
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.open_reader_source(None, cx)),
-                            ),
-                    );
-                }
-                nav::SourceTarget::Local(path) => {
-                    let exists = path.is_file();
-                    metadata = metadata
-                        .child(
-                            theme::accessible_text(
-                                "local-video-path",
-                                format!("原视频：{}", path.display()),
-                            )
-                            .text_sm()
-                            .min_w_0(),
-                        )
-                        .when(exists, |row| {
-                            row.child(
-                                control("reader-source")
-                                    .ghost()
-                                    .label("打开原视频")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.open_reader_source(None, cx)
-                                    })),
-                            )
-                        })
-                        .when(!exists, |row| {
-                            row.child(
-                                theme::accessible_text(
-                                    "missing-original-video",
-                                    "原视频已移动或暂时不可访问；笔记仍可阅读。",
-                                )
-                                .text_sm(),
-                            )
-                        })
-                        .child(
-                            control("relocate-reader-source")
-                                .ghost()
-                                .label(if self.reader_ui.source_loading {
-                                    "正在核对视频…"
-                                } else {
-                                    "重新定位原视频"
-                                })
-                                .disabled(self.reader_ui.source_loading)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.relocate_reader_source(window, cx)
-                                })),
-                        );
-                }
-            }
-        }
-        if preview.course.manifest.is_some() {
-            metadata = metadata.child(
-                control("reader-information")
-                    .ghost()
+            meta_version = meta_version.child(
+                quiet("reader-information")
                     .label(if self.reader_ui.info_open {
-                        "收起生成信息"
+                        "收起课程信息"
                     } else {
-                        "生成信息"
+                        "课程信息"
                     })
+                    .min_h(rems(1.6))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.reader_ui.info_open = !this.reader_ui.info_open;
                         cx.notify();
                     })),
             );
+            page = page.child(meta_version);
         }
-        page = page.child(metadata);
+        let mut toolbar = h_flex().gap_2().flex_wrap().items_center().child(
+            gpui_base::Tabs::new("reader-tabs")
+                .tab_group()
+                .key_context("ReaderViews")
+                .on_action(cx.listener(|this, _: &NextReaderView, window, cx| {
+                    this.select_reader_view((this.result_tab + 1) % 2, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &PreviousReaderView, window, cx| {
+                    this.select_reader_view((this.result_tab + 1) % 2, window, cx)
+                }))
+                .flex()
+                .flex_shrink_0()
+                .gap(px(2.))
+                .p(px(2.))
+                .rounded_full()
+                .bg(rgb(SEGMENT_TRACK))
+                .children(
+                    ["笔记", "截图"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, label)| {
+                            let selected = self.result_tab == index;
+                            gpui_base::Tab::new(("reader-view", index))
+                                .selected(selected)
+                                .accessibility_label(label)
+                                .set_position(index + 1, 2)
+                                .track_focus(&self.reader_ui.view_focus[index])
+                                .tab_stop(selected)
+                                .min_h(rems(2.286))
+                                .h_auto()
+                                .px(px(14.))
+                                .py(px(2.))
+                                .text_size(TEXT_BODY)
+                                .rounded(RADIUS_PILL)
+                                .text_color(rgb(if selected { INK } else { GRAY }))
+                                .when(selected, |tab| {
+                                    tab.bg(rgb(SURFACE))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .shadow(shadow_segment_selected())
+                                })
+                                .focus(|style| style.border_color(rgb(INK)).shadow_sm())
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.select_reader_view(index, window, cx)
+                                }))
+                        }),
+                ),
+        );
+        toolbar = toolbar.child(div().flex_1());
+        toolbar = toolbar.child(
+            quiet("find-note")
+                .icon(icons::search())
+                .label("查找")
+                .accessibility_label("在笔记中查找，Command F")
+                .on_click(cx.listener(|this, _, window, cx| this.open_reader_find(window, cx))),
+        );
+        if !headings.is_empty() {
+            let toc_on = self.reader_ui.toc_open;
+            toolbar = toolbar.child(
+                control("note-contents")
+                    .rounded(RADIUS_PILL)
+                    .min_h(rems(2.286))
+                    .px(px(12.))
+                    .bg(rgb(if toc_on { BADGE_PROGRESS_BG } else { SURFACE }))
+                    .border_color(rgb(CONTROL))
+                    .when(toc_on, |button| button.font_weight(FontWeight::SEMIBOLD))
+                    .accessibility_label(if toc_on { "目录：开" } else { "目录：关" })
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .items_center()
+                            .child(
+                                div()
+                                    .w(px(14.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .justify_center()
+                                    .text_color(if toc_on {
+                                        rgb(INK)
+                                    } else {
+                                        rgba(0x00000000)
+                                    })
+                                    .child("✓"),
+                            )
+                            .child(icons::toc().size(px(16.)))
+                            .child("目录"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reader_ui.toc_open = !this.reader_ui.toc_open;
+                        cx.notify();
+                    })),
+            );
+        }
+        let copy_weak = cx.entity().downgrade();
+        toolbar = toolbar.child(
+            outline_pill("copy-note")
+                .icon(icons::content_copy())
+                .label("复制纯文本")
+                .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
+                .dropdown_menu(move |menu, _, _| {
+                    let plain = copy_weak.clone();
+                    let markdown = copy_weak.clone();
+                    menu.item(PopupMenuItem::new("复制纯文本").on_click(move |_, _, cx| {
+                        let _ = plain.update(cx, |this, cx| {
+                            if let Some(preview) = &this.preview {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    preview.plain_text.clone(),
+                                ));
+                                this.message = Some("已复制纯文本，不含图片。".into());
+                                cx.notify();
+                            }
+                        });
+                    }))
+                    .item(PopupMenuItem::new("复制 Markdown 文本").on_click(
+                        move |_, _, cx| {
+                            let _ = markdown.update(cx, |this, cx| {
+                                if let Some(preview) = &this.preview {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        preview.markdown_text.clone(),
+                                    ));
+                                    this.message =
+                                        Some("已复制 Markdown 文本，不含图片引用。".into());
+                                    cx.notify();
+                                }
+                            });
+                        },
+                    ))
+                }),
+        );
+        let export_weak = cx.entity().downgrade();
+        toolbar = toolbar.child(
+            outline_pill("export-note")
+                .icon(icons::file_upload())
+                .label(if self.exporting {
+                    "正在导出…"
+                } else {
+                    "导出"
+                })
+                .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
+                .disabled(self.exporting || self.preview.is_none())
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu;
+                    for (format, label) in [
+                        (course2md::config::OutputFormat::Md, "Markdown 包（含图片）"),
+                        (
+                            course2md::config::OutputFormat::Html,
+                            "网页文件（可独立阅读）",
+                        ),
+                        (
+                            course2md::config::OutputFormat::Json,
+                            "JSON 数据（不含图片文件）",
+                        ),
+                    ] {
+                        let weak = export_weak.clone();
+                        menu = menu.item(PopupMenuItem::new(label).on_click(
+                            move |_, window, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.export_note(format, window, cx)
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                }),
+        );
+        toolbar = toolbar.child(
+            control("note-files")
+                .ghost()
+                .rounded_full()
+                .icon(IconName::FolderOpen)
+                .accessibility_label("在文件夹中显示这份笔记")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(preview) = &this.preview {
+                        cx.reveal_path(&preview.course.dir);
+                    }
+                })),
+        );
+        page = page.child(toolbar);
         if self.reader_ui.info_open
             && let Some(manifest) = &preview.course.manifest
         {
@@ -1352,36 +1638,71 @@ impl Desktop {
             } else if count == 0 {
                 Some("未找到匹配内容".into())
             } else {
-                Some(format!("{} / {count} 处", self.reader_ui.match_index + 1))
+                Some(format!("第 {} 处，共 {count} 处", self.reader_ui.match_index + 1))
             };
             page = page.child(
                 h_flex()
+                    .items_center()
                     .gap_2()
-                    .flex_wrap()
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(CONTROL))
+                    .rounded_full()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .min_h(rems(2.571))
+                    .child(icons::search().size(px(16.)).text_color(rgb(GRAY)))
                     .child(
                         div()
-                            .min_w(px(160.))
+                            .min_w(rems(6.))
                             .flex_1()
-                            .child(Input::new(&self.reader_ui.find).aria_label("在这份笔记中查找")),
+                            .child(
+                                Input::new(&self.reader_ui.find)
+                                    .aria_label("在这份笔记中查找")
+                                    .appearance(false)
+                                    .w_full()
+                                    .h_auto()
+                                    .min_h(rems(1.6)),
+                            ),
                     )
                     .when_some(status, |row, status: String| {
-                        row.child(theme::accessible_text("find-status", status).text_sm())
+                        row.child(
+                            theme::accessible_text("find-status", status)
+                                .text_size(TEXT_AUX)
+                                .text_color(rgb(GRAY))
+                                .flex_shrink_0(),
+                        )
                     })
                     .child(
                         control("previous-match")
-                            .label("上一处")
+                            .ghost()
+                            .rounded_full()
+                            .icon(IconName::ArrowUp)
+                            .accessibility_label("上一处")
                             .disabled(count == 0)
                             .on_click(cx.listener(|this, _, _, cx| this.move_reader_match(-1, cx))),
                     )
                     .child(
                         control("next-match")
-                            .label("下一处")
+                            .ghost()
+                            .rounded_full()
+                            .icon(IconName::ArrowDown)
+                            .accessibility_label("下一处")
                             .disabled(count == 0)
                             .on_click(cx.listener(|this, _, _, cx| this.move_reader_match(1, cx))),
                     )
-                    .child(control("close-find").label("关闭查找").on_click(
-                        cx.listener(|this, _, window, cx| this.close_reader_find(window, cx)),
-                    )),
+                    .child(
+                        control("close-find")
+                            .ghost()
+                            .rounded_full()
+                            .icon(IconName::Close)
+                            .accessibility_label("关闭查找")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.close_reader_find(window, cx)
+                                }),
+                            ),
+                    ),
             );
             if let Some(found) = self
                 .reader_ui
@@ -1413,9 +1734,13 @@ impl Desktop {
             }
         }
         if let Some(notice) = processing_notice(&preview.processing_issues) {
-            let mut problem = v_flex()
-                .gap_2()
-                .child(theme::accessible_text("reader-incomplete-processing", notice).text_sm());
+            let mut problem = v_flex().gap_2().child(
+                h_flex().gap_2().items_center().flex_wrap().child(
+                    badge(BadgeKind::Warning).child("需要处理"),
+                ).child(
+                    theme::accessible_text("reader-incomplete-processing", notice).text_sm(),
+                ),
+            );
             let task_id = preview
                 .course
                 .manifest
@@ -1429,7 +1754,7 @@ impl Desktop {
             let mut actions = h_flex().gap_2().flex_wrap();
             if let Some(id) = task_id {
                 actions = actions.child(
-                    control("reader-view-incomplete-task")
+                    outline_pill("reader-view-incomplete-task")
                         .label("查看任务")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.save_reading_position(cx);
@@ -1449,8 +1774,7 @@ impl Desktop {
             });
             if has_details {
                 actions = actions.child(
-                    control("reader-processing-details")
-                        .ghost()
+                    quiet("reader-processing-details")
                         .label(if self.reader_ui.processing_details_open {
                             "收起处理详情"
                         } else {
@@ -1505,7 +1829,7 @@ impl Desktop {
                         .map(|(index, issue)| {
                             theme::accessible_text(("reader-issue", index), issue.clone())
                                 .text_sm()
-                                .text_color(rgb(0x855015))
+                                .text_color(rgb(WARNING))
                         }),
                 ),
             );
@@ -1513,7 +1837,7 @@ impl Desktop {
         if files_need_reload(&preview, &self.reader_ui.issues, &self.reader_ui.frames) {
             let course = preview.course.clone();
             page = page.child(
-                control("reload-reader-files")
+                outline_pill("reload-reader-files")
                     .label("重新读取本版文件")
                     .self_start()
                     .disabled(self.reading)
@@ -1524,7 +1848,7 @@ impl Desktop {
         }
         if let Some(task) = self.reader_screenshot_retry() {
             page = page.child(
-                control("reader-retry-screenshots")
+                outline_pill("reader-retry-screenshots")
                     .label("仅补截图")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.save_reading_position(cx);
@@ -1556,28 +1880,123 @@ impl Desktop {
                     .on_click(move |_, _, cx| cx.reveal_path(&path)),
             );
         }
-        let mut reader = v_flex()
+        // Find highlights group per block; the current match reads stronger.
+        let mut find_marks: BTreeMap<usize, Vec<(Range<usize>, bool)>> = BTreeMap::new();
+        if self.reader_ui.find_open {
+            for (position, found) in self.reader_ui.matches.iter().enumerate() {
+                find_marks
+                    .entry(found.block)
+                    .or_default()
+                    .push((found.range.clone(), position == self.reader_ui.match_index));
+            }
+        }
+        let highlight_runs = |index: usize| -> Vec<(Range<usize>, HighlightStyle)> {
+            find_marks
+                .get(&index)
+                .map(|marks| {
+                    marks
+                        .iter()
+                        .map(|(range, current)| {
+                            (
+                                range.clone(),
+                                if *current {
+                                    HighlightStyle {
+                                        background_color: Some(rgb(FIND_CURRENT).into()),
+                                        underline: Some(UnderlineStyle {
+                                            thickness: px(1.),
+                                            color: Some(rgb(FIND_CURRENT_LINE).into()),
+                                            wavy: false,
+                                        }),
+                                        ..Default::default()
+                                    }
+                                } else {
+                                    HighlightStyle {
+                                        background_color: Some(rgb(FIND_HIGHLIGHT).into()),
+                                        ..Default::default()
+                                    }
+                                },
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (top_index, _) = self.reader_scroll.logical_scroll_top();
+        let current_chapter = headings
+            .iter()
+            .filter(|(index, _, _)| *index <= top_index)
+            .last()
+            .map(|(index, _, _)| *index);
+        // Article renders directly on the canvas (no white sheet); the summary is
+        // the one white card in the reading flow.
+        let mut article = v_flex()
             .id("note-reader")
             .role(Role::Document)
             .aria_label(preview.course.title.clone())
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .w_full()
             .overflow_y_scroll()
             .track_scroll(&self.reader_scroll)
             .gap_4()
-            .px_4()
-            .py_4()
-            .bg(rgb(SURFACE));
+            .py_2();
         let source = self.reader_source();
         if self.result_tab == 0 {
+            let summary_paragraphs: Vec<(usize, String)> = preview
+                .blocks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, block)| match block {
+                    PreviewBlock::Paragraph { text, anchor }
+                        if anchor == "summary-tldr" || anchor.starts_with("key-point-") =>
+                    {
+                        Some((index, text.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !summary_paragraphs.is_empty() {
+                article = article.child(
+                    v_flex()
+                        .id("reader-summary")
+                        .w_full()
+                        .gap_2()
+                        .p_4()
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(CARD_LINE))
+                        .rounded(RADIUS_CARD)
+                        .child(
+                            theme::accessible_text("reader-summary-label", "摘要")
+                                .text_size(TEXT_AUX)
+                                .text_color(rgb(GRAY))
+                                .font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .children(summary_paragraphs.iter().map(|(index, text)| {
+                            div()
+                                .text_size(TEXT_BODY)
+                                .line_height(relative(1.6))
+                                .child(ReaderText::new(
+                                    SharedString::from(format!("summary-text-{index}")),
+                                    text.clone(),
+                                    *index as u64,
+                                    highlight_runs(*index),
+                                ))
+                        })),
+                );
+            }
             for (index, block) in preview.blocks.iter().enumerate() {
-                let active = self.reader_ui.find_open
-                    && self
-                        .reader_ui
-                        .matches
-                        .get(self.reader_ui.match_index)
-                        .is_some_and(|found| found.block == index);
+                let consumed_by_summary = match block {
+                    PreviewBlock::Heading { anchor, .. } => anchor == "summary",
+                    PreviewBlock::Paragraph { anchor, .. } => {
+                        anchor == "summary-tldr" || anchor.starts_with("key-point-")
+                    }
+                    _ => false,
+                };
+                if consumed_by_summary {
+                    continue;
+                }
                 let view = match block {
                     PreviewBlock::Heading {
                         text,
@@ -1587,6 +2006,39 @@ impl Desktop {
                         let url = source.as_ref().and_then(|source| {
                             seconds.and_then(|seconds| nav::seek_url(source, seconds))
                         });
+                        let marks = highlight_runs(index);
+                        let outlined = chapter_title(*seconds).filter(|_| text != "摘要");
+                        // 无大纲且标题文本就是时间戳时，chip 独自承担章节标题。
+                        let bare_timestamp = outlined.is_none()
+                            && seconds.is_some_and(|s| course2md::render::fmt_ts(s) == *text);
+                        let display = outlined.unwrap_or_else(|| text.clone());
+                        let heading: Option<AnyElement> = if bare_timestamp && marks.is_empty() {
+                            None
+                        } else if marks.is_empty() {
+                            Some(
+                                theme::accessible_text(("reader-heading", index), display)
+                                    .role(Role::Heading)
+                                    .text_size(TEXT_READER)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .into_any_element(),
+                            )
+                        } else {
+                            Some(
+                                div()
+                                    .id(("reader-heading-wrap", index))
+                                    .role(Role::Heading)
+                                    .aria_label(text.clone())
+                                    .text_size(TEXT_READER)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(ReaderText::new(
+                                        ("reader-heading-marks", index),
+                                        text.clone(),
+                                        index as u64,
+                                        marks,
+                                    ))
+                                    .into_any_element(),
+                            )
+                        };
                         v_flex()
                             .id(SharedString::from(anchor.clone()))
                             .gap_2()
@@ -1595,20 +2047,34 @@ impl Desktop {
                                 h_flex()
                                     .flex_wrap()
                                     .gap_2()
-                                    .child(
-                                        theme::accessible_text(
-                                            ("reader-heading", index),
-                                            text.clone(),
-                                        )
-                                        .role(Role::Heading)
-                                        .text_lg()
-                                        .font_weight(FontWeight::SEMIBOLD),
-                                    )
+                                    .items_baseline()
+                                    .when_some(*seconds, |row, seconds| {
+                                        let chip = div()
+                                            .min_h(rems(1.571))
+                                            .px(px(6.))
+                                            .rounded(RADIUS_SMALL)
+                                            .border_1()
+                                            .border_color(rgb(HAIRLINE))
+                                            .bg(rgb(SURFACE))
+                                            .text_size(TEXT_AUX)
+                                            .text_color(rgb(GRAY))
+                                            .flex_shrink_0()
+                                            .whitespace_nowrap()
+                                            .child(course2md::render::fmt_ts(seconds));
+                                        row.child(if bare_timestamp {
+                                            chip.id(("reader-heading", index))
+                                                .role(Role::Heading)
+                                                .aria_label(text.clone())
+                                        } else {
+                                            chip.id(("reader-heading-chip", index))
+                                        })
+                                    })
+                                    .children(heading)
                                     .when_some(url, |row, url| {
                                         row.child(
-                                            control(("seek", index))
-                                                .ghost()
+                                            quiet(("seek", index))
                                                 .label("从此处观看")
+                                                .min_h(rems(1.6))
                                                 .accessibility_label(format!("在原视频打开 {text}"))
                                                 .on_click(move |_, _, cx| cx.open_url(&url)),
                                         )
@@ -1636,17 +2102,18 @@ impl Desktop {
                                             ),
                                         )
                                         .text_sm()
-                                        .text_color(rgb(0x855015))
+                                        .text_color(rgb(WARNING))
                                     }),
                             )
-                            .when(active, |view| view.bg(rgb(0xfff0db)))
                             .into_any_element()
                     }
-                    PreviewBlock::Paragraph { text, anchor } => {
-                        paragraph(SharedString::from(anchor.clone()), text.clone(), index)
-                            .when(active, |view| view.bg(rgb(0xfff0db)))
-                            .into_any_element()
-                    }
+                    PreviewBlock::Paragraph { text, anchor } => paragraph(
+                        SharedString::from(anchor.clone()),
+                        text.clone(),
+                        index,
+                        highlight_runs(index),
+                    )
+                    .into_any_element(),
                     PreviewBlock::Image(path) => {
                         let frame_index = self
                             .reader_ui
@@ -1655,13 +2122,13 @@ impl Desktop {
                             .position(|frame| frame.path.as_ref() == Some(path));
                         let frame = frame_index.and_then(|i| self.reader_ui.frames.get(i));
                         if frame_index.is_none() && !self.reader_ui.data_loading {
-                            reader = reader.child(
+                            article = article.child(
                                 theme::accessible_text(
                                     ("unreadable-inline-image", index),
                                     "这张截图无法读取；对应正文仍可阅读。",
                                 )
                                 .text_sm()
-                                .text_color(rgb(0x855015)),
+                                .text_color(rgb(WARNING)),
                             );
                             continue;
                         }
@@ -1670,74 +2137,122 @@ impl Desktop {
                                 frame_label(&preview.course.title, frame, frame_index.unwrap())
                             })
                             .unwrap_or_else(|| format!("{}，正文图片", preview.course.title));
-                        let ratio = frame
-                            .map(|frame| frame.width as f32 / frame.height.max(1) as f32)
-                            .unwrap_or(16. / 9.);
-                        let width = (f32::from(window.bounds().size.width) - 320.)
-                            .max(180.)
-                            .min(980.);
-                        control(("note-image", index))
-                            .ghost()
-                            .p_0()
+                        let seconds = frame.and_then(|frame| frame.seconds);
+                        let seek = seconds.and_then(|seconds| {
+                            source
+                                .as_ref()
+                                .and_then(|source| nav::seek_url(source, seconds))
+                        });
+                        v_flex()
                             .w_full()
-                            .h(px((width / ratio).min(540.)))
-                            .accessibility_label(format!("放大{label}"))
-                            .disabled(frame_index.is_none())
+                            .bg(rgb(SURFACE))
+                            .border_1()
+                            .border_color(rgb(CARD_LINE))
+                            .rounded(RADIUS_CARD)
+                            .overflow_hidden()
                             .child(
-                                img(path.clone())
-                                    .size_full()
-                                    .object_fit(ObjectFit::Contain)
-                                    .with_fallback(|| {
-                                        theme::accessible_text(
-                                            "failed-reader-image",
-                                            "这张截图无法读取；对应正文仍可阅读。",
+                                control(("note-image", index))
+                                    .ghost()
+                                    .p_0()
+                                    .w_full()
+                                    .aspect_ratio(16. / 9.)
+                                    .accessibility_label(format!("放大{label}"))
+                                    .disabled(frame_index.is_none())
+                                    .child(
+                                        img(path.clone())
+                                            .size_full()
+                                            .object_fit(ObjectFit::Cover)
+                                            .with_fallback(|| {
+                                                theme::accessible_text(
+                                                    "failed-reader-image",
+                                                    "这张截图无法读取；对应正文仍可阅读。",
+                                                )
+                                                .into_any_element()
+                                            }),
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(index) = frame_index {
+                                            this.open_reader_image(index, window, cx);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .flex_wrap()
+                                    .px(px(12.))
+                                    .py(px(8.))
+                                    .border_t_1()
+                                    .border_color(rgb(CARD_LINE))
+                                    .text_size(TEXT_AUX)
+                                    .text_color(rgb(GRAY))
+                                    .child(theme::accessible_text(
+                                        ("figure-caption", index),
+                                        seconds
+                                            .map(|seconds| {
+                                                format!(
+                                                    "视频截图 · {}",
+                                                    course2md::render::fmt_ts(seconds)
+                                                )
+                                            })
+                                            .unwrap_or_else(|| "视频截图".into()),
+                                    ))
+                                    .child(div().flex_1())
+                                    .when_some(seek, |row, url| {
+                                        row.child(
+                                            quiet(("figure-watch", index))
+                                                .label("打开原视频从此处观看")
+                                                .min_h(rems(1.6))
+                                                .on_click(move |_, _, cx| cx.open_url(&url)),
                                         )
-                                        .into_any_element()
                                     }),
                             )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if let Some(index) = frame_index {
-                                    this.open_reader_image(index, window, cx);
-                                }
-                            }))
                             .into_any_element()
                     }
                 };
-                reader = reader.child(view);
+                article = article.child(view);
             }
         } else {
             if self.reader_ui.data_loading && self.reader_ui.frames.is_empty() {
-                reader = reader.child(theme::accessible_text(
+                article = article.child(theme::accessible_text(
                     "loading-images",
                     "正在读取这份笔记的图片…",
                 ));
             } else if self.reader_ui.frames.is_empty() {
-                reader = reader.child(theme::accessible_text(
+                article = article.child(theme::accessible_text(
                     "no-note-images",
                     "这份笔记没有截图。正文可在“笔记”中阅读。",
                 ));
             }
+            // Shot grid follows the mock's flex-wrap recipe: 12rem minimum cards
+            // wrap to two columns when the column narrows.
+            let mut grid = h_flex().w_full().min_w_0().flex_wrap().gap_4();
             for (index, frame) in self.reader_ui.frames.iter().enumerate() {
                 let label = frame_label(&preview.course.title, frame, index);
-                let mut entry = v_flex()
+                let mut card = v_flex()
                     .id(SharedString::from(frame.anchor.clone()))
-                    .gap_2()
-                    .child(
-                        theme::accessible_text(("frame-title", index), label.clone())
-                            .role(Role::Heading),
-                    );
+                    .flex_1()
+                    .flex_basis(rems(12.))
+                    .min_w(rems(12.))
+                    .max_w(rems(17.))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(CARD_LINE))
+                    .rounded(RADIUS_CARD)
+                    .overflow_hidden();
                 if let Some(path) = &frame.path {
-                    entry = entry.child(
+                    card = card.child(
                         control(("screenshot", index))
                             .ghost()
                             .p_0()
                             .w_full()
-                            .h(rems(22.))
+                            .aspect_ratio(16. / 9.)
                             .accessibility_label(format!("放大{label}"))
                             .child(
                                 img(path.clone())
                                     .size_full()
-                                    .object_fit(ObjectFit::Contain)
+                                    .object_fit(ObjectFit::Cover)
                                     .with_fallback(|| {
                                         theme::accessible_text(
                                             "failed-reader-image",
@@ -1751,35 +2266,59 @@ impl Desktop {
                             })),
                     );
                 } else {
-                    entry = entry.child(
-                        theme::accessible_text(
-                            ("missing-frame", index),
-                            "这张图片无法读取；可继续阅读对应正文。",
-                        )
-                        .text_color(rgb(0x855015)),
+                    card = card.child(
+                        div().p_3().child(
+                            theme::accessible_text(
+                                ("missing-frame", index),
+                                "这张图片无法读取；可继续阅读对应正文。",
+                            )
+                            .text_size(TEXT_AUX)
+                            .text_color(rgb(WARNING)),
+                        ),
                     );
                 }
+                let mut card_body = v_flex().p_3().gap(px(6.)).child(
+                    theme::accessible_text(
+                        ("frame-title", index),
+                        frame
+                            .seconds
+                            .map(course2md::render::fmt_ts)
+                            .unwrap_or_else(|| format!("第 {} 张图片", index + 1)),
+                    )
+                    .role(Role::Heading)
+                    .font_weight(FontWeight::SEMIBOLD),
+                );
                 if let Some(caption) = &frame.caption {
-                    entry = entry.child(paragraph(
-                        ("frame-caption", index),
-                        format!("原图说明：{caption}"),
-                        index,
-                    ));
+                    card_body = card_body.child(
+                        div()
+                            .w_full()
+                            .whitespace_normal()
+                            .text_ellipsis()
+                            .line_clamp(2)
+                            .text_size(TEXT_AUX)
+                            .text_color(rgb(GRAY))
+                            .child(format!("原图说明：{caption}")),
+                    );
                 }
                 if !frame.transcript.is_empty() {
-                    entry = entry.child(paragraph(
-                        ("frame-transcript", index),
-                        format!(
-                            "{}：{}",
-                            if frame.seconds.is_some() {
-                                "同期转录"
-                            } else {
-                                "相邻正文"
-                            },
-                            frame.transcript
-                        ),
-                        index,
-                    ));
+                    card_body = card_body.child(
+                        div()
+                            .w_full()
+                            .whitespace_normal()
+                            .text_ellipsis()
+                            .line_clamp(3)
+                            .text_size(TEXT_AUX)
+                            .text_color(rgb(GRAY))
+                            .child(format!(
+                                "{}：{}",
+                                if frame.seconds.is_some() {
+                                    "同期转录"
+                                } else {
+                                    "相邻正文"
+                                },
+                                frame.transcript
+                            )),
+                    );
                 }
                 let body_index = frame.body_anchor.as_ref().and_then(|anchor| {
                     preview
@@ -1791,8 +2330,9 @@ impl Desktop {
                 let mut actions = h_flex().gap_2().flex_wrap();
                 if let Some(body_index) = body_index {
                     actions = actions.child(
-                        control(("frame-to-body", index))
+                        outline_pill(("frame-to-body", index))
                             .label("在笔记中查看")
+                            .min_h(rems(2.286))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.jump_reader_block(body_index, 0., cx)
                             })),
@@ -1804,9 +2344,9 @@ impl Desktop {
                         .and_then(|seconds| nav::seek_url(source, seconds))
                 }) {
                     actions = actions.child(
-                        control(("frame-to-source", index))
-                            .ghost()
+                        quiet(("frame-to-source", index))
                             .label("从此处观看")
+                            .min_h(rems(2.286))
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     );
                 } else if source.as_ref().is_some_and(|source| match source {
@@ -1814,18 +2354,128 @@ impl Desktop {
                     nav::SourceTarget::Local(path) => path.is_file(),
                 }) {
                     actions = actions.child(
-                        control(("frame-open-original", index))
-                            .ghost()
+                        quiet(("frame-open-original", index))
                             .label("打开原视频")
+                            .min_h(rems(2.286))
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.open_reader_source(None, cx)),
                             ),
                     );
                 }
-                reader = reader.child(entry.child(actions));
+                grid = grid.child(card.child(card_body.child(actions)));
             }
+            article = article.child(grid);
         }
-        root.child(page).child(reader).into_any_element()
+        // TOC panel: beside the article when the column can spare 16rem, below it
+        // otherwise (mock flex-wrap semantics).
+        let toc_open =
+            self.reader_ui.toc_open && !headings.is_empty() && self.result_tab == 0;
+        let rem = f32::from(window.rem_size());
+        let content_width = (f32::from(window.bounds().size.width) - 48.).min(COLUMN.0 * rem);
+        let toc_side = toc_open && content_width >= 40. * rem + 24.;
+        let body = if toc_side {
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .gap(px(24.))
+                .items_start()
+                .child(article)
+                .child(self.reader_toc_panel(&headings, current_chapter, true, cx))
+                .into_any_element()
+        } else if toc_open {
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .gap_3()
+                .child(article)
+                .child(self.reader_toc_panel(&headings, current_chapter, false, cx))
+                .into_any_element()
+        } else {
+            article.into_any_element()
+        };
+        root.child(page).child(body).into_any_element()
+    }
+    /// Mock `tocPanel`: sticky-look white card listing chapters; the chapter at the
+    /// current reading position reads coral on a soft wash.
+    fn reader_toc_panel(
+        &self,
+        headings: &[(usize, String, Option<f64>)],
+        current: Option<usize>,
+        side: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let mut panel = v_flex()
+            .id("note-toc")
+            .gap_1()
+            .p_3()
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(CARD_LINE))
+            .rounded(RADIUS_CARD)
+            .overflow_y_scroll();
+        panel = if side {
+            panel.w(rems(16.)).flex_shrink_0()
+        } else {
+            panel.w_full().flex_shrink_0().max_h(px(240.))
+        };
+        panel = panel.child(
+            theme::accessible_text("toc-title", "目录")
+                .text_size(TEXT_AUX)
+                .text_color(rgb(GRAY))
+                .font_weight(FontWeight::SEMIBOLD),
+        );
+        for (index, label, seconds) in headings {
+            let index = *index;
+            let on = current == Some(index);
+            panel = panel.child(
+                control(("toc-item", index))
+                    .ghost()
+                    .w_full()
+                    .h_auto()
+                    .min_h(rems(2.))
+                    .py(px(6.))
+                    .px(px(8.))
+                    .justify_start()
+                    .rounded(px(8.))
+                    .when(on, |button| {
+                        button.bg(rgb(ACCENT_SOFT)).font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .accessibility_label(format!("转到 {label}"))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .items_baseline()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_color(rgb(if on { ACCENT_STRONG } else { INK }))
+                                    .child(label.clone()),
+                            )
+                            .when_some(*seconds, |row, seconds| {
+                                row.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_size(TEXT_AUX)
+                                        .text_color(rgb(if on { ACCENT_STRONG } else { GRAY }))
+                                        .child(course2md::render::fmt_ts(seconds)),
+                                )
+                            }),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.jump_reader_block(index, 0., cx)
+                        }),
+                    ),
+            );
+        }
+        panel
     }
     fn open_reader_image(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(preview) = &self.preview else {
@@ -2057,6 +2707,7 @@ impl Desktop {
                 "image-caption",
                 format!("原图说明：{caption}"),
                 0,
+                Vec::new(),
             ));
         }
         if !frame.transcript.is_empty() {
@@ -2072,6 +2723,7 @@ impl Desktop {
                     frame.transcript
                 ),
                 1,
+                Vec::new(),
             ));
         }
         let mut actions = h_flex().gap_2().flex_wrap();

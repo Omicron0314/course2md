@@ -218,5 +218,6 @@ icon_fn!(schedule, "icons/schedule.svg");
 icon_fn!(image, "icons/image.svg");
 icon_fn!(toc, "icons/format-list-bulleted.svg");
 icon_fn!(arrow_forward, "icons/arrow-forward.svg");
+icon_fn!(external_link, "icons/external-link.svg");
 icon_fn!(file_upload, "icons/file-upload.svg");
 icon_fn!(content_copy, "icons/content-copy.svg");

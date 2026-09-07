@@ -132,32 +132,14 @@ impl Desktop {
                 .unwrap_or_else(|| "笔记".into()),
         }
     }
-    fn page_header(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let mut row = h_flex()
+    fn page_header(&self, window: &mut Window) -> Div {
+        let row = h_flex()
             .w_full()
             .min_w_0()
             .gap_3()
             .h_auto()
             .min_h(rems(3.5))
             .flex_wrap()
-            .when(self.page == Page::Result, |row| {
-                row.child(
-                    control("back")
-                        .ghost()
-                        .icon(IconName::ArrowLeft)
-                        .accessibility_label("返回")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.navigate(
-                                if this.page == Page::New {
-                                    Page::Library
-                                } else {
-                                    this.result_origin
-                                },
-                                cx,
-                            )
-                        })),
-                )
-            })
             .child(
                 accessible_text("page-title", self.page_title())
                     .role(Role::Heading)
@@ -172,9 +154,6 @@ impl Desktop {
                     .text_size(TEXT_TITLE)
                     .font_weight(FontWeight::SEMIBOLD),
             );
-        if self.page == Page::Result {
-            row = row.child(self.reader_toolbar(cx));
-        }
         v_flex().gap_2().child(row)
     }
 }
@@ -206,11 +185,11 @@ impl Render for Desktop {
             .min_w_0()
             .min_h_0()
             .w_full()
-            .when(self.page != Page::New, |v| {
+            .when(!matches!(self.page, Page::New | Page::Result), |v| {
                 v.child(
                     shell_column()
                         .flex_shrink_0()
-                        .child(self.page_header(window, cx)),
+                        .child(self.page_header(window)),
                 )
             })
             .when(self.page == Page::Library, |v| {
