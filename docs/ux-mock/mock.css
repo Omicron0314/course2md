@@ -1,0 +1,379 @@
+/* ============================================================
+   course2md 课程库 mock
+   映射规则（与 GPUI 一一对应）：
+   - rem ↔ GPUI rems()：1rem = 14px@100%，随用户字号缩放。
+     所有「承载文字或随文字呼吸的结构尺寸」一律 rem：
+     侧栏宽、封面尺寸、行/控件 min-height、卡片列宽。
+   - px ↔ GPUI px()：永不缩放。
+     发丝边框 1px、padding、gap、固定图标一律 px。
+   ============================================================ */
+
+:root {
+  --canvas: #f8f8f6;
+  --surface: #ffffff;
+  --sidebar-bg: #e8ebf0;
+  --ink: #252a32;
+  --gray: #485363;
+  --hairline: #e3e5e2;
+  --control-border: #657184;
+  --blue: #315bc5;
+  --blue-soft: #eaf0ff;
+}
+
+html { font-size: calc(14px * var(--scale, 1)); }
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: -apple-system, "PingFang SC", sans-serif;
+  font-size: 1rem;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app { display: flex; min-height: 100vh; }
+
+/* ---------------- 左侧栏 ---------------- */
+.sidebar {
+  width: 14.857rem;            /* 208px@100% → 416px@200%，随字号呼吸 */
+  flex-shrink: 0;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--hairline);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+.main-nav { display: flex; flex-direction: column; gap: 2px; }
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 2.25rem;
+  padding: 0 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  color: var(--ink);
+}
+.nav-item.selected { background: var(--blue); color: #fff; font-weight: 600; }
+.nav-icon {
+  width: 20px;                 /* 图标固定 20px，不随字号缩放 */
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 17px;
+  line-height: 1;
+}
+.nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 0 8px;
+}
+.group-title { font-size: 0.857rem; color: var(--gray); }
+
+.folder-list { display: flex; flex-direction: column; gap: 2px; }
+.folder-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.folder-icon {
+  width: 18px;                 /* 图标固定 18px */
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 16px;
+  line-height: 1.45;
+}
+.folder-name {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;       /* 最多 2 行，超长截断 */
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+}
+.folder-count {
+  font-size: 0.857rem;
+  color: var(--gray);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.sidebar-bottom { margin-top: auto; }
+
+/* ---------------- 通用控件 ---------------- */
+.btn {
+  font-family: inherit;
+  font-size: 1rem;
+  min-height: 2.6rem;          /* 控件统一 min-height 2.6rem（36.4px@100%） */
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-primary { background: var(--blue); color: #fff; font-weight: 600; }
+.btn-outline { background: var(--surface); border-color: var(--control-border); }
+.btn-ghost { color: var(--ink); }
+
+.ghost-btn {
+  font-family: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--gray);
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ghost-btn:hover, .chip:hover { background: rgba(37, 42, 50, 0.06); }
+
+.icon-btn {
+  width: 2rem;                 /* 紧凑工具按钮 2rem 见方（随字号缩放，期望行为） */
+  min-width: 2rem;
+  height: 2rem;
+  min-height: 2rem;
+  padding: 0;
+  font-size: 1rem;
+}
+
+/* ---------------- 主区 ---------------- */
+.main {
+  flex: 1;
+  min-width: 0;
+  padding: 24px;
+  container-type: inline-size; /* chip 收缩用 container query */
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.page-title { font-size: 1.286rem; font-weight: 600; margin: 0; }
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;             /* 允许整行换行 */
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.search {
+  flex: 1;
+  min-width: 12rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  padding: 0 12px;
+  min-height: 2.6rem;
+}
+.search-icon { font-size: 14px; color: var(--gray); flex-shrink: 0; }
+.search input {
+  border: 0;
+  outline: 0;
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+}
+.search input::placeholder { color: var(--gray); opacity: 0.7; }
+
+.seg {
+  display: flex;
+  align-items: stretch;
+  background: var(--surface);
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 2.6rem;
+}
+.seg-btn {
+  font-family: inherit;
+  font-size: 1rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.seg-btn.selected { background: var(--blue); color: #fff; font-weight: 600; }
+
+.toolbar-reload { min-height: 2.6rem; width: 2.6rem; padding: 0; }
+
+/* ---------------- 文件夹分组头 ---------------- */
+.folder-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 1rem;
+  color: var(--ink);
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+.folder-group:hover { background: rgba(37, 42, 50, 0.05); }
+.fg-caret { color: var(--gray); flex-shrink: 0; }
+.fg-name {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fg-count { font-size: 0.857rem; color: var(--gray); flex-shrink: 0; }
+
+/* ---------------- 列表视图 ---------------- */
+html.view-cards .note-list { display: none; }
+.note-list { display: flex; flex-direction: column; gap: 8px; }
+
+.note-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;           /* 单行结构，禁止换行破版 */
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 12px;
+}
+.cover {
+  width: 6.857rem;             /* 96px@100% → 192px@200%，随字号呼吸 */
+  height: 3.857rem;            /* 54px@100% → 108px@200% */
+  border-radius: 4px;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, #dfe7f7 0%, #b9c8ea 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.143rem;
+}
+.note-body { flex: 1; min-width: 0; }
+.note-title {
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.note-meta {
+  font-size: 0.857rem;
+  color: var(--gray);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+.chip {
+  font-family: inherit;
+  font-size: 1rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 2rem;
+  max-width: min(16rem, 26%);  /* 宽窗 16rem 封顶；行宽紧张时按比例收缩，保标题区 */
+  min-width: 0;
+  flex: 0 1 auto;              /* 允许收缩 */
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  color: var(--gray);
+  cursor: pointer;
+}
+.chip-icon { flex-shrink: 0; font-size: 14px; }
+.chip-caret { flex-shrink: 0; font-size: 0.857rem; }
+.chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-actions { flex-shrink: 0; }
+
+/* ---------------- 卡片视图 ---------------- */
+.note-grid { display: none; }
+html.view-cards .note-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.card-cover {
+  aspect-ratio: 16 / 9;
+  background: linear-gradient(135deg, #dfe7f7 0%, #b9c8ea 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+}
+.card-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.card-chip { flex: 1; min-width: 0; max-width: none; }
+.card-foot .icon-btn { flex-shrink: 0; }
+
+/* ---------------- 窄内容区鲁棒性 ---------------- */
+/* 内容区宽度 < 24rem 时：
+   1. 文件夹 chip 收缩到只剩 📁▾；
+   2. 封面降一档（仍 rem，约为常态的 1/2），避免 200% 字号下封面吃掉整行；
+   3. 行内 gap 12px → 8px，把宽度让给标题（标题仍 2 行截断，不竖排）。 */
+@container (max-width: 24rem) {
+  .chip .chip-label { display: none; }
+  .note-row { gap: 8px; }
+  .note-row .cover { width: 3.429rem; height: 1.929rem; }
+}

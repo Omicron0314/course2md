@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="view-list">
+<head>
+<meta charset="UTF-8">
+<title>course2md · 课程库布局 mock</title>
+<link rel="stylesheet" href="mock.css">
+<script>
+// 通过 URL query 切换：?view=list|cards&scale=1|1.25|1.5|2
+// scale 模拟 GPUI 用户字号倍率：100% 时 1rem = 14px，200% 时 1rem = 28px。
+(function () {
+  var q = new URLSearchParams(location.search);
+  var scale = parseFloat(q.get('scale') || '1');
+  var view = q.get('view') === 'cards' ? 'cards' : 'list';
+  var root = document.documentElement;
+  root.style.setProperty('--scale', String(scale));
+  root.classList.remove('view-list', 'view-cards');
+  root.classList.add('view-' + view);
+})();
+</script>
+</head>
+<body>
+<div class="app">
+
+  <!-- 左侧栏：宽 14.857rem（=208px@100%，416px@200%），padding 12px，右侧 1px 发丝线 -->
+  <aside class="sidebar">
+    <nav class="main-nav">
+      <div class="nav-item selected">
+        <span class="nav-icon">📖</span>
+        <span class="nav-label">课程库</span>
+      </div>
+      <div class="nav-item">
+        <span class="nav-icon">＋</span>
+        <span class="nav-label">生成笔记</span>
+      </div>
+      <div class="nav-item">
+        <span class="nav-icon">▤</span>
+        <span class="nav-label">任务</span>
+      </div>
+    </nav>
+
+    <div class="group-header">
+      <span class="group-title">课程库</span>
+      <button class="ghost-btn icon-btn" title="新建文件夹">＋</button>
+    </div>
+
+    <div class="folder-list">
+      <div class="folder-item">
+        <span class="folder-icon">📁</span>
+        <span class="folder-name">未分类</span>
+        <span class="folder-count">0</span>
+      </div>
+      <div class="folder-item">
+        <span class="folder-icon">📁</span>
+        <span class="folder-name">2026 年秋季学期金融风险管理与衍生品定价专题课程</span>
+        <span class="folder-count">1</span>
+      </div>
+    </div>
+
+    <div class="sidebar-bottom">
+      <div class="nav-item">
+        <span class="nav-icon">⚙</span>
+        <span class="nav-label">设置</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 主区：container query 容器，padding 24px，画布色 -->
+  <main class="main">
+    <header class="page-header">
+      <h1 class="page-title">课程库</h1>
+      <button class="btn btn-primary">＋ 生成笔记</button>
+    </header>
+
+    <div class="toolbar">
+      <div class="search">
+        <span class="search-icon">🔍</span>
+        <input type="text" placeholder="搜索课程标题">
+      </div>
+      <button class="btn btn-outline">📁 按文件夹</button>
+      <div class="seg">
+        <button class="seg-btn seg-list">列表</button>
+        <button class="seg-btn seg-cards">卡片</button>
+      </div>
+      <button class="btn btn-ghost toolbar-reload" title="刷新">⟳</button>
+    </div>
+
+    <button class="folder-group">
+      <span class="fg-caret">▾</span>
+      <span class="fg-name">2026 年秋季学期金融风险管理与衍生品定价专题课程</span>
+      <span class="fg-count">1</span>
+    </button>
+
+    <div class="note-list" id="noteList"></div>
+    <div class="note-grid" id="noteGrid"></div>
+  </main>
+</div>
+
+<script>
+var FOLDER = '2026 年秋季学期金融风险管理与衍生品定价专题课程';
+var NOTES = [
+  { title: '【公开课】金融市场与衍生品定价 第 3 讲：期权定价模型与风险管理实务（双语字幕）', meta: '3 段笔记 · 5 张截图' },
+  { title: '金融风险管理 第 1 讲：风险度量基础与 VaR 模型实务', meta: '2 段笔记 · 1 张截图' },
+  { title: '衍生品定价专题：Black-Scholes 公式推导与 Python 数值实现', meta: '5 段笔记 · 3 张截图' },
+  { title: '2026 秋季学期课程导论：教学安排、参考书目与考核方式说明', meta: '1 段笔记 · 1 张截图' }
+];
+
+function chipHTML(extra) {
+  return '<button class="chip ' + (extra || '') + '" title="' + FOLDER + '">'
+    + '<span class="chip-icon">📁</span>'
+    + '<span class="chip-label">' + FOLDER + '</span>'
+    + '<span class="chip-caret">▾</span>'
+    + '</button>';
+}
+
+function rowHTML(n) {
+  return '<div class="note-row">'
+    + '<div class="cover">📖</div>'
+    + '<div class="note-body">'
+    +   '<div class="note-title">' + n.title + '</div>'
+    +   '<div class="note-meta">' + n.meta + '</div>'
+    + '</div>'
+    + chipHTML()
+    + '<button class="ghost-btn icon-btn row-actions" title="更多操作">⋯</button>'
+    + '</div>';
+}
+
+function cardHTML(n) {
+  return '<div class="card">'
+    + '<div class="card-cover">📖</div>'
+    + '<div class="card-body">'
+    +   '<div class="note-title">' + n.title + '</div>'
+    +   '<div class="note-meta">' + n.meta + '</div>'
+    +   '<div class="card-foot">'
+    +     chipHTML('card-chip')
+    +     '<button class="ghost-btn icon-btn" title="更多操作">⋯</button>'
+    +   '</div>'
+    + '</div>'
+    + '</div>';
+}
+
+document.getElementById('noteList').innerHTML = NOTES.map(rowHTML).join('');
+document.getElementById('noteGrid').innerHTML = NOTES.map(cardHTML).join('');
+
+// 分段控件选中态跟随 view
+var isCards = document.documentElement.classList.contains('view-cards');
+document.querySelector('.seg-list').classList.toggle('selected', !isCards);
+document.querySelector('.seg-cards').classList.toggle('selected', isCards);
+</script>
+</body>
+</html>
