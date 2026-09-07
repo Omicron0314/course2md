@@ -1,6 +1,6 @@
 //! Product identity and build provenance, kept separate from operational settings.
 use super::*;
-use crate::theme::{INK, LINE, MUTED, control};
+use crate::theme::{INK, LINE, MUTED, accessible_text, control};
 
 impl Desktop {
     pub fn about_page(&self, _: &mut Context<Self>) -> AnyElement {
@@ -14,12 +14,12 @@ impl Desktop {
                 v_flex()
                     .gap_2()
                     .child(
-                        div()
+                        accessible_text("about-name", "course2md")
+                            .role(Role::Heading)
                             .text_xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("course2md"),
+                            .font_weight(FontWeight::SEMIBOLD),
                     )
-                    .child(div().text_color(rgb(MUTED)).child("把课程整理成笔记。")),
+                    .child(accessible_text("about-description", "把课程整理成笔记。").text_color(rgb(MUTED))),
             )
             .child(
                 v_flex()
@@ -35,7 +35,7 @@ impl Desktop {
                     .flex_wrap()
                     .child(
                         control("about-project")
-                            .h(px(36.)).min_h(px(36.))
+
                             .label("项目主页")
                             .icon(IconName::ExternalLink)
                             .on_click(|_, _, cx| {
@@ -44,7 +44,7 @@ impl Desktop {
                     )
                     .child(
                         control("about-issue")
-                            .h(px(36.)).min_h(px(36.))
+
                             .label("反馈问题")
                             .icon(IconName::ExternalLink)
                             .on_click(|_, _, cx| {
@@ -58,14 +58,14 @@ impl Desktop {
                     .gap_3()
                     .border_t_1()
                     .border_color(rgb(LINE))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("开源许可"))
+                    .child(accessible_text("about-license-title", "开源许可").role(Role::Heading).font_weight(FontWeight::SEMIBOLD))
                     .child(
                         h_flex()
                             .gap_3()
                             .flex_wrap()
                             .child(
                                 control("about-license")
-                                    .h(px(36.)).min_h(px(36.))
+
                                     .label("course2md · MIT")
                             .icon(IconName::ExternalLink)
                                     .on_click(|_, _, cx| {
@@ -74,7 +74,7 @@ impl Desktop {
                             )
                             .child(
                                 control("about-icons-license")
-                                    .h(px(36.)).min_h(px(36.))
+
                                     .label("Material Icons · Apache 2.0")
                             .icon(IconName::ExternalLink)
                                     .on_click(|_, _, cx| {
@@ -91,11 +91,13 @@ fn about_detail(label: &'static str, value: &'static str) -> Div {
     h_flex()
         .gap_4()
         .child(
-            div()
-                .w(px(64.))
+            accessible_text(SharedString::from(format!("about-{label}-label")), label)
+                .min_w(rems(4.6))
                 .flex_shrink_0()
-                .text_color(rgb(MUTED))
-                .child(label),
+                .text_color(rgb(MUTED)),
         )
-        .child(div().font_weight(FontWeight::MEDIUM).child(value))
+        .child(
+            accessible_text(SharedString::from(format!("about-{label}-value")), value)
+                .font_weight(FontWeight::MEDIUM),
+        )
 }

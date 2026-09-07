@@ -1,17 +1,30 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+mod a11y;
 mod about;
 mod account_ui;
 mod activity;
 mod backend;
 mod course_library;
+mod credentials;
 mod icons;
+mod import_ui;
+mod legacy_settings;
 mod library_ui;
+mod notes;
 mod onboarding;
 mod organize;
+mod preferences;
+mod reader_navigation;
+mod reader_ui;
+mod service_test;
 mod settings_ui;
 mod source;
+mod storage;
+mod storage_ui;
+mod task_ui;
 mod theme;
 mod views;
+mod workspace;
 use backend::{Completed, Course, Event, Job};
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -41,6 +54,7 @@ enum Kind {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Field {
     Source,
+    Title,
     FolderName,
     Output,
     Search,
@@ -65,11 +79,15 @@ const SOURCES: [(&str, &str); 3] = [
     ("asr", "语音识别"),
 ];
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct ConversionOptions {
     provider: usize,
     source_mode: usize,
     llm: bool,
+    #[serde(default)]
+    summarize: bool,
+    #[serde(default)]
+    vision: bool,
     keep_video: bool,
     resume: bool,
     formats: [bool; 3],
@@ -94,7 +112,7 @@ impl ConversionOptions {
         };
         let llm = config.llm.enabled;
         let keep_video = config.defaults.keep_video.unwrap_or(false);
-        let resume = config.defaults.resume.unwrap_or(false);
+        let resume = true;
         let formats = config
             .defaults
             .formats
@@ -112,6 +130,8 @@ impl ConversionOptions {
             provider,
             source_mode,
             llm,
+            summarize: config.llm.summarize,
+            vision: config.llm.vision,
             keep_video,
             resume,
             formats,
@@ -119,25 +139,57 @@ impl ConversionOptions {
     }
 }
 
+impl Default for ConversionOptions {
+    fn default() -> Self {
+        let mut value = Self::from_config(&Default::default());
+        value.formats = [false; 3];
+        value
+    }
+}
+
 struct Desktop {
+    preferences: preferences::Store,
+    settings_ui: settings_ui::State,
+    storage_ui: storage_ui::State,
+    reader_ui: reader_ui::State,
+    workspace: Option<workspace::Workspace>,
+    workspace_error: Option<String>,
+    active_task: Option<String>,
+    draft_loading: bool,
+    draft_deadline: Option<Instant>,
+    source_deadline: Option<Instant>,
+    quit_deadline: Option<Instant>,
     account: account_ui::AccountUi,
     collapsed_folders: std::collections::BTreeSet<u64>,
     online: bool,
     last_source_input: String,
     completed_source: Option<String>,
     source_preview: Option<source::Source>,
+    source_candidates: Vec<source::SourceCandidate>,
+    source_collection_title: Option<String>,
+    subtitle_loading: bool,
+    subtitle_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    subtitle_error: Option<String>,
+    subtitle_generation: u64,
     preview_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     preview_generation: u64,
     preview_workers: usize,
     preview_error: Option<String>,
     source_validation: Option<String>,
+    import_submit_focus: FocusHandle,
+    root_focus: FocusHandle,
     show_preview_details: bool,
     library: organize::Library,
     library_root: PathBuf,
     library_error: Option<String>,
+    library_issues: Vec<String>,
+    library_materials: Vec<PathBuf>,
+    library_indexes: BTreeMap<PathBuf, organize::Library>,
+    library_generation: u64,
     folder_filter: Option<u64>, // None = all; 0 = unfiled
     target_folder: Option<u64>,
     folder_editor: Option<Option<u64>>,
+    folder_origin: Option<library_ui::FolderOrigin>,
     folder_error: Option<String>,
     delete_folder: Option<u64>,
     task_destination: Option<(PathBuf, Option<u64>, source::Source, u64)>,
@@ -146,6 +198,7 @@ struct Desktop {
     result_tab: usize,
     settings_tab: usize,
     show_options: bool,
+    show_export_options: bool,
     show_logs: bool,
     setup_open: bool,
     setup_return: Option<Page>,
@@ -179,12 +232,18 @@ struct Desktop {
     preview: Option<backend::Preview>,
     read_generation: u64,
     reading: bool,
+    reader_scroll: ScrollHandle,
+    reader_saved_offset: f32,
+    exporting: bool,
     message: Option<String>,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
 
-actions!(course2md_desktop, [Quit, OpenSettings, OpenAbout]);
+actions!(
+    course2md_desktop,
+    [Quit, OpenSettings, OpenAbout, NewNote, SearchContent]
+);
 
 impl Desktop {
     fn editing_options(&self) -> &ConversionOptions {
@@ -203,47 +262,61 @@ impl Desktop {
     }
 
     fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.settings_deadline.take().is_some() {
-            self.save_settings(cx);
+        if !self.flush_settings_for_exit(cx) || !self.save_current_draft(cx) {
+            return false;
         }
-        if self.preview_workers > 0 {
-            if let Some(cancel) = &self.preview_cancel {
-                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel_storage_for_close();
+        if let Some(workspace) = &mut self.workspace {
+            if let Err(error) = workspace.transaction(|state| {
+                state.stop_session();
+                Ok(())
+            }) {
+                self.workspace_error = Some(format!("退出意图尚未保存：{error:#}。窗口保持打开。"));
+                cx.notify();
+                return false;
             }
-            self.closing = true;
         }
-        if let Some(job) = &self.job {
+        if let Some(cancel) = &self.preview_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(cancel) = &self.subtitle_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.closing = true;
+        self.quit_deadline = Some(Instant::now() + Duration::from_secs(10));
+        self.refresh_dispatch_controls(cx);
+        if self.active_task.is_none()
+            && let Some(job) = &self.job
+        {
             job.cancel();
-            self.closing = true;
-            self.cancelling = true;
-            self.task_status = "正在停止任务并关闭…".into();
-            cx.notify();
-            false
-        } else {
-            self.preview_workers == 0
         }
+        self.message = Some("正在保存进度并退出…".into());
+        cx.notify();
+        self.job.is_none() && self.preview_workers == 0
     }
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (config, message, config_error) = match course2md::settings::load() {
-            Ok(config) => (config, None, false),
-            Err(error) => (
-                Default::default(),
-                Some(format!("配置文件读取失败：{error:#}。请先修正配置文件。")),
-                true,
-            ),
-        };
-        let output = config
-            .defaults
-            .out
-            .clone()
-            .map(course2md::config::expand_tilde)
-            .unwrap_or_else(backend::default_output);
+        let configuration_directory = course2md::config::config_dir();
+        let legacy = legacy_settings::Inspection::inspect(course2md::settings::config_path());
+        let config_error = legacy.problem.is_some();
+        let message = None;
+        let output = legacy_settings::startup_output(
+            &configuration_directory,
+            &legacy,
+            backend::default_output,
+        );
+        let preferences = preferences::Store::open(
+            configuration_directory.join("desktop-preferences"),
+            credentials::system_vault(),
+        );
+        let mut config = preferences.defaults_config();
+        config.defaults.out = Some(output.clone());
         let fields = [
             (
                 Field::Source,
                 "粘贴 YouTube 或 Bilibili 视频链接",
                 String::new(),
             ),
+            (Field::Title, "", String::new()),
             (
                 Field::Output,
                 "课程笔记保存位置",
@@ -253,14 +326,14 @@ impl Desktop {
             (Field::FolderName, "文件夹名称", String::new()),
             (
                 Field::AsrUrl,
-                "https://api.example.com/v1",
+                "",
                 config.asr_api.base_url.clone(),
             ),
             (Field::AsrKey, "API Key", config.asr_api.api_key.clone()),
             (Field::AsrModel, "转写模型", config.asr_api.model.clone()),
             (
                 Field::LlmUrl,
-                "https://api.example.com/v1",
+                "",
                 config.llm.base_url.clone(),
             ),
             (Field::LlmKey, "API Key", config.llm.api_key.clone()),
@@ -285,12 +358,23 @@ impl Desktop {
             .map(|(field, input)| {
                 let field = *field;
                 cx.observe(input, move |this: &mut Self, _, cx| {
+                    if this.draft_loading {
+                        return;
+                    }
                     if field == Field::Source {
                         let value = this.value(Field::Source, cx);
                         if value != this.last_source_input {
+                            let pasted =
+                                value.len().saturating_sub(this.last_source_input.len()) > 2;
                             this.last_source_input = value;
                             this.invalidate_source();
+                            this.source_deadline =
+                                (pasted && this.online && !this.last_source_input.is_empty())
+                                    .then(|| Instant::now() + Duration::from_millis(500));
                         }
+                    }
+                    if matches!(field, Field::Source | Field::Title) {
+                        this.draft_deadline = Some(Instant::now() + Duration::from_millis(350));
                     }
                     if field == Field::Search {
                         this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
@@ -344,26 +428,60 @@ impl Desktop {
                 }
             }
         });
+        let (workspace, workspace_error) =
+            match workspace::Workspace::open(output.clone(), options.clone()) {
+                Ok(workspace) => (Some(workspace), None),
+                Err(error) => (
+                    None,
+                    Some(format!("草稿与任务记录无法读取，原文件已保留：{error:#}")),
+                ),
+            };
+        let settings_ui = settings_ui::State::new(window, cx);
+        let reader_ui = reader_ui::State::new(window, cx);
         let mut this = Self {
+            preferences,
+            settings_ui,
+            reader_ui,
+            storage_ui: Default::default(),
+            workspace,
+            workspace_error,
+            active_task: None,
+            draft_loading: false,
+            draft_deadline: None,
+            source_deadline: None,
+            quit_deadline: None,
             page: Page::Library,
             online: true,
             last_source_input: String::new(),
             completed_source: None,
             source_preview: None,
+            source_candidates: Vec::new(),
+            source_collection_title: None,
+            subtitle_loading: false,
+            subtitle_cancel: None,
+            subtitle_error: None,
+            subtitle_generation: 0,
             preview_cancel: None,
             preview_generation: 0,
             preview_workers: 0,
             preview_error: None,
             source_validation: None,
+            import_submit_focus: cx.focus_handle(),
+            root_focus: Self::install_root_focus(window, cx),
             show_preview_details: false,
             account: account_ui::AccountUi::default(),
             collapsed_folders: Default::default(),
             library: Default::default(),
             library_root: output,
             library_error: None,
+            library_issues: Vec::new(),
+            library_materials: Vec::new(),
+            library_indexes: BTreeMap::new(),
+            library_generation: 0,
             folder_filter: None,
             target_folder: None,
             folder_editor: None,
+            folder_origin: None,
             folder_error: None,
             delete_folder: None,
             task_destination: None,
@@ -371,6 +489,7 @@ impl Desktop {
             result_tab: 0,
             settings_tab: 0,
             show_options: false,
+            show_export_options: false,
             show_logs: false,
             setup_open: false,
             setup_return: None,
@@ -381,7 +500,7 @@ impl Desktop {
             inputs,
             settings_snapshot: config.clone(),
             desktop_settings: config.desktop.clone(),
-            system_titlebar: config.desktop.system_titlebar,
+            system_titlebar: true,
             settings_deadline: None,
             settings_status: String::new(),
             last_tick: Instant::now(),
@@ -404,11 +523,16 @@ impl Desktop {
             preview: None,
             read_generation: 0,
             reading: false,
+            reader_scroll: ScrollHandle::new(),
+            reader_saved_offset: f32::NAN,
+            exporting: false,
             message,
             _subscriptions: subscriptions,
             _poll: poll,
         };
         this.settings_snapshot = this.edited_settings(cx);
+        this.restore_draft(window, cx);
+        this.restore_storage_state(cx);
         cx.set_reduce_motion(this.desktop_settings.reduce_motion);
         this.refresh_account(cx);
         this.refresh_environment(cx);
@@ -424,27 +548,61 @@ impl Desktop {
             let environment = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.environment = Some(environment);
-                if this.settings_options.provider == 0
-                    && let Some(choice) = this
-                        .engine_choices(cx)
-                        .into_iter()
-                        .find(|choice| (1..=4).contains(&choice.index) && choice.selectable)
-                {
-                    this.settings_options.provider = choice.index;
-                    if this.job.is_none() && this.task_options.provider == 0 {
-                        this.task_options.provider = choice.index;
-                    }
-                }
+                this.refresh_model_diagnostics(cx);
                 cx.notify();
             });
         })
         .detach();
     }
+    fn install_root_focus(window: &mut Window, cx: &mut Context<Self>) -> FocusHandle {
+        let root = cx.focus_handle().tab_stop(false);
+        // This is a real dispatch ancestor, not another stop in the control order.
+        if window.focused(cx).is_none() {
+            root.focus(window, cx);
+        }
+        cx.on_focus_lost(window, |this, window, cx| {
+            let ancestor = window.focus_lost_restore_target(cx);
+            if window.has_active_dialog(cx) {
+                // A dialog can replace its own controls. Restore only inside its
+                // active trap; never send focus back to the obscured main page.
+                if let Some(trap) = gpui_base::active_focus_trap(window, cx) {
+                    let target = ancestor
+                        .filter(|focus| trap.contains(focus, window))
+                        .unwrap_or(trap);
+                    target.focus(window, cx);
+                }
+            } else {
+                ancestor
+                    .unwrap_or_else(|| this.root_focus.clone())
+                    .focus(window, cx);
+            }
+        })
+        .detach();
+        root
+    }
+
+    fn new_note_from_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let previous = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.state.current_draft.clone());
+        self.new_draft(true, false, window, cx);
+        if self.page == Page::New
+            && self
+                .workspace
+                .as_ref()
+                .is_some_and(|workspace| Some(&workspace.state.current_draft) != previous.as_ref())
+        {
+            self.inputs[&Field::Source].update(cx, |input, cx| input.focus(window, cx));
+        }
+    }
+
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.save_reading_position(cx);
         self.read_generation = self.read_generation.wrapping_add(1);
         self.reading = false;
-        if page == Page::New && self.page == Page::Library {
-            self.target_folder = self.folder_filter.filter(|id| *id != 0);
+        if self.page == Page::New {
+            self.save_current_draft(cx);
         }
         if self.page != page {
             self.show_engine_details = false;
@@ -480,11 +638,14 @@ impl Desktop {
         v_flex()
             .gap_2()
             .w_full()
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+            .child(
+                theme::accessible_text(("field-label", field as usize), label)
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM),
+            )
             .child(
                 Input::new(&self.inputs[&field])
-                    .min_h(px(36.))
-                    .max_h(px(36.))
+                    .min_h(rems(2.6))
                     .aria_label(label)
                     .when(error.is_some(), |input| input.border_color(rgb(0xa32626))),
             )
@@ -493,12 +654,11 @@ impl Desktop {
             })
     }
     fn output(&self, _cx: &App) -> PathBuf {
-        self.config
-            .defaults
-            .out
-            .clone()
-            .map(course2md::config::expand_tilde)
-            .unwrap_or_else(backend::default_output)
+        self.workspace
+            .as_ref()
+            .and_then(|w| w.state.library(&w.state.default_library))
+            .map(|l| l.root.clone())
+            .unwrap_or_else(|| self.library_root.clone())
     }
     fn pick(&mut self, directory: bool, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
@@ -543,177 +703,88 @@ impl Desktop {
         .detach();
     }
     fn start(&mut self, kind: Kind, cx: &mut Context<Self>) {
-        cx.notify();
-        if self.job.is_some() {
-            self.page = Page::Task;
+        if kind == Kind::Convert {
+            self.navigate(Page::New, cx);
             return;
         }
-        self.message = None;
-        if self.config_error {
-            self.message = Some("请先修正配置文件，再开始任务。".into());
+        if self.job.is_some() {
+            self.message = Some("当前任务正在处理，结束后可以进行这项操作。".into());
+            cx.notify();
             return;
         }
         let args = match kind {
             Kind::Doctor => vec!["doctor".into()],
-            Kind::Models => vec![
-                "models".into(),
-                "download".into(),
-                "--json".into(),
-                "--dir".into(),
-                course2md::config::model_dir_from(self.config.defaults.model_dir.as_deref())
-                    .display()
-                    .to_string(),
-            ],
-            Kind::Convert => {
-                if !self.task_options.formats.iter().any(|selected| *selected) {
-                    self.show_options = true;
-                    return;
-                }
-                if self
-                    .source_preview
-                    .as_ref()
-                    .is_none_or(|source| source.input != self.value(Field::Source, cx))
-                {
-                    self.preview_error = Some("请先预览并确认课程内容".into());
-                    return;
-                }
-                let source = self.value(Field::Source, cx);
-                let source = course2md::config::expand_tilde(source.into())
-                    .display()
-                    .to_string();
-                if let Some(environment) = &self.environment {
-                    if !environment.ffmpeg || !environment.ffprobe {
-                        self.message = Some(
-                            "缺少视频处理工具。请在设置 → 运行环境中查看安装方式，然后重新检测。"
-                                .into(),
-                        );
-                        return;
-                    }
-                    if source.starts_with("http") && !environment.ytdlp {
-                        self.message =
-                            Some("在线课程需要 yt-dlp。请在设置 → 运行环境中查看安装方式。".into());
-                        return;
-                    }
-                }
-                if !course2md::config::looks_like_source(&source) {
-                    self.message = Some("请输入有效的视频链接，或选择存在的本地视频文件。".into());
-                    return;
-                }
-                if self.output(cx).as_os_str().is_empty() {
-                    self.message = Some("请选择笔记保存目录。".into());
-                    return;
-                }
-                if self.task_options.llm && course2md::llm::validate(&self.config.llm).is_err() {
-                    self.show_options = true;
-                    self.message = Some("请先配置 AI 服务，或关闭本次 AI 整理。".into());
-                    return;
-                }
-                let formats = ["md", "html", "json"]
-                    .into_iter()
-                    .zip(self.task_options.formats)
-                    .filter(|(_, selected)| *selected)
-                    .map(|(name, _)| name)
-                    .collect::<Vec<_>>();
-                if formats.is_empty() {
-                    self.message = Some("至少选择一种输出格式。".into());
-                    return;
-                }
-                let mut args = vec![
-                    source,
-                    "--json".into(),
-                    "--out".into(),
-                    self.output(cx).display().to_string(),
-                    "--transcript-source".into(),
-                    SOURCES[self.task_options.source_mode].0.into(),
-                    "--formats".into(),
-                    formats.join(","),
-                    if self.task_options.llm {
-                        "--llm"
-                    } else {
-                        "--no-llm"
-                    }
-                    .into(),
-                    if self.task_options.resume {
-                        "--resume"
-                    } else {
-                        "--no-resume"
-                    }
-                    .into(),
-                ];
-                if self.task_options.provider > 0 {
-                    args.extend([
-                        "--provider".into(),
-                        PROVIDERS[self.task_options.provider].0.into(),
-                    ]);
-                }
-                args.push(
-                    if self.task_options.keep_video {
-                        "--keep-video"
-                    } else {
-                        "--no-keep-video"
-                    }
-                    .into(),
-                );
-                args
-            }
+            Kind::Models => self.model_preparation_args(),
+            Kind::Convert => unreachable!(),
         };
         match Job::start(args) {
             Ok(job) => {
-                if kind == Kind::Convert {
-                    self.task_destination = self.source_preview.clone().map(|source| {
-                        (
-                            self.output(cx),
-                            self.target_folder,
-                            source,
-                            self.preview_generation,
-                        )
-                    });
-                }
                 self.job = Some(job);
+                self.active_task = None;
                 self.kind = kind;
                 self.cancelling = false;
-                self.show_logs = false;
-                self.scrolls[Page::Task as usize].set_offset(point(px(0.), px(0.)));
-                self.progress.clear();
-                self.task_error = None;
                 self.logs.clear();
-                self.completed = None;
+                self.progress.clear();
                 self.pending_done = None;
-                self.task_status = match kind {
-                    Kind::Convert => "正在准备课程笔记",
-                    Kind::Doctor => "正在检查环境",
-                    Kind::Models => "正在下载模型",
+                self.task_error = None;
+                self.task_status = if kind == Kind::Doctor {
+                    "正在检查运行环境"
+                } else {
+                    "正在准备识别模型"
                 }
                 .into();
-                self.page = Page::Task;
             }
-            Err(error) => self.message = Some(format!("{error:#}")),
+            Err(error) => {
+                self.task_error = Some(format!("{error:#}"));
+                if kind == Kind::Models {
+                    self.model_preparation_finished(false, false, cx);
+                } else {
+                    self.message = self.task_error.clone();
+                }
+            }
         }
         cx.notify();
     }
     fn poll(&mut self, cx: &mut Context<Self>) {
+        self.poll_storage(cx);
+        self.save_reading_position(cx);
+        if self
+            .draft_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.save_current_draft(cx);
+        }
+        if self
+            .source_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.source_deadline = None;
+            if self.page == Page::New
+                && self.online
+                && source::validate_url(&self.value(Field::Source, cx)).is_ok()
+            {
+                self.inspect_source(cx);
+            }
+        }
         let events: Vec<_> = self
             .job
             .as_ref()
             .map(|job| job.events.try_iter().take(512).collect())
             .unwrap_or_default();
-        if events.is_empty() {
-            if self.job.is_some() && self.last_tick.elapsed() >= Duration::from_secs(1) {
-                self.last_tick = Instant::now();
-                cx.notify();
-            }
-            return;
-        }
+        let mut save = false;
         for event in events {
+            if self.active_task.is_some() {
+                self.record_task_event(&event);
+                save = true;
+            }
             match event {
                 Event::Log { message } => self.logs.push_back(message),
                 Event::Stage { stage, status } => {
                     if status == "start" {
-                        self.progress
-                            .insert(stage.clone(), activity::Activity::new());
+                        self.progress.insert(stage, activity::Activity::new());
                     } else if status == "done" {
                         self.progress
-                            .entry(stage.clone())
+                            .entry(stage)
                             .or_insert_with(activity::Activity::new)
                             .done = true;
                     }
@@ -723,69 +794,52 @@ impl Desktop {
                     current,
                     total,
                     message,
-                } => {
-                    self.progress
-                        .entry(stage)
-                        .or_insert_with(activity::Activity::new)
-                        .update(current, total, message);
-                }
+                } => self
+                    .progress
+                    .entry(stage)
+                    .or_insert_with(activity::Activity::new)
+                    .update(current, total, message),
                 Event::Workers { stage, workers } => {
                     self.progress
                         .entry(stage)
                         .or_insert_with(activity::Activity::new)
-                        .workers = workers;
+                        .workers = workers
                 }
                 Event::Error { message } => {
-                    self.task_error = Some(activity::failure_message(&message).into());
+                    self.task_error = Some(message.clone());
                     self.logs.push_back(message);
+                }
+                Event::Blocked { message, .. } => {
+                    self.task_error = Some(message);
                 }
                 Event::Done(done) => self.pending_done = Some(done),
                 Event::Exit { success, cancelled } => {
                     self.job = None;
                     self.cancelling = false;
-                    if self.closing {
-                        if self.preview_workers == 0 {
-                            cx.quit();
-                        }
-                        return;
-                    }
-                    if cancelled {
-                        self.task_error = None;
-                        self.task_status = "任务已取消，可修改设置后重试".into();
-                    } else if success && (self.kind != Kind::Convert || self.pending_done.is_some())
-                    {
-                        self.task_status = "已完成".into();
-                        self.completed = self.pending_done.take();
-                        if let (Some(done), Some((root, folder, source, generation))) =
-                            (&self.completed, self.task_destination.take())
-                        {
-                            if self.preview_generation == generation {
-                                self.completed_source = Some(source.input.clone());
-                            }
-                            if let Err(e) = source::save_cover(&source, &done.out_dir) {
-                                self.message = Some(format!("笔记已完成，但封面保存失败：{e:#}"));
-                            }
-                            if let Err(e) = organize::Library::edit(&root, |library| {
-                                library.assign(
-                                    &root,
-                                    &done.out_dir,
-                                    folder.filter(|id| library.folders.contains_key(id)),
-                                )
-                            }) {
-                                self.message = Some(format!("笔记已完成，但归档失败：{e:#}"));
-                            }
-                            self.refresh_library(cx);
-                        }
-                        if self.page == Page::Task
-                            && let Some(done) = self.completed.clone()
-                        {
-                            self.open_course(Course::from_completed(&done), cx);
-                        }
+                    if let Some(id) = self.active_task.take() {
+                        self.finish_task(&id, success, cancelled, cx);
+                        self.refresh_model_diagnostics(cx);
                     } else {
-                        self.task_status = "任务未完成".into();
-                        self.task_error.get_or_insert_with(|| {
-                            "任务未完成。请重试，详细原因可在日志中查看。".into()
-                        });
+                        self.task_status = if success {
+                            "已完成"
+                        } else if cancelled {
+                            "已停止"
+                        } else {
+                            "未完成"
+                        }
+                        .into();
+                        if self.kind == Kind::Models {
+                            self.model_preparation_finished(success, cancelled, cx);
+                        } else if success {
+                            self.refresh_environment(cx);
+                        }
+                        if self.kind != Kind::Models {
+                            self.message = Some(
+                                self.task_error
+                                    .clone()
+                                    .unwrap_or_else(|| self.task_status.clone()),
+                            );
+                        }
                     }
                 }
             }
@@ -793,71 +847,124 @@ impl Desktop {
                 self.logs.pop_front();
             }
         }
-        cx.notify();
+        if save
+            && let Some(workspace) = &self.workspace
+            && let Err(error) = workspace.save()
+        {
+            self.workspace_error = Some(format!("任务进度尚未保存：{error:#}"));
+        }
+        if self.closing {
+            if self.job.is_none() && self.preview_workers == 0 {
+                cx.quit();
+                return;
+            }
+            if self
+                .quit_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                if let Some(job) = &self.job {
+                    job.cancel();
+                }
+                cx.quit();
+                return;
+            }
+        } else {
+            self.start_next_task(cx);
+        }
+        if save || (self.job.is_some() && self.last_tick.elapsed() >= Duration::from_secs(1)) {
+            self.last_tick = Instant::now();
+            cx.notify();
+        }
     }
     fn refresh_library(&mut self, cx: &mut Context<Self>) {
-        let root = self.output(cx);
-        if self.library_root != root {
-            self.collapsed_folders.clear();
-            self.library_root = root.clone();
-            self.library = Default::default();
-            self.library_error = None;
-            self.courses.clear();
-            self.folder_filter = None;
-            self.target_folder = None;
-            self.folder_editor = None;
-            self.delete_folder = None;
-        }
-        if self.loading {
-            return;
-        }
+        let locations = self
+            .workspace
+            .as_ref()
+            .map(|w| w.state.libraries.clone())
+            .unwrap_or_else(|| {
+                vec![workspace::LibraryLocation {
+                    id: "legacy".into(),
+                    name: "课程库".into(),
+                    root: self.library_root.clone(),
+                    previous_roots: Vec::new(),
+                }]
+            });
+        self.library_generation = self.library_generation.wrapping_add(1);
+        let generation = self.library_generation;
         self.loading = true;
-        let task_root = root.clone();
         let task = cx.background_executor().spawn(async move {
-            Ok::<_, anyhow::Error>((
-                backend::library(&task_root)?,
-                organize::Library::load(&task_root),
-            ))
+            locations
+                .into_iter()
+                .map(|location| {
+                    let scan = backend::scan_library(&location.root);
+                    let organization = organize::Library::load(&location.root);
+                    (location, scan, organization)
+                })
+                .collect::<Vec<_>>()
         });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let results = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.loading = false;
-                if this.output(cx) != root {
-                    this.refresh_library(cx);
+                if this.library_generation != generation {
                     return;
                 }
-                match result {
-                    Ok((courses, library)) => {
-                        if this.library_root != root {
-                            this.folder_filter = None;
-                            this.target_folder = None;
+                this.loading = false;
+                this.courses.clear();
+                this.library_issues.clear();
+                this.library_materials.clear();
+                this.library_indexes.clear();
+                for (location, scan, organization) in results {
+                    match scan {
+                        Ok(scan) => {
+                            this.courses.extend(scan.courses);
+                            this.library_issues.extend(scan.issues);
+                            this.library_materials.extend(scan.materials);
                         }
-                        this.library_root = root;
-                        this.courses = courses;
-                        match library {
-                            Ok(library) => {
-                                this.library = library;
-                                this.library_error = None;
-                            }
-                            Err(error) => {
-                                this.library = Default::default();
-                                this.library_error = Some(error.to_string());
-                                this.folder_filter = None;
-                                this.target_folder = None;
-                                this.folder_editor = None;
-                                this.delete_folder = None;
-                            }
-                        }
+                        Err(error) => this
+                            .library_issues
+                            .push(format!("{}暂时无法读取：{error:#}", location.name)),
                     }
-                    Err(error) => this.message = Some(format!("{error:#}")),
+                    match organization {
+                        Ok(library) => {
+                            this.library_indexes.insert(location.root, library);
+                        }
+                        Err(error) => this.library_issues.push(format!(
+                            "{}的文件夹记录暂时无法读取：{error:#}",
+                            location.name
+                        )),
+                    }
+                }
+                this.courses.sort_by_key(|c| std::cmp::Reverse(c.modified));
+                this.apply_course_title_aliases();
+                if let Some(library) = this.library_indexes.get(&this.library_root) {
+                    this.library = library.clone();
+                    this.library_error = None;
+                } else {
+                    this.library_error = Some("当前库的文件夹信息暂时无法读取".into());
                 }
                 cx.notify();
             });
         })
         .detach();
     }
+
+    fn course_location(&self, course: &Course) -> Option<&workspace::LibraryLocation> {
+        self.workspace
+            .as_ref()?
+            .state
+            .libraries
+            .iter()
+            .filter(|lib| organize::relative_key(&lib.root, &course.storage_dir()).is_ok())
+            .max_by_key(|lib| lib.root.components().count())
+    }
+    fn course_folder(&self, course: &Course) -> Option<u64> {
+        let root = &self.course_location(course)?.root;
+        self.library_indexes
+            .get(root)?
+            .folder(root, &course.storage_dir())
+    }
     fn open_course(&mut self, course: Course, cx: &mut Context<Self>) {
+        self.save_reading_position(cx);
         cx.notify();
         self.reading = true;
         self.read_generation = self.read_generation.wrapping_add(1);
@@ -876,9 +983,30 @@ impl Desktop {
                 this.reading = false;
                 match result {
                     Ok(preview) => {
-                        this.result_tab = if preview.has_markdown { 0 } else { 2 };
+                        if let Some(workspace) = &mut this.workspace {
+                            let artifact = preview.course.dir.clone();
+                            if let Err(error) = workspace.transaction(|state| {
+                                for task in &mut state.tasks {
+                                    if task.artifact.as_ref() == Some(&artifact) {
+                                        task.unread = false;
+                                    }
+                                }
+                                Ok(())
+                            }) {
+                                this.workspace_error = Some(format!("阅读状态尚未保存：{error:#}"));
+                            }
+                        }
+                        if this
+                            .message
+                            .as_deref()
+                            .is_some_and(|m| m.starts_with("已加入任务"))
+                        {
+                            this.message = None;
+                        }
+                        this.result_tab = 0;
                         this.preview = Some(preview);
-                        this.scrolls[Page::Result as usize].set_offset(point(px(0.), px(0.)));
+                        this.apply_course_title_aliases();
+                        this.restore_reading_position(cx);
                         this.page = Page::Result;
                     }
                     Err(error) => this.message = Some(format!("读取笔记失败：{error:#}")),
@@ -887,174 +1015,6 @@ impl Desktop {
             });
         })
         .detach();
-    }
-    fn edited_settings(&self, cx: &App) -> course2md::settings::ConfigFile {
-        let mut config = self.config.clone();
-        config.desktop = self.desktop_settings.clone();
-        config.asr_api.base_url = self.value(Field::AsrUrl, cx);
-        config.asr_api.api_key = self.value(Field::AsrKey, cx);
-        config.asr_api.model = self.value(Field::AsrModel, cx);
-        config.llm.base_url = self.value(Field::LlmUrl, cx);
-        config.llm.api_key = self.value(Field::LlmKey, cx);
-        config.llm.model = self.value(Field::LlmModel, cx);
-        config.llm.enabled = self.settings_options.llm;
-        config.defaults.out = Some(course2md::config::expand_tilde(
-            self.value(Field::Output, cx).into(),
-        ));
-        config.defaults.keep_video = Some(self.settings_options.keep_video);
-        config.defaults.resume = Some(self.settings_options.resume);
-        use course2md::config::{AsrProvider::*, TranscriptSource::*};
-        config.defaults.provider = [
-            None,
-            Some(Coreml),
-            Some(Gpu),
-            Some(Cpu),
-            Some(Npu),
-            Some(Api),
-        ][self.settings_options.provider];
-        config.defaults.transcript_source =
-            Some([Auto, Subtitle, Asr][self.settings_options.source_mode]);
-        use course2md::config::OutputFormat::*;
-        config.defaults.formats = Some(
-            [Md, Html, Json]
-                .into_iter()
-                .zip(self.settings_options.formats)
-                .filter(|(_, selected)| *selected)
-                .map(|(format, _)| format)
-                .collect(),
-        );
-        config
-    }
-    fn invalid_setting(&self, cx: &App) -> Option<(Field, &'static str)> {
-        if self.value(Field::Output, cx).is_empty() {
-            return Some((Field::Output, "请选择笔记保存目录"));
-        }
-        if self.settings_options.provider == 5 && self.settings_options.source_mode != 1 {
-            for (field, label) in [
-                (Field::AsrUrl, "请填写云端 API 服务地址"),
-                (Field::AsrModel, "请填写云端识别模型"),
-                (Field::AsrKey, "请填写云端 API Key"),
-            ] {
-                if self.value(field, cx).is_empty()
-                    && !(field == Field::AsrKey
-                        && course2md::config::asr_api_key_from_env().is_some())
-                {
-                    return Some((field, label));
-                }
-            }
-        }
-        if self.settings_options.llm {
-            for (field, message) in [
-                (Field::LlmUrl, "请填写 AI 服务地址"),
-                (Field::LlmModel, "请填写 AI 模型名称"),
-            ] {
-                if self.value(field, cx).is_empty() {
-                    return Some((field, message));
-                }
-            }
-        }
-        for (field, enabled) in [
-            (
-                Field::AsrUrl,
-                self.settings_options.provider == 5 && self.settings_options.source_mode != 1,
-            ),
-            (Field::LlmUrl, self.settings_options.llm),
-        ] {
-            if enabled
-                && url::Url::parse(&self.value(field, cx))
-                    .ok()
-                    .is_none_or(|url| {
-                        !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
-                    })
-            {
-                return Some((field, "请输入完整的 http:// 或 https:// 服务地址"));
-            }
-        }
-        None
-    }
-    fn save_settings(&mut self, cx: &mut Context<Self>) {
-        cx.notify();
-        if self.config_error {
-            self.settings_status = "配置文件损坏，请修正后重新加载".into();
-            return;
-        }
-        if let Some((_, message)) = self.invalid_setting(cx) {
-            self.settings_status = format!("未保存：{message}");
-            return;
-        }
-        if !self.settings_options.formats.iter().any(|enabled| *enabled) {
-            self.settings_status = "未保存：请至少选择一种导出格式".into();
-            return;
-        }
-        let mut config = self.edited_settings(cx);
-        if let Err(error) =
-            course2md::options::resolve("configuration".into(), &Default::default(), &config)
-                .and_then(|cfg| cfg.validate())
-        {
-            self.settings_status = format!("未保存：{error:#}");
-            return;
-        }
-        if config.llm.enabled
-            && let Err(error) = course2md::llm::validate(&config.llm)
-        {
-            self.settings_status = format!("未保存：{error:#}");
-            return;
-        }
-        config.llm.disable_hint = true;
-        match course2md::settings::save(&config) {
-            Ok(_) => {
-                let library_changed = self.config.defaults.out != config.defaults.out;
-                self.config = config;
-                if self.source_preview.is_none() {
-                    self.task_options = ConversionOptions::from_config(&self.config);
-                }
-                self.settings_snapshot = self.edited_settings(cx);
-                cx.set_reduce_motion(self.desktop_settings.reduce_motion);
-                if library_changed {
-                    self.refresh_library(cx);
-                }
-                self.settings_status = "已自动保存".into();
-            }
-            Err(error) => self.settings_status = format!("保存失败：{error:#}"),
-        }
-        cx.notify();
-    }
-    fn sync_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.desktop_settings = self.config.desktop.clone();
-        cx.set_reduce_motion(self.desktop_settings.reduce_motion);
-        self.settings_snapshot = self.config.clone();
-        let cfg = &self.config;
-        for (field, value) in [
-            (Field::AsrUrl, cfg.asr_api.base_url.clone()),
-            (Field::AsrKey, cfg.asr_api.api_key.clone()),
-            (Field::AsrModel, cfg.asr_api.model.clone()),
-            (Field::LlmUrl, cfg.llm.base_url.clone()),
-            (Field::LlmKey, cfg.llm.api_key.clone()),
-            (Field::LlmModel, cfg.llm.model.clone()),
-        ] {
-            self.inputs[&field].update(cx, |state, cx| state.set_value(value, window, cx));
-        }
-        self.settings_options = ConversionOptions::from_config(cfg);
-        if self.settings_options.provider == 0
-            && let Some(choice) = self
-                .engine_choices(cx)
-                .into_iter()
-                .find(|c| (1..=4).contains(&c.index) && c.selectable)
-        {
-            self.settings_options.provider = choice.index;
-        }
-        if self.source_preview.is_none() {
-            self.task_options = self.settings_options.clone();
-        }
-        let output = cfg
-            .defaults
-            .out
-            .clone()
-            .map(course2md::config::expand_tilde)
-            .unwrap_or_else(backend::default_output);
-        self.inputs[&Field::Output].update(cx, |state, cx| {
-            state.set_value(output.display().to_string(), window, cx)
-        });
     }
 }
 
@@ -1066,87 +1026,153 @@ impl Drop for Desktop {
     }
 }
 
+fn dispatch_desktop_action(
+    view: &WeakEntity<Desktop>,
+    cx: &mut App,
+    action: impl FnOnce(&mut Desktop, &mut Window, &mut Context<Desktop>) + 'static,
+) {
+    let Some(handle) = cx.active_window() else {
+        return;
+    };
+    let view = view.clone();
+    // Global action listeners run while the dispatching window is borrowed.
+    // Update it after dispatch completes so the native menu fallback can run too.
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| {
+            if !window.has_active_dialog(cx) {
+                let _ = view.update(cx, |this, cx| action(this, window, cx));
+            }
+        });
+    });
+}
+
 fn main() {
-    gpui_platform::application()
-        .with_assets(icons::Assets)
-        .run(|cx| {
-            gpui_component::init(cx);
-            gpui_component::set_locale("zh-CN");
-            theme::init(cx);
-            let system_titlebar = course2md::settings::load()
-                .map(|c| c.desktop.system_titlebar)
-                .unwrap_or(false);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::centered(size(px(1140.), px(820.)), cx)),
-                    window_min_size: Some(size(px(860.), px(620.))),
-                    ..if system_titlebar {
-                        WindowOptions {
-                            titlebar: Some(TitlebarOptions {
-                                title: Some("course2md".into()),
-                                ..Default::default()
-                            }),
+    a11y::init_validation_diagnostics();
+    let app = gpui_platform::application().with_assets(icons::Assets);
+    app.on_reopen(|cx| {
+        cx.activate(true);
+        for handle in cx.windows() {
+            let _ = cx.update_window(handle, |_, window, _| window.activate_window());
+        }
+    });
+    app.run(|cx| {
+        gpui_component::init(cx);
+        gpui_component::set_locale("zh-CN");
+        theme::init(cx);
+        let system_titlebar = true;
+        // Debug validation uses the same native window and render path at an exact size.
+        // Release builds always use the ordinary initial window size.
+        let initial_size = if cfg!(debug_assertions) {
+            std::env::var("COURSE2MD_VALIDATION_WINDOW")
+                .ok()
+                .and_then(|value| {
+                    let (width, height) = value.split_once('x')?;
+                    let width = width.parse::<f32>().ok()?;
+                    let height = height.parse::<f32>().ok()?;
+                    (width.is_finite() && height.is_finite() && width >= 860. && height >= 620.)
+                        .then_some(size(px(width), px(height)))
+                })
+                .unwrap_or(size(px(1140.), px(820.)))
+        } else {
+            size(px(1140.), px(820.))
+        };
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::centered(initial_size, cx)),
+                window_min_size: Some(size(px(860.), px(620.))),
+                ..if system_titlebar {
+                    WindowOptions {
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("course2md".into()),
                             ..Default::default()
-                        }
-                    } else {
-                        TitleBar::window_options()
+                        }),
+                        ..Default::default()
                     }
-                },
-                |window, cx| {
-                    window.set_window_title("course2md");
-                    let view = cx.new(|cx| Desktop::new(window, cx));
-                    if !view.read(cx).desktop_settings.setup_completed {
-                        view.update(cx, |_, cx| {
-                            cx.defer_in(window, |this, window, cx| {
-                                this.open_setup(window, cx);
-                            })
-                        });
-                    }
-                    let weak = view.downgrade();
-                    let quit_view = weak.clone();
-                    let settings_view = weak.clone();
-                    let about_view = weak.clone();
-                    cx.on_action(move |_: &OpenAbout, cx| {
-                        let _ = about_view.update(cx, |this, cx| {
-                            this.settings_tab = 4;
-                            this.navigate(Page::Settings, cx);
-                        });
-                    });
-                    cx.on_action(move |_: &OpenSettings, cx| {
-                        let _ =
-                            settings_view.update(cx, |this, cx| this.navigate(Page::Settings, cx));
-                    });
-                    cx.on_action(move |_: &Quit, cx| {
-                        if quit_view
-                            .update(cx, |this, cx| this.request_close(cx))
-                            .unwrap_or(true)
-                        {
-                            cx.quit();
-                        }
-                    });
-                    window.on_window_should_close(cx, move |_, cx| {
-                        weak.update(cx, |this, cx| this.request_close(cx))
-                            .unwrap_or(true)
-                    });
-                    cx.new(|cx| Root::new(view, window, cx))
-                },
-            )
-            .expect("无法创建 course2md 窗口");
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
+                } else {
+                    TitleBar::window_options()
                 }
-            })
-            .detach();
-            cx.bind_keys([
-                KeyBinding::new("secondary-q", Quit, None),
-                KeyBinding::new("secondary-,", OpenSettings, None),
-            ]);
-            cx.set_menus([gpui::Menu::new("course2md").items([
+            },
+            |window, cx| {
+                window.set_window_title("course2md");
+                let view = cx.new(|cx| Desktop::new(window, cx));
+                let weak = view.downgrade();
+                let quit_view = weak.clone();
+                let settings_view = weak.clone();
+                let about_view = weak.clone();
+                let new_view = weak.clone();
+                let search_view = weak.clone();
+                cx.on_action(move |_: &OpenAbout, cx| {
+                    dispatch_desktop_action(&about_view, cx, |this, _, cx| {
+                        this.settings_tab = 3;
+                        this.navigate(Page::Settings, cx);
+                    });
+                });
+                cx.on_action(move |_: &OpenSettings, cx| {
+                    dispatch_desktop_action(&settings_view, cx, |this, _, cx| {
+                        this.navigate(Page::Settings, cx);
+                    });
+                });
+                cx.on_action(move |_: &NewNote, cx| {
+                    dispatch_desktop_action(&new_view, cx, |this, window, cx| {
+                        this.new_note_from_action(window, cx);
+                    });
+                });
+                cx.on_action(move |_: &SearchContent, cx| {
+                    dispatch_desktop_action(&search_view, cx, |this, window, cx| {
+                        if this.page == Page::Result {
+                            this.open_reader_find(window, cx);
+                        } else {
+                            this.navigate(Page::Library, cx);
+                            this.inputs[&Field::Search]
+                                .update(cx, |input, cx| input.focus(window, cx));
+                        }
+                    });
+                });
+                cx.on_action(move |_: &Quit, cx| {
+                    if quit_view
+                        .update(cx, |this, cx| this.request_close(cx))
+                        .unwrap_or(true)
+                    {
+                        cx.quit();
+                    }
+                });
+                window.on_window_should_close(cx, move |_, cx| {
+                    let saved = weak
+                        .update(cx, |this, cx| {
+                            this.flush_settings_for_exit(cx) && this.save_current_draft(cx)
+                        })
+                        .unwrap_or(true);
+                    if saved {
+                        cx.hide();
+                    }
+                    false
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        )
+        .expect("无法创建 course2md 窗口");
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        cx.bind_keys([
+            KeyBinding::new("secondary-q", Quit, None),
+            KeyBinding::new("secondary-,", OpenSettings, None),
+            KeyBinding::new("secondary-n", NewNote, None),
+            KeyBinding::new("secondary-f", SearchContent, None),
+        ]);
+        cx.set_menus([
+            gpui::Menu::new("course2md").items([
                 gpui::MenuItem::action("关于 course2md", OpenAbout),
                 gpui::MenuItem::action("设置…", OpenSettings),
                 gpui::MenuItem::action("退出 course2md", Quit),
-            ])]);
-            cx.activate(true);
-        });
+            ]),
+            gpui::Menu::new("文件").items([gpui::MenuItem::action("生成笔记", NewNote)]),
+            gpui::Menu::new("查找")
+                .items([gpui::MenuItem::action("搜索课程或当前笔记", SearchContent)]),
+        ]);
+        cx.activate(true);
+    });
 }

@@ -1,0 +1,2107 @@
+//! Durable user work. Views never supply the identity or settings of a retry.
+use super::ConversionOptions;
+use anyhow::{Context, Result, bail, ensure};
+use course2md::settings::ConfigFile;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+const SCHEMA: u32 = 1;
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub fn new_id(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{nanos:x}-{:x}-{sequence:x}", std::process::id())
+}
+
+pub fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LibraryLocation {
+    pub id: String,
+    pub name: String,
+    pub root: PathBuf,
+    #[serde(default)]
+    pub previous_roots: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Override {
+    Provider,
+    TextSource,
+    Proofread,
+    Summary,
+    Vision,
+    KeepVideo,
+    Formats,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Draft {
+    pub id: String,
+    pub revision: u64,
+    pub online: bool,
+    pub input: String,
+    #[serde(default)]
+    pub source: Option<crate::source::Source>,
+    pub title: String,
+    pub custom_title: bool,
+    pub library_id: String,
+    pub folder: Option<u64>,
+    pub options: ConversionOptions,
+    #[serde(default)]
+    pub overrides: BTreeSet<Override>,
+    #[serde(default)]
+    pub subtitle: Option<PathBuf>,
+    #[serde(default)]
+    pub asr_service: Option<String>,
+    #[serde(default)]
+    pub ai_service: Option<String>,
+    #[serde(default)]
+    pub retry_of: Option<String>,
+    #[serde(default, serialize_with = "serialize_optional_public_config")]
+    pub base_config: Option<ConfigFile>,
+    #[serde(default)]
+    pub submitted_task: Option<String>,
+    #[serde(default)]
+    pub scroll: f32,
+    pub updated: u64,
+}
+
+impl Draft {
+    pub fn new(online: bool, library_id: String, defaults: ConversionOptions) -> Self {
+        Self {
+            id: new_id("draft"),
+            revision: 0,
+            online,
+            input: String::new(),
+            source: None,
+            title: String::new(),
+            custom_title: false,
+            library_id,
+            folder: None,
+            options: defaults,
+            overrides: BTreeSet::new(),
+            subtitle: None,
+            asr_service: None,
+            ai_service: None,
+            retry_of: None,
+            base_config: None,
+            submitted_task: None,
+            scroll: 0.,
+            updated: now(),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        let label = if !self.title.is_empty() {
+            &self.title
+        } else {
+            &self.input
+        };
+        if self.retry_of.is_some() && !label.is_empty() {
+            format!("调整《{label}》")
+        } else {
+            label.clone()
+        }
+    }
+
+    pub fn change_source(&mut self, input: String) {
+        if input == self.input {
+            return;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        self.input = input;
+        self.source = None;
+        self.subtitle = None;
+        self.submitted_task = None;
+        self.updated = now();
+        if !self.custom_title {
+            self.title.clear();
+        }
+    }
+
+    pub fn accept_source(&mut self, revision: u64, source: crate::source::Source) -> bool {
+        if self.revision != revision {
+            return false;
+        }
+        if !self.custom_title {
+            self.title = source.title.clone();
+        }
+        self.source = Some(source);
+        self.updated = now();
+        true
+    }
+
+    pub fn inherit(&mut self, defaults: &ConversionOptions) {
+        let v = &mut self.options;
+        if !self.overrides.contains(&Override::Provider) {
+            v.provider = defaults.provider;
+        }
+        if !self.overrides.contains(&Override::TextSource) {
+            v.source_mode = defaults.source_mode;
+        }
+        if !self.overrides.contains(&Override::Proofread) {
+            v.llm = defaults.llm;
+        }
+        if !self.overrides.contains(&Override::Summary) {
+            v.summarize = defaults.summarize;
+        }
+        if !self.overrides.contains(&Override::Vision) {
+            v.vision = defaults.vision;
+        }
+        if !self.overrides.contains(&Override::KeepVideo) {
+            v.keep_video = defaults.keep_video;
+        }
+        if !self.overrides.contains(&Override::Formats) {
+            v.formats = defaults.formats;
+        }
+        v.resume = true;
+    }
+}
+
+/// Extra defense at the persistence boundary: even a caller-provided resolved
+/// config cannot put its API keys in a task file or its backup.
+fn serialize_public_config<S: serde::Serializer>(
+    config: &ConfigFile,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    public_config(config).serialize(serializer)
+}
+fn serialize_optional_public_config<S: serde::Serializer>(
+    config: &Option<ConfigFile>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    config.as_ref().map(public_config).serialize(serializer)
+}
+
+pub fn public_config(config: &ConfigFile) -> ConfigFile {
+    let mut config = config.clone();
+    config.asr_api.api_key.clear();
+    config.llm.api_key.clear();
+    config
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskPlan {
+    #[serde(default)]
+    pub operation: course2md::execution::Operation,
+    pub source: crate::source::Source,
+    pub source_id: String,
+    pub title: String,
+    pub library_id: String,
+    pub folder: Option<u64>,
+    pub options: ConversionOptions,
+    pub subtitle: Option<PathBuf>,
+    #[serde(serialize_with = "serialize_public_config")]
+    pub config: ConfigFile,
+    pub asr_service: Option<String>,
+    pub ai_service: Option<String>,
+}
+
+impl TaskPlan {
+    pub fn same_work(&self, other: &Self) -> bool {
+        if self.operation != other.operation {
+            return false;
+        }
+        if self.library_id != other.library_id
+            || self.source_id != other.source_id
+            || self.subtitle != other.subtitle
+            || self.asr_service != other.asr_service
+            || self.ai_service != other.ai_service
+        {
+            return false;
+        }
+        let mut left = public_config(&self.config);
+        let mut right = public_config(&other.config);
+        // Display and organization are not processing parameters.
+        left.defaults.out = None;
+        right.defaults.out = None;
+        left.desktop = Default::default();
+        right.desktop = Default::default();
+        left == right && self.options == other.options
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Intent {
+    Run,
+    Pause,
+    Cancel,
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    Queued,
+    Running,
+    Pausing,
+    Paused,
+    NeedsAttention,
+    Uncertain,
+    Complete,
+    Partial,
+    Cancelled,
+}
+
+impl TaskState {
+    pub fn finished(self) -> bool {
+        matches!(self, Self::Complete | Self::Partial | Self::Cancelled)
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "等待处理",
+            Self::Running => "正在生成笔记",
+            Self::Pausing => "正在保存进度",
+            Self::Paused => "已暂停",
+            Self::NeedsAttention => "需要处理",
+            Self::Uncertain => "结果尚未确认",
+            Self::Complete => "笔记已生成",
+            Self::Partial => "笔记已保存，部分处理未完成",
+            Self::Cancelled => "已取消",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Stage {
+    pub status: String,
+    pub current: u64,
+    pub total: u64,
+    pub detail: Option<String>,
+}
+
+impl Stage {
+    pub fn begin(&mut self) {
+        *self = Self {
+            status: "start".into(),
+            ..Default::default()
+        };
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskRecord {
+    pub id: String,
+    pub plan: TaskPlan,
+    pub state: TaskState,
+    pub intent: Intent,
+    pub created: u64,
+    pub updated: u64,
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub handled_by: Option<String>,
+    pub work_dir: PathBuf,
+    #[serde(default)]
+    pub stages: BTreeMap<String, Stage>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub artifact: Option<PathBuf>,
+    #[serde(default)]
+    pub outcomes: Option<serde_json::Value>,
+    #[serde(default)]
+    pub unread: bool,
+    #[serde(default)]
+    pub logs: Vec<String>,
+    #[serde(default)]
+    pub blocked: Vec<BlockedRequest>,
+    #[serde(default)]
+    pub resend: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BlockedRequest {
+    pub reason: String,
+    pub request_id: Option<String>,
+    pub purpose: Option<String>,
+    #[serde(default)]
+    pub description: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReadingPosition {
+    pub paragraph: Option<String>,
+    pub seconds: Option<f64>,
+    pub offset: f32,
+    #[serde(default)]
+    pub within: f32,
+    #[serde(default)]
+    pub fraction: Option<f32>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct State {
+    pub schema: u32,
+    #[serde(default)]
+    pub marker_registry_version: u32,
+    pub libraries: Vec<LibraryLocation>,
+    pub default_library: String,
+    pub drafts: Vec<Draft>,
+    pub current_draft: String,
+    pub tasks: Vec<TaskRecord>,
+    #[serde(default)]
+    pub selected_task: Option<String>,
+    #[serde(default)]
+    pub positions: BTreeMap<String, ReadingPosition>,
+    #[serde(default)]
+    pub reader_sources: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    pub collapsed: BTreeSet<String>,
+    #[serde(default)]
+    pub storage_backups: Vec<crate::storage::BackupRecord>,
+}
+
+impl State {
+    fn initial(root: PathBuf, options: ConversionOptions) -> Self {
+        let library = LibraryLocation {
+            id: new_id("library"),
+            name: "课程库".into(),
+            root,
+            previous_roots: Vec::new(),
+        };
+        let draft = Draft::new(true, library.id.clone(), options);
+        Self {
+            schema: SCHEMA,
+            marker_registry_version: 1,
+            default_library: library.id.clone(),
+            libraries: vec![library],
+            current_draft: draft.id.clone(),
+            drafts: vec![draft],
+            tasks: Vec::new(),
+            selected_task: None,
+            positions: BTreeMap::new(),
+            reader_sources: BTreeMap::new(),
+            collapsed: BTreeSet::new(),
+            storage_backups: Vec::new(),
+        }
+    }
+
+    pub fn draft(&self) -> Option<&Draft> {
+        self.drafts.iter().find(|d| d.id == self.current_draft)
+    }
+    pub fn draft_mut(&mut self) -> Option<&mut Draft> {
+        self.drafts.iter_mut().find(|d| d.id == self.current_draft)
+    }
+    pub fn library(&self, id: &str) -> Option<&LibraryLocation> {
+        self.libraries.iter().find(|l| l.id == id)
+    }
+    pub fn task(&self, id: &str) -> Option<&TaskRecord> {
+        self.tasks.iter().find(|t| t.id == id)
+    }
+    pub fn task_mut(&mut self, id: &str) -> Option<&mut TaskRecord> {
+        self.tasks.iter_mut().find(|t| t.id == id)
+    }
+    pub fn next_task(&self) -> Option<&TaskRecord> {
+        self.tasks.iter().find(|t| {
+            t.state == TaskState::Queued && t.intent == Intent::Run && t.handled_by.is_none()
+        })
+    }
+
+    pub fn fresh_draft(
+        &mut self,
+        online: bool,
+        options: ConversionOptions,
+        destination: Option<(String, u64)>,
+    ) -> String {
+        let mut draft = Draft::new(online, self.default_library.clone(), options);
+        if let Some((library, folder)) = destination {
+            draft.library_id = library;
+            draft.folder = Some(folder);
+        }
+        self.current_draft = draft.id.clone();
+        self.drafts.push(draft);
+        self.current_draft.clone()
+    }
+
+    pub fn switch_source_kind(&mut self, online: bool, options: ConversionOptions) {
+        if let Some(draft) = self
+            .drafts
+            .iter()
+            .rev()
+            .find(|d| d.online == online && d.submitted_task.is_none() && d.retry_of.is_none())
+        {
+            self.current_draft = draft.id.clone();
+        } else {
+            self.fresh_draft(online, options, None);
+        }
+    }
+
+    pub fn enqueue(&mut self, plan: TaskPlan, parent: Option<String>) -> Result<(String, bool)> {
+        ensure!(
+            !plan.source_id.is_empty() && !plan.title.trim().is_empty(),
+            "请先确认视频和笔记名称"
+        );
+        if let Some(id) = parent.as_deref() {
+            let original = self.task(id).context("原任务记录不存在")?;
+            if let Some(followup) = &original.handled_by {
+                ensure!(
+                    self.task(followup).is_some(),
+                    "后续任务记录缺失，请先恢复任务记录"
+                );
+                return Ok((followup.clone(), false));
+            }
+            ensure!(
+                !matches!(
+                    original.state,
+                    TaskState::Running | TaskState::Pausing | TaskState::Queued
+                ),
+                "原任务仍在处理，请先暂停并等候当前步骤结束"
+            );
+        }
+        let location = self
+            .library(&plan.library_id)
+            .context("所选保存位置未登记")?;
+        if let Some(existing) = self
+            .tasks
+            .iter()
+            .find(|t| !t.state.finished() && t.handled_by.is_none() && t.plan.same_work(&plan))
+        {
+            return Ok((existing.id.clone(), false));
+        }
+        let id = new_id("task");
+        let work_dir = location.root.join(".course2md/work").join(&id);
+        let now = now();
+        self.tasks.push(TaskRecord {
+            id: id.clone(),
+            plan,
+            state: TaskState::Queued,
+            intent: Intent::Run,
+            created: now,
+            updated: now,
+            parent: parent.clone(),
+            handled_by: None,
+            work_dir,
+            stages: BTreeMap::new(),
+            error: None,
+            artifact: None,
+            outcomes: None,
+            unread: false,
+            logs: Vec::new(),
+            blocked: Vec::new(),
+            resend: Vec::new(),
+        });
+        if let Some(parent) = parent.and_then(|id| self.task_mut(&id)) {
+            parent.handled_by = Some(id.clone());
+        }
+        self.selected_task = Some(id.clone());
+        Ok((id, true))
+    }
+
+    /// Reconcile only process-owned states. Confirmed user stops survive restarts.
+    /// The engine still checks its durable remote-request ledger before any send.
+    pub fn recover(&mut self) {
+        // Older records had a child.parent link but no reverse link. Reconstruct it
+        // before deciding which task may run so an obsolete parent cannot resume.
+        let mut followups = self
+            .tasks
+            .iter()
+            .filter_map(|task| {
+                task.parent
+                    .as_ref()
+                    .map(|parent| (task.created, task.updated, task.id.clone(), parent.clone()))
+            })
+            .collect::<Vec<_>>();
+        followups.sort();
+        for (_, _, child, parent) in followups {
+            if child != parent
+                && let Some(task) = self.task_mut(&parent)
+            {
+                task.handled_by = Some(child);
+            }
+        }
+        for task in &mut self.tasks {
+            if task.handled_by.is_some() && !task.state.finished() {
+                task.intent = Intent::Pause;
+                task.state = TaskState::Paused;
+                task.unread = false;
+                continue;
+            }
+            if matches!(task.state, TaskState::Running | TaskState::Pausing) {
+                task.state = match task.intent {
+                    Intent::Run => TaskState::Queued,
+                    Intent::Pause | Intent::Quit => TaskState::Paused,
+                    Intent::Cancel => TaskState::Cancelled,
+                };
+                task.updated = now();
+            }
+            if task.state == TaskState::Queued && task.intent != Intent::Run {
+                task.state = if task.intent == Intent::Cancel {
+                    TaskState::Cancelled
+                } else {
+                    TaskState::Paused
+                };
+            }
+        }
+    }
+
+    pub fn set_intent(&mut self, id: &str, intent: Intent) -> Result<()> {
+        let task = self.task_mut(id).context("任务记录不存在")?;
+        ensure!(
+            !task.state.finished(),
+            "这项任务已结束，请从结果页选择补做或生成新版"
+        );
+        ensure!(
+            task.handled_by.is_none(),
+            "这项任务已有后续处理，请打开对应任务继续。"
+        );
+        ensure!(
+            intent != Intent::Run || !matches!(task.state, TaskState::Running | TaskState::Pausing),
+            "这项任务正在处理当前操作"
+        );
+        ensure!(
+            intent != Intent::Run
+                || !task
+                    .blocked
+                    .iter()
+                    .any(|request| request.reason == "uncertain"),
+            "仍有请求结果尚未确认，请查看请求范围后选择是否重新发送"
+        );
+        task.intent = intent;
+        task.updated = now();
+        task.state = match intent {
+            Intent::Run => TaskState::Queued,
+            Intent::Cancel if matches!(task.state, TaskState::Running | TaskState::Pausing) => {
+                TaskState::Pausing
+            }
+            Intent::Cancel => TaskState::Cancelled,
+            _ if matches!(task.state, TaskState::Running | TaskState::Pausing) => {
+                TaskState::Pausing
+            }
+            _ => TaskState::Paused,
+        };
+        Ok(())
+    }
+
+    pub fn authorize_uncertain(&mut self, id: &str, requests: &[String]) -> Result<()> {
+        let task = self.task_mut(id).context("任务记录不存在")?;
+        ensure!(
+            task.handled_by.is_none(),
+            "这项任务已有后续处理，请打开对应任务继续"
+        );
+        ensure!(
+            !matches!(
+                task.state,
+                TaskState::Running | TaskState::Pausing | TaskState::Queued
+            ) && !task.state.finished(),
+            "这项任务的状态已变化，请查看最新状态"
+        );
+        reconcile_receipts(task)?;
+        let current: BTreeSet<_> = task
+            .blocked
+            .iter()
+            .filter(|request| request.reason == "uncertain")
+            .filter_map(|request| request.request_id.as_ref())
+            .collect();
+        let selected: BTreeSet<_> = requests.iter().collect();
+        ensure!(
+            !selected.is_empty() && current == selected,
+            "待确认的请求已变化，请查看最新范围后再选择是否重新发送"
+        );
+        ensure!(
+            selected.iter().all(|id| !task.resend.contains(id)),
+            "这些请求已获得重新发送授权，请等待对应任务处理"
+        );
+        task.resend.extend(requests.iter().cloned());
+        task.intent = Intent::Run;
+        task.state = TaskState::Queued;
+        task.error = None;
+        task.updated = now();
+        Ok(())
+    }
+
+    pub fn reprocess(
+        &mut self,
+        id: &str,
+        mut components: Vec<String>,
+        resend: Vec<String>,
+    ) -> Result<String> {
+        let mut original = self.task(id).context("任务不存在")?.clone();
+        if let Some(next) = &original.handled_by {
+            ensure!(
+                self.task(next).is_some(),
+                "后续任务记录缺失，请先恢复任务记录"
+            );
+            return Ok(next.clone());
+        }
+        ensure!(
+            !matches!(
+                original.state,
+                TaskState::Running | TaskState::Pausing | TaskState::Queued
+            ),
+            "当前任务仍在处理，请先等候当前步骤结束"
+        );
+        let base = original
+            .artifact
+            .clone()
+            .context("此任务尚无可补做的笔记正文")?;
+        let manifest = course2md::artifact::read_manifest(&base.join("manifest.json"))?;
+        ensure!(
+            manifest.source_id == original.plan.source_id,
+            "笔记来源与任务不匹配"
+        );
+        let value = original
+            .outcomes
+            .clone()
+            .unwrap_or(serde_json::to_value(&manifest.outcomes)?);
+        components.sort();
+        components.dedup();
+        ensure!(!components.is_empty(), "请选择需要补做的内容");
+        for component in &components {
+            let failed = if component == "exports" {
+                value
+                    .get("exports")
+                    .and_then(|v| v.as_object())
+                    .is_some_and(|exports| exports.values().any(failed_outcome))
+            } else {
+                matches!(
+                    component.as_str(),
+                    "screenshots" | "proofreading" | "summary"
+                ) && value.get(component).is_some_and(failed_outcome)
+            };
+            ensure!(
+                failed,
+                "这部分已经完成或没有要求处理，无需补做；可以在新草稿中选择生成新版"
+            );
+        }
+        if !resend.is_empty() {
+            reconcile_receipts(&mut original)?;
+            let unknown: BTreeSet<_> = original
+                .blocked
+                .iter()
+                .filter(|request| request.reason == "uncertain")
+                .filter_map(|request| request.request_id.as_ref())
+                .collect();
+            ensure!(
+                !unknown.is_empty() && unknown == resend.iter().collect(),
+                "待确认请求已变化，请查看最新范围后再选择是否重新发送"
+            );
+        } else {
+            ensure!(
+                !original.blocked.iter().any(|r| r.reason == "uncertain"),
+                "仍有请求结果尚未确认，请先查看请求范围"
+            );
+        }
+        let mut plan = original.plan;
+        let only_exports = components.iter().all(|component| component == "exports");
+        plan.config.llm.enabled = components
+            .iter()
+            .any(|component| component == "proofreading");
+        plan.config.llm.summarize = components.iter().any(|component| component == "summary");
+        plan.config.llm.vision &= plan.config.llm.enabled;
+        plan.options.llm = plan.config.llm.enabled;
+        plan.options.summarize = plan.config.llm.summarize;
+        plan.options.vision = plan.config.llm.vision;
+        if only_exports {
+            use course2md::config::OutputFormat;
+            let formats: Vec<_> = [OutputFormat::Md, OutputFormat::Html, OutputFormat::Json]
+                .into_iter()
+                .filter(|format| {
+                    value
+                        .get("exports")
+                        .and_then(|exports| exports.get(format.to_string()))
+                        .is_some_and(failed_outcome)
+                })
+                .collect();
+            ensure!(
+                !formats.is_empty(),
+                "需要补做的导出格式记录不完整，请从笔记中重新选择导出格式"
+            );
+            plan.options.formats = [OutputFormat::Md, OutputFormat::Html, OutputFormat::Json]
+                .map(|format| formats.contains(&format));
+            plan.config.defaults.formats = Some(formats);
+        }
+        plan.operation = course2md::execution::Operation::Reprocess {
+            base_version_dir: base,
+            components,
+            prior_work_dir: Some(original.work_dir),
+        };
+        plan.config.defaults.transcript_source =
+            Some(course2md::config::TranscriptSource::Subtitle);
+        let (next, created) = self.enqueue(plan, Some(id.to_owned()))?;
+        if created && let Some(task) = self.task_mut(&next) {
+            task.resend = resend;
+        }
+        Ok(next)
+    }
+
+    pub fn stop_session(&mut self) {
+        let ids: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|t| !t.state.finished() && t.intent == Intent::Run)
+            .map(|t| t.id.clone())
+            .collect();
+        for id in ids {
+            let _ = self.set_intent(&id, Intent::Quit);
+        }
+    }
+}
+
+pub struct Workspace {
+    pub state: State,
+    pub recovery: Option<String>,
+    path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TaskMirror {
+    schema: u32,
+    task: TaskRecord,
+}
+
+fn read_record_bytes(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    ensure!(
+        !std::fs::symlink_metadata(path)?.file_type().is_symlink(),
+        "任务记录被链接替代，原文件已保留"
+    );
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "任务记录不是普通文件");
+    const LIMIT: u64 = 32 * 1024 * 1024;
+    ensure!(
+        metadata.len() <= LIMIT,
+        "任务记录超过可读取范围，原文件已保留"
+    );
+    let mut bytes = Vec::new();
+    file.by_ref().take(LIMIT + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= LIMIT,
+        "任务记录超过可读取范围，原文件已保留"
+    );
+    Ok(bytes)
+}
+
+fn validate_record_location(task: &TaskRecord, libraries: &[LibraryLocation]) -> Result<()> {
+    ensure!(course2md::execution::valid_id(&task.id), "任务身份无效");
+    let library = libraries
+        .iter()
+        .find(|library| library.id == task.plan.library_id)
+        .context("任务保存位置记录缺失")?;
+    ensure!(
+        library.root.is_absolute()
+            && task.work_dir == library.root.join(".course2md/work").join(&task.id),
+        "任务工作目录与记录的课程库不匹配"
+    );
+    ensure!(
+        !task.plan.source_id.trim().is_empty() && !task.plan.title.trim().is_empty(),
+        "任务来源身份或名称记录缺失"
+    );
+    Ok(())
+}
+
+fn ensure_work_directory(task: &TaskRecord, library: &LibraryLocation) -> Result<()> {
+    check_library(library)?;
+    let mut current = library.root.clone();
+    for component in [".course2md", "work", &task.id] {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "任务工作目录被其他文件或链接占用，原内容已保留"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)?
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn pause_recovered_control(task: &TaskRecord) -> Result<()> {
+    if !task.work_dir.is_dir() {
+        return Ok(());
+    }
+    let path = task.work_dir.join("control.json");
+    let mut control = if path.is_file() {
+        let bytes = read_record_bytes(&path)?;
+        course2md::checkpoint::atomic_write(
+            &task
+                .work_dir
+                .join(format!("{}.json", new_id("control-before-recovery"))),
+            &bytes,
+        )?;
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    control["intent"] = serde_json::json!("pause");
+    control["resend"] = serde_json::json!([]);
+    course2md::checkpoint::atomic_write(&path, &serde_json::to_vec(&control)?)
+}
+
+fn failed_outcome(value: &serde_json::Value) -> bool {
+    matches!(
+        value.get("status").and_then(|v| v.as_str()),
+        Some("failed" | "partial")
+    )
+}
+
+pub fn check_library(location: &LibraryLocation) -> Result<()> {
+    ensure!(
+        location.root.is_dir(),
+        "保存位置暂时不可访问。请连接对应磁盘，原任务与草稿仍保留。"
+    );
+    let identity = std::fs::read_to_string(location.root.join(".course2md-library-id")).context(
+        "这个保存位置尚未重新关联，请在设置的存储中选择“重新关联此保存位置”。原任务和文件仍保留。",
+    )?;
+    ensure!(
+        identity.trim() == location.id,
+        "保存位置对应其他课程库，请恢复原位置或在存储设置中重新登记"
+    );
+    Ok(())
+}
+
+fn create_library_marker(location: &LibraryLocation) -> Result<()> {
+    use std::io::Write;
+    ensure!(location.root.is_dir(), "保存位置暂时不可访问");
+    let target = location.root.join(".course2md-library-id");
+    if target.exists() {
+        return check_library(location);
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(&location.root)?;
+    temporary.write_all(location.id.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(&target) {
+        Ok(_) => course2md::artifact::sync_dir(&location.root)?,
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            check_library(location)?
+        }
+        Err(error) => return Err(error.error.into()),
+    }
+    check_library(location)
+}
+
+fn upgrade_library_markers(state: &mut State) -> Vec<String> {
+    if state.marker_registry_version >= 1 {
+        return Vec::new();
+    }
+    let mut issues = Vec::new();
+    for library in &state.libraries {
+        if !library.root.is_dir() || library.root.join(".course2md-library-id").exists() {
+            continue;
+        }
+        let evidence = state
+            .tasks
+            .iter()
+            .filter(|task| task.plan.library_id == library.id)
+            .any(|task| {
+                if validate_record_location(task, &state.libraries).is_err() {
+                    return false;
+                }
+                let binding = task.work_dir.join("task-identity.json");
+                if task
+                    .work_dir
+                    .canonicalize()
+                    .ok()
+                    .zip(library.root.canonicalize().ok())
+                    .is_some_and(|(work, root)| !work.starts_with(root))
+                {
+                    return false;
+                }
+                if let Ok(bytes) = read_record_bytes(&binding)
+                    && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    && value.get("task_id").and_then(|v| v.as_str()) == Some(task.id.as_str())
+                    && value.get("source_id").and_then(|v| v.as_str())
+                        == Some(task.plan.source_id.as_str())
+                {
+                    return true;
+                }
+                let course_id = format!(
+                    "course-{}",
+                    &course2md::execution::digest(task.plan.source_id.as_bytes())[..32]
+                );
+                let version = library
+                    .root
+                    .join(&course_id)
+                    .join("versions")
+                    .join(&task.id);
+                let Ok(manifest) =
+                    course2md::artifact::read_manifest(&version.join("manifest.json"))
+                else {
+                    return false;
+                };
+                manifest.course_id == course_id
+                    && manifest.task_id == task.id
+                    && manifest.source_id == task.plan.source_id
+                    && course2md::artifact::validate_version(&version, &manifest).is_ok()
+            });
+        if evidence {
+            if let Err(error) = create_library_marker(library) {
+                issues.push(format!(
+                    "《{}》的保存位置关联尚未完成：{error:#}",
+                    library.name
+                ));
+            }
+        } else {
+            issues.push(format!(
+                "《{}》需要重新关联。在设置的存储中确认此保存位置后，可继续原任务；文件仍保留。",
+                library.name
+            ));
+        }
+    }
+    state.marker_registry_version = 1;
+    issues
+}
+
+fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Result<()> {
+    if task.artifact.is_some() {
+        return Ok(());
+    }
+    let course = format!(
+        "course-{}",
+        &course2md::execution::digest(task.plan.source_id.as_bytes())[..32]
+    );
+    let version = location.root.join(&course).join("versions").join(&task.id);
+    if version.join("manifest.json").is_file() {
+        let manifest = course2md::artifact::read_manifest(&version.join("manifest.json"))?;
+        ensure!(
+            manifest.task_id == task.id && manifest.source_id == task.plan.source_id,
+            "已发布笔记与任务身份不匹配，原文件已保留"
+        );
+        course2md::artifact::validate_version(&version, &manifest)?;
+        task.artifact = Some(version);
+        task.outcomes = Some(serde_json::to_value(&manifest.outcomes)?);
+        task.state = if manifest.partial {
+            TaskState::Partial
+        } else {
+            TaskState::Complete
+        };
+        task.error = None;
+        task.unread = true;
+        return Ok(());
+    }
+    if let course2md::execution::Operation::Reprocess {
+        base_version_dir,
+        components,
+        ..
+    } = &task.plan.operation
+        && components.iter().all(|component| component == "exports")
+        && task.work_dir.join("export-result.json").is_file()
+    {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(task.work_dir.join("export-result.json"))?)?;
+        let outcomes = value
+            .get("outcomes")
+            .and_then(|v| v.as_object())
+            .context("导出结果记录不完整")?;
+        ensure!(!outcomes.is_empty(), "导出结果记录为空");
+        let mut outcomes = outcomes.clone();
+        for (format, outcome) in &mut outcomes {
+            if outcome.get("status").and_then(|v| v.as_str()) == Some("succeeded") {
+                let format = match format.as_str() {
+                    "md" => course2md::config::OutputFormat::Md,
+                    "html" => course2md::config::OutputFormat::Html,
+                    "json" => course2md::config::OutputFormat::Json,
+                    _ => continue,
+                };
+                let expected = location
+                    .root
+                    .join(&course)
+                    .join("exports")
+                    .join(base_version_dir.file_name().context("笔记版本位置不完整")?)
+                    .join(&task.id)
+                    .join(course2md::portable::file_name(format));
+                if !expected.is_file() {
+                    *outcome = serde_json::to_value(course2md::artifact::Outcome::failed(
+                        "导出文件已移动或无法读取，可以重新导出",
+                    ))?;
+                }
+            }
+        }
+        let partial = outcomes.values().any(failed_outcome);
+        task.artifact = Some(base_version_dir.clone());
+        task.outcomes = Some(serde_json::json!({"exports":outcomes}));
+        task.state = if partial {
+            TaskState::Partial
+        } else {
+            TaskState::Complete
+        };
+        task.unread = true;
+    }
+    Ok(())
+}
+
+pub fn reconcile_receipts(task: &mut TaskRecord) -> Result<()> {
+    let receipts = course2md::dispatch::receipts(&task.work_dir)?;
+    task.blocked.retain(|request| request.reason != "uncertain");
+    for receipt in receipts.into_iter().filter(|r| {
+        matches!(
+            r.state,
+            course2md::dispatch::State::Sending | course2md::dispatch::State::Uncertain
+        )
+    }) {
+        task.blocked.push(BlockedRequest {
+            reason: "uncertain".into(),
+            request_id: Some(receipt.request_id),
+            purpose: Some(receipt.purpose),
+            description: receipt.description.clone(),
+            message: if receipt.description.trim().is_empty() {
+                receipt.message.unwrap_or_else(|| {
+                    "请求已发送，尚未确认服务是否完成。已保存其他进度，没有自动重新发送。".into()
+                })
+            } else {
+                format!(
+                    "{}：{}",
+                    receipt.description,
+                    receipt.message.unwrap_or_else(|| {
+                        "请求结果尚未确认；其他进度已保留，没有自动重新发送。".into()
+                    })
+                )
+            },
+        });
+    }
+    if !task.blocked.is_empty()
+        && task
+            .blocked
+            .iter()
+            .any(|request| request.reason == "uncertain")
+        && task.intent == Intent::Run
+    {
+        task.state = TaskState::Uncertain;
+        task.unread = true;
+    }
+    Ok(())
+}
+
+impl Workspace {
+    /// The UI explains the registered path and obtains an explicit association choice.
+    pub fn reassociate_library(&mut self, id: &str) -> Result<()> {
+        let library = self.state.library(id).context("保存位置未登记")?.clone();
+        ensure!(
+            library.root.is_dir(),
+            "保存位置暂时不可访问，请先连接对应磁盘"
+        );
+        create_library_marker(&library)?;
+        self.transaction(|state| {
+            state.marker_registry_version = 1;
+            Ok(())
+        })
+    }
+
+    /// Explicit repair. Originals are archived first; no recovered task may dispatch work.
+    pub fn rebuild(root: PathBuf, options: ConversionOptions) -> Result<Self> {
+        Self::rebuild_at(
+            course2md::config::config_dir().join("desktop-workspace.json"),
+            root,
+            options,
+        )
+    }
+
+    pub fn rebuild_at(path: PathBuf, root: PathBuf, options: ConversionOptions) -> Result<Self> {
+        let parent = path.parent().context("任务记录缺少保存目录")?;
+        std::fs::create_dir_all(parent)?;
+        let _lock = course2md::runtime::lock_file(&path.with_extension("lock"))?;
+        let backup = path.with_extension("json.bak");
+        let originals: Vec<_> = [&path, &backup]
+            .into_iter()
+            .filter(|p| p.exists())
+            .map(|p| Ok((p.clone(), read_record_bytes(p)?)))
+            .collect::<Result<_>>()?;
+        ensure!(
+            !originals.is_empty(),
+            "原任务记录不存在，请重新打开应用建立新记录"
+        );
+        let values: Vec<serde_json::Value> = originals
+            .iter()
+            .filter_map(|(_, bytes)| serde_json::from_slice(bytes).ok())
+            .collect();
+        ensure!(
+            !values.iter().any(|v| v
+                .get("schema")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|schema| schema > SCHEMA as u64)),
+            "这些任务由较新版本创建，请使用对应版本恢复，原文件已保留"
+        );
+        let archive = parent.join(new_id("workspace-recovery"));
+        std::fs::create_dir(&archive).context("无法建立原始记录备份，尚未重建")?;
+        for (original, bytes) in &originals {
+            let name = original.file_name().context("原记录缺少文件名")?;
+            course2md::checkpoint::atomic_write(&archive.join(name), bytes)
+                .context("原始记录备份未完成，尚未重建")?;
+        }
+        let mut state = State::initial(root.clone(), options);
+        if let Ok(marker) = std::fs::read_to_string(root.join(".course2md-library-id"))
+            && course2md::execution::valid_id(marker.trim())
+        {
+            state.default_library = marker.trim().into();
+            state.libraries[0].id = state.default_library.clone();
+            state.drafts[0].library_id = state.default_library.clone();
+        }
+        // Libraries and tasks are independently recoverable even when another field is damaged.
+        let mut locations = Vec::<LibraryLocation>::new();
+        let mut records = BTreeMap::<String, TaskRecord>::new();
+        let mut drafts = Vec::<Draft>::new();
+        for value in &values {
+            if let Some(items) = value.get("libraries").and_then(|v| v.as_array()) {
+                for item in items {
+                    if let Ok(location) = serde_json::from_value::<LibraryLocation>(item.clone())
+                        && course2md::execution::valid_id(&location.id)
+                        && location.root.is_absolute()
+                        && !locations
+                            .iter()
+                            .any(|l| l.id == location.id || l.root == location.root)
+                    {
+                        locations.push(location);
+                    }
+                }
+            }
+            if let Some(items) = value.get("tasks").and_then(|v| v.as_array()) {
+                for item in items {
+                    if let Ok(task) = serde_json::from_value::<TaskRecord>(item.clone()) {
+                        records.entry(task.id.clone()).or_insert(task);
+                    }
+                }
+            }
+            if let Some(items) = value.get("drafts").and_then(|v| v.as_array()) {
+                for item in items {
+                    if let Ok(draft) = serde_json::from_value::<Draft>(item.clone())
+                        && !drafts.iter().any(|d| d.id == draft.id)
+                    {
+                        drafts.push(draft);
+                    }
+                }
+            }
+        }
+        if !locations.iter().any(|l| l.root == root) {
+            locations.push(state.libraries[0].clone());
+        }
+        state.libraries = locations;
+        state.default_library = values
+            .iter()
+            .filter_map(|v| v.get("default_library").and_then(|v| v.as_str()))
+            .find(|id| state.library(id).is_some())
+            .map(str::to_owned)
+            .unwrap_or_else(|| state.libraries[0].id.clone());
+        if drafts.is_empty() {
+            state.drafts[0].library_id = state.default_library.clone();
+        } else {
+            state.drafts = drafts;
+            state.current_draft = values
+                .iter()
+                .filter_map(|v| v.get("current_draft").and_then(|v| v.as_str()))
+                .find(|id| state.drafts.iter().any(|draft| &draft.id == id))
+                .map(str::to_owned)
+                .unwrap_or_else(|| state.drafts[0].id.clone());
+        }
+        let mut issues = Vec::new();
+        for library in &state.libraries {
+            if check_library(library).is_err() {
+                continue;
+            }
+            let work_root = library.root.join(".course2md/work");
+            if !work_root.is_dir() {
+                continue;
+            }
+            let root_path = library.root.canonicalize()?;
+            ensure!(
+                work_root.canonicalize()?.starts_with(&root_path),
+                "任务材料位置越出课程库，原记录已保留"
+            );
+            for entry in std::fs::read_dir(&work_root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() || entry.file_type()?.is_symlink() {
+                    continue;
+                }
+                let snapshot = entry.path().join("task-record.json");
+                if !snapshot.is_file() {
+                    continue;
+                }
+                let restored = read_record_bytes(&snapshot).and_then(|bytes| {
+                    let mirror: TaskMirror = serde_json::from_slice(&bytes)?;
+                    ensure!(
+                        mirror.schema == SCHEMA && mirror.task.work_dir == entry.path(),
+                        "任务镜像身份不匹配"
+                    );
+                    validate_record_location(&mirror.task, &state.libraries)?;
+                    Ok(mirror.task)
+                });
+                match restored {
+                    Ok(task) => {
+                        records.entry(task.id.clone()).or_insert(task);
+                    }
+                    Err(_) => issues.push(format!(
+                        "{} 的任务参数仍无法读取，材料已保留",
+                        entry.file_name().to_string_lossy()
+                    )),
+                }
+            }
+        }
+        for (_, mut task) in records {
+            if validate_record_location(&task, &state.libraries).is_err() {
+                issues.push(format!(
+                    "《{}》的位置或身份记录不完整，原记录已保留",
+                    task.plan.title
+                ));
+                continue;
+            }
+            // Repair loses evidence of the last user intent; never infer permission to send.
+            task.resend.clear();
+            if !task.state.finished() {
+                task.intent = Intent::Pause;
+                task.state = TaskState::Paused;
+                task.error =
+                    Some("任务记录已重建，已保存的材料仍保留。确认任务后可以继续。".into());
+                task.unread = true;
+            }
+            if let Some(library) = state.library(&task.plan.library_id)
+                && check_library(library).is_ok()
+            {
+                if let Err(error) = reconcile_artifact(&mut task, library)
+                    .and_then(|_| reconcile_receipts(&mut task))
+                {
+                    task.state = TaskState::NeedsAttention;
+                    task.error = Some(format!("已保留材料，结果记录尚未确认：{error:#}"));
+                }
+                pause_recovered_control(&task)
+                    .context("无法保存恢复后的暂停指令，尚未替换原任务记录")?;
+            }
+            state.tasks.push(task);
+        }
+        state.tasks.sort_by_key(|task| task.created);
+        let existing: BTreeSet<_> = state.tasks.iter().map(|task| task.id.clone()).collect();
+        for task in &mut state.tasks {
+            if task
+                .handled_by
+                .as_ref()
+                .is_some_and(|id| !existing.contains(id))
+            {
+                task.handled_by = None;
+            }
+        }
+        // Preserve reader mappings and migration backups only when their own records decode.
+        for value in &values {
+            if state.positions.is_empty() {
+                state.positions = value
+                    .get("positions")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+            }
+            if state.reader_sources.is_empty() {
+                state.reader_sources = value
+                    .get("reader_sources")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+            }
+            if state.storage_backups.is_empty() {
+                state.storage_backups = value
+                    .get("storage_backups")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+            }
+        }
+        state.recover();
+        course2md::checkpoint::atomic_write(&path, &serde_json::to_vec_pretty(&state)?)?;
+        let recovery = format!(
+            "已重建 {} 项任务记录，未启动处理。原始记录保存在 {}。{}",
+            state.tasks.len(),
+            archive.display(),
+            if issues.is_empty() {
+                String::new()
+            } else {
+                issues.join("；")
+            }
+        );
+        Ok(Self {
+            state,
+            recovery: Some(recovery),
+            path,
+        })
+    }
+
+    pub fn open(root: PathBuf, options: ConversionOptions) -> Result<Self> {
+        Self::open_at(
+            course2md::config::config_dir().join("desktop-workspace.json"),
+            root,
+            options,
+        )
+    }
+    pub fn open_at(path: PathBuf, root: PathBuf, options: ConversionOptions) -> Result<Self> {
+        let mut recovery = None;
+        if path.is_file()
+            && let Ok(bytes) = read_record_bytes(&path)
+            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && value
+                .get("schema")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|schema| schema > SCHEMA as u64)
+        {
+            bail!("任务记录由较新版本创建，请使用对应版本打开。原记录和备份均保留，尚未启动任务。");
+        }
+        let mut state = if path.exists() {
+            match Self::read(&path) {
+                Ok(state) => state,
+                Err(error) => {
+                    let backup = path.with_extension("json.bak");
+                    match Self::read(&backup) {
+                        Ok(state) => {
+                            let saved =
+                                path.with_extension(format!("{}.damaged", new_id("backup")));
+                            std::fs::copy(&path, &saved).context("无法保留损坏的任务记录")?;
+                            recovery = Some(
+                                "已从备份恢复草稿和任务。无法确认最后一次操作，未完成任务已暂停。"
+                                    .into(),
+                            );
+                            let mut state = state;
+                            for task in &mut state.tasks {
+                                if !task.state.finished() {
+                                    task.intent = Intent::Pause;
+                                    task.state = TaskState::Paused;
+                                    task.resend.clear();
+                                }
+                            }
+                            state
+                        }
+                        Err(_) => {
+                            return Err(error).context("草稿和任务记录无法读取，原文件已保留");
+                        }
+                    }
+                }
+            }
+        } else {
+            let mut initial = State::initial(root.clone(), options);
+            match std::fs::create_dir_all(&root) {
+                Ok(()) => {
+                    let marker = root.join(".course2md-library-id");
+                    if let Ok(saved) = std::fs::read_to_string(&marker) {
+                        if !saved.trim().is_empty() {
+                            let id = saved.trim().to_owned();
+                            initial.libraries[0].id = id.clone();
+                            initial.default_library = id.clone();
+                            initial.drafts[0].library_id = id;
+                        }
+                    } else if let Err(error) = course2md::checkpoint::atomic_write(
+                        &marker,
+                        initial.default_library.as_bytes(),
+                    ) {
+                        recovery = Some(format!(
+                            "保存位置尚未准备好：{error:#}。可以在设置的存储中选择其他位置。"
+                        ));
+                    }
+                }
+                Err(error) => {
+                    recovery = Some(format!(
+                        "无法创建默认保存位置 {}：{error}。可以在设置的存储中选择其他位置。",
+                        root.display()
+                    ))
+                }
+            }
+            initial
+        };
+        let marker_issues = upgrade_library_markers(&mut state);
+        if !marker_issues.is_empty() {
+            let detail = marker_issues.join("；");
+            recovery =
+                Some(recovery.map_or_else(|| detail.clone(), |prior| format!("{prior} {detail}")));
+        }
+        state.recover();
+        for task in &mut state.tasks {
+            let result = state
+                .libraries
+                .iter()
+                .find(|location| location.id == task.plan.library_id)
+                .map(|location| reconcile_artifact(task, location))
+                .unwrap_or(Ok(()))
+                .and_then(|_| reconcile_receipts(task));
+            if let Err(error) = result {
+                task.state = TaskState::NeedsAttention;
+                task.error = Some(format!("请求记录暂时无法读取，尚未发送新请求：{error:#}"));
+            }
+        }
+        Ok(Self {
+            state,
+            recovery,
+            path,
+        })
+    }
+    fn read(path: &Path) -> Result<State> {
+        let state: State = serde_json::from_slice(
+            &read_record_bytes(path).with_context(|| format!("读取 {}", path.display()))?,
+        )?;
+        ensure!(
+            state.schema == SCHEMA,
+            "任务记录版本不受支持，请使用创建这些任务的应用版本"
+        );
+        ensure!(
+            state.library(&state.default_library).is_some(),
+            "默认保存位置记录缺失"
+        );
+        ensure!(state.draft().is_some(), "当前草稿记录缺失");
+        let ids: BTreeSet<_> = state.tasks.iter().map(|t| &t.id).collect();
+        ensure!(ids.len() == state.tasks.len(), "任务记录包含重复身份");
+        for task in &state.tasks {
+            validate_record_location(task, &state.libraries)?;
+        }
+        Ok(state)
+    }
+    pub fn transaction<T>(&mut self, edit: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+        let mut next = self.state.clone();
+        let result = edit(&mut next)?;
+        self.write(&next)?;
+        self.state = next;
+        Ok(result)
+    }
+    pub fn save(&self) -> Result<()> {
+        self.write(&self.state)
+    }
+    fn write(&self, state: &State) -> Result<()> {
+        let parent = self.path.parent().context("任务记录缺少保存目录")?;
+        std::fs::create_dir_all(parent)?;
+        let _lock = course2md::runtime::lock_file(&self.path.with_extension("lock"))?;
+        // A mirror is recovery evidence, never authority to resume. The main record
+        // remains unchanged if a required mirror write fails.
+        for task in &state.tasks {
+            let Some(library) = state.library(&task.plan.library_id) else {
+                continue;
+            };
+            if check_library(library).is_err() {
+                continue;
+            }
+            validate_record_location(task, &state.libraries)?;
+            ensure_work_directory(task, library)?;
+            let mirror = task.work_dir.join("task-record.json");
+            let bytes = serde_json::to_vec_pretty(&TaskMirror {
+                schema: SCHEMA,
+                task: task.clone(),
+            })?;
+            if std::fs::read(&mirror).ok().as_deref() != Some(&bytes) {
+                course2md::checkpoint::atomic_write(&mirror, &bytes)
+                    .context("任务恢复副本未能保存，原任务记录仍保留")?;
+            }
+        }
+        if self.path.is_file() && Self::read(&self.path).is_ok() {
+            let bytes = std::fs::read(&self.path)?;
+            course2md::checkpoint::atomic_write(&self.path.with_extension("json.bak"), &bytes)?;
+        }
+        course2md::checkpoint::atomic_write(&self.path, &serde_json::to_vec_pretty(state)?)
+    }
+    pub fn storage_path(&self) -> &Path {
+        &self.path
+    }
+    pub fn register_library(
+        &mut self,
+        root: PathBuf,
+        name: String,
+        make_default: bool,
+    ) -> Result<String> {
+        ensure!(root.is_dir(), "请选择已有文件夹；新建课程库请使用新建操作");
+        let canonical = root.canonicalize()?;
+        if let Some(existing) = self
+            .state
+            .libraries
+            .iter()
+            .find(|l| l.root.canonicalize().ok().as_ref() == Some(&canonical))
+        {
+            let id = existing.id.clone();
+            if make_default {
+                self.transaction(|s| {
+                    s.default_library = id.clone();
+                    Ok(())
+                })?;
+            }
+            return Ok(id);
+        }
+        let probe = tempfile::NamedTempFile::new_in(&canonical).context("所选位置不能写入")?;
+        drop(probe);
+        let identity = canonical.join(".course2md-library-id");
+        let id = if identity.is_file() {
+            let id = std::fs::read_to_string(&identity)?.trim().to_owned();
+            if id.is_empty() {
+                bail!("课程库身份记录为空，请检查所选位置");
+            }
+            if self.state.libraries.iter().any(|l| l.id == id) {
+                bail!("这个库已经登记在另一个位置，请使用移动课程库操作");
+            }
+            id
+        } else {
+            let id = new_id("library");
+            course2md::checkpoint::atomic_write(&identity, id.as_bytes())?;
+            id
+        };
+        self.transaction(|s| {
+            s.libraries.push(LibraryLocation {
+                id: id.clone(),
+                name,
+                root: canonical,
+                previous_roots: Vec::new(),
+            });
+            if make_default {
+                s.default_library = id.clone();
+            }
+            Ok(id)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn source(input: &str, title: &str) -> crate::source::Source {
+        serde_json::from_value(serde_json::json!({"input":input,"title":title,"author":"","duration":60.0,"cover":null,"cover_error":null})).unwrap()
+    }
+    fn plan(library: &str) -> TaskPlan {
+        TaskPlan {
+            operation: Default::default(),
+            source: source("lecture.mp4", "课程 A"),
+            source_id: "video-a".into(),
+            title: "课程 A".into(),
+            library_id: library.into(),
+            folder: None,
+            options: ConversionOptions::default(),
+            subtitle: None,
+            config: ConfigFile::default(),
+            asr_service: None,
+            ai_service: None,
+        }
+    }
+    #[test]
+    fn failed_commit_does_not_publish_an_unpersisted_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("state");
+        let mut ws = Workspace::open_at(
+            target.clone(),
+            dir.path().join("library"),
+            Default::default(),
+        )
+        .unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let task = plan(&ws.state.default_library);
+        assert!(ws.transaction(|state| state.enqueue(task, None)).is_err());
+        assert!(ws.state.tasks.is_empty());
+    }
+    #[test]
+    fn frozen_task_survives_other_drafts_and_defaults_without_storing_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.json");
+        let mut ws =
+            Workspace::open_at(file.clone(), dir.path().join("library"), Default::default())
+                .unwrap();
+        let mut task = plan(&ws.state.default_library);
+        task.config.asr_api.api_key = "asr-secret-do-not-store".into();
+        task.config.llm.api_key = "ai-secret-do-not-store".into();
+        let id = ws.transaction(|state| state.enqueue(task, None)).unwrap().0;
+        ws.transaction(|s| {
+            s.draft_mut().unwrap().change_source("B.mp4".into());
+            s.task_mut(&id).unwrap().state = TaskState::Running;
+            Ok(())
+        })
+        .unwrap();
+        let restored =
+            Workspace::open_at(file.clone(), dir.path().into(), Default::default()).unwrap();
+        assert_eq!(
+            restored.state.task(&id).unwrap().plan.source.input,
+            "lecture.mp4"
+        );
+        assert_eq!(restored.state.task(&id).unwrap().state, TaskState::Queued);
+        assert_eq!(restored.state.draft().unwrap().input, "B.mp4");
+        for path in [file.clone(), file.with_extension("json.bak")] {
+            assert!(
+                !std::fs::read_to_string(path)
+                    .unwrap()
+                    .contains("secret-do-not-store")
+            );
+        }
+    }
+    #[test]
+    fn source_revisions_and_default_overrides_are_independent() {
+        let mut draft = Draft::new(true, "lib".into(), Default::default());
+        draft.change_source("A".into());
+        let old = draft.revision;
+        draft.change_source("B".into());
+        assert!(!draft.accept_source(old, source("A", "title-a")));
+        assert!(draft.accept_source(draft.revision, source("B", "title-b")));
+        draft.options.llm = true;
+        draft.overrides.insert(Override::Proofread);
+        let mut defaults = ConversionOptions::default();
+        defaults.summarize = true;
+        draft.inherit(&defaults);
+        assert!(draft.options.llm && draft.options.summarize);
+    }
+    #[test]
+    fn explicit_stop_survives_restart_while_duplicate_names_do_not_create_work() {
+        let mut state = State::initial("/tmp/library".into(), Default::default());
+        let mut task = plan(&state.default_library);
+        let id = state.enqueue(task.clone(), None).unwrap().0;
+        task.title = "另一个显示名".into();
+        task.folder = Some(42);
+        assert_eq!(state.enqueue(task, None).unwrap(), (id.clone(), false));
+        state.task_mut(&id).unwrap().state = TaskState::Running;
+        state.stop_session();
+        state.recover();
+        assert_eq!(state.task(&id).unwrap().state, TaskState::Paused);
+        assert!(state.next_task().is_none());
+    }
+
+    fn test_workspace(dir: &Path) -> Workspace {
+        Workspace::open_at(
+            dir.join("workspace.json"),
+            dir.join("library"),
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn publish_note(state: &State, task_id: &str, partial: bool) -> PathBuf {
+        use course2md::{artifact, timeline};
+        let task = state.task(task_id).unwrap();
+        let course_id = format!(
+            "course-{}",
+            &course2md::execution::digest(task.plan.source_id.as_bytes())[..32]
+        );
+        let target = artifact::Target {
+            task_id: task.id.clone(),
+            version_id: task.id.clone(),
+            source_id: task.plan.source_id.clone(),
+            course_id: course_id.clone(),
+            course_dir: state
+                .library(&task.plan.library_id)
+                .unwrap()
+                .root
+                .join(course_id),
+        };
+        let mut outcomes = artifact::Outcomes::default();
+        outcomes.transcript = artifact::Outcome::succeeded();
+        if partial {
+            outcomes.proofreading = artifact::Outcome::failed("校对未完成");
+        }
+        let meta = course2md::fetch::VideoMeta {
+            title: task.plan.title.clone(),
+            uploader: String::new(),
+            duration: 20.,
+            webpage_url: task.plan.source.input.clone(),
+            extractor: String::new(),
+            id: String::new(),
+        };
+        let sections = vec![timeline::Section {
+            t: 0.,
+            end: 20.,
+            image: String::new(),
+            speech: vec![timeline::TranscriptEvent {
+                start: 0.,
+                end: 20.,
+                text: "Preserved readable notes.".into(),
+                raw: None,
+            }],
+        }];
+        smol::block_on(artifact::publish(
+            &target,
+            &task.work_dir,
+            &meta,
+            &sections,
+            None,
+            &[],
+            outcomes,
+        ))
+        .unwrap();
+        target.version_dir()
+    }
+
+    fn write_unknown(task: &TaskRecord, attempt: u32) -> String {
+        let id = format!("stable-request.{attempt}");
+        let receipt = course2md::dispatch::Receipt {
+            schema: 1,
+            stable_id: "stable-request".into(),
+            request_id: id.clone(),
+            purpose: "proofreading".into(),
+            description: "校对 00:00–00:20 的文字".into(),
+            service_version: "version-a".into(),
+            attempt,
+            state: course2md::dispatch::State::Uncertain,
+            http_status: None,
+            response: None,
+            message: Some("连接断开 / connection lost".into()),
+            unsupported_response_format: false,
+            retry_authorized: None,
+        };
+        std::fs::create_dir_all(task.work_dir.join("requests")).unwrap();
+        std::fs::write(
+            task.work_dir.join("requests/stable-request.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn unknown_authorization_is_exact_and_cannot_be_reused_by_an_old_button() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        ws.state.task_mut(&id).unwrap().state = TaskState::Uncertain;
+        let first = write_unknown(ws.state.task(&id).unwrap(), 1);
+        ws.state.authorize_uncertain(&id, &[first.clone()]).unwrap();
+        assert!(ws.state.authorize_uncertain(&id, &[first.clone()]).is_err());
+        ws.state.task_mut(&id).unwrap().state = TaskState::Uncertain;
+        assert!(ws.state.authorize_uncertain(&id, &[first.clone()]).is_err());
+        let second = write_unknown(ws.state.task(&id).unwrap(), 2);
+        assert!(ws.state.authorize_uncertain(&id, &[first]).is_err());
+        ws.state.authorize_uncertain(&id, &[second]).unwrap();
+        assert_eq!(ws.state.task(&id).unwrap().resend.len(), 2);
+        assert!(
+            ws.state.task(&id).unwrap().blocked[0]
+                .message
+                .contains("00:00–00:20")
+        );
+    }
+
+    #[test]
+    fn published_result_after_crash_is_not_enqueued_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        ws.state.task_mut(&id).unwrap().state = TaskState::Running;
+        ws.save().unwrap();
+        let version = publish_note(&ws.state, &id, false);
+        let restored = test_workspace(dir.path());
+        let task = restored.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Complete);
+        assert_eq!(task.artifact.as_ref(), Some(&version));
+        assert!(restored.state.next_task().is_none());
+    }
+
+    #[test]
+    fn partial_followup_is_single_and_does_not_rewrite_another_draft_or_successful_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let version = publish_note(&ws.state, &id, true);
+        let original = ws.state.task_mut(&id).unwrap();
+        original.state = TaskState::Partial;
+        original.artifact = Some(version);
+        ws.state
+            .draft_mut()
+            .unwrap()
+            .change_source("draft-b.mp4".into());
+        let draft = ws.state.draft().unwrap().clone();
+        assert!(
+            ws.state
+                .reprocess(&id, vec!["screenshots".into()], vec![])
+                .is_err()
+        );
+        let followup = ws
+            .state
+            .reprocess(&id, vec!["proofreading".into()], vec![])
+            .unwrap();
+        assert_eq!(
+            ws.state
+                .reprocess(&id, vec!["proofreading".into()], vec![])
+                .unwrap(),
+            followup
+        );
+        assert_eq!(ws.state.tasks.len(), 2);
+        assert!(ws.state.draft().unwrap() == &draft);
+        assert!(ws.state.set_intent(&id, Intent::Run).is_err());
+        let child = ws.state.task(&followup).unwrap();
+        assert_eq!(child.parent.as_deref(), Some(id.as_str()));
+        assert_eq!(child.plan.source.input, "lecture.mp4");
+        assert_eq!(
+            child.plan.config.defaults.transcript_source,
+            Some(course2md::config::TranscriptSource::Subtitle)
+        );
+    }
+
+    #[test]
+    fn damaged_primary_and_backup_are_preserved_before_paused_mirror_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let mut snapshot = plan(&ws.state.default_library);
+        snapshot.config.llm.api_key = "fake-test-credential".into();
+        let id = ws.state.enqueue(snapshot, None).unwrap().0;
+        ws.state.task_mut(&id).unwrap().state = TaskState::Running;
+        ws.state.task_mut(&id).unwrap().resend = vec!["old-attempt.1".into()];
+        ws.save().unwrap();
+        let work = ws.state.task(&id).unwrap().work_dir.clone();
+        let mirror = std::fs::read_to_string(work.join("task-record.json")).unwrap();
+        assert!(!mirror.contains("fake-test-credential"));
+        std::fs::write(work.join("partial-material.txt"), "saved words").unwrap();
+        std::fs::write(
+            work.join("control.json"),
+            r#"{"intent":"run","resend":["old-attempt.1"]}"#,
+        )
+        .unwrap();
+        std::fs::write(ws.storage_path(), b"{broken primary").unwrap();
+        std::fs::write(
+            ws.storage_path().with_extension("json.bak"),
+            b"{broken backup",
+        )
+        .unwrap();
+        assert!(
+            Workspace::open_at(
+                ws.path.clone(),
+                dir.path().join("library"),
+                Default::default()
+            )
+            .is_err()
+        );
+        let rebuilt = Workspace::rebuild_at(
+            ws.path.clone(),
+            dir.path().join("library"),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt.state.task(&id).unwrap().state, TaskState::Paused);
+        assert_eq!(rebuilt.state.task(&id).unwrap().intent, Intent::Pause);
+        assert!(rebuilt.state.task(&id).unwrap().resend.is_empty());
+        assert!(rebuilt.state.next_task().is_none());
+        assert_eq!(
+            std::fs::read_to_string(work.join("partial-material.txt")).unwrap(),
+            "saved words"
+        );
+        let control: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(work.join("control.json")).unwrap()).unwrap();
+        assert_eq!(control["intent"], "pause");
+        assert_eq!(control["resend"], serde_json::json!([]));
+        let archive = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("workspace-recovery-")
+            })
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::read(archive.join("workspace.json")).unwrap(),
+            b"{broken primary"
+        );
+        assert_eq!(
+            std::fs::read(archive.join("workspace.json.bak")).unwrap(),
+            b"{broken backup"
+        );
+        let reopened = Workspace::open_at(
+            ws.path.clone(),
+            dir.path().join("library"),
+            Default::default(),
+        )
+        .unwrap();
+        assert!(reopened.state.next_task().is_none());
+        assert_eq!(reopened.state.tasks.len(), 1);
+    }
+
+    #[test]
+    fn mirror_failure_keeps_primary_record_and_offline_location_is_not_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        ws.save().unwrap();
+        let bytes = std::fs::read(ws.storage_path()).unwrap();
+        let mirror = ws
+            .state
+            .task(&id)
+            .unwrap()
+            .work_dir
+            .join("task-record.json");
+        std::fs::remove_file(&mirror).unwrap();
+        std::fs::create_dir(&mirror).unwrap();
+        assert!(
+            ws.transaction(|state| state.set_intent(&id, Intent::Pause))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(ws.storage_path()).unwrap(), bytes);
+        let root = ws.state.libraries[0].root.clone();
+        std::fs::rename(&root, dir.path().join("disconnected-library")).unwrap();
+        ws.transaction(|state| state.set_intent(&id, Intent::Pause))
+            .unwrap();
+        let reopened = test_workspace(dir.path());
+        assert!(!root.exists());
+        assert_eq!(reopened.state.task(&id).unwrap().state, TaskState::Paused);
+    }
+
+    #[test]
+    fn backup_recovery_does_not_assume_a_lost_final_run_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        ws.state.task_mut(&id).unwrap().state = TaskState::Running;
+        ws.save().unwrap();
+        ws.save().unwrap();
+        std::fs::write(ws.storage_path(), b"damaged").unwrap();
+        let recovered = test_workspace(dir.path());
+        assert_eq!(recovered.state.task(&id).unwrap().state, TaskState::Paused);
+        assert!(recovered.state.next_task().is_none());
+    }
+
+    #[test]
+    fn older_parent_links_recover_to_latest_followup_without_requeuing_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let parent = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        ws.state.task_mut(&parent).unwrap().state = TaskState::NeedsAttention;
+        let mut changed = plan(&ws.state.default_library);
+        changed.title = "changed display title".into();
+        changed.options.summarize = true;
+        let next = ws.state.enqueue(changed, Some(parent.clone())).unwrap().0;
+        ws.state.task_mut(&parent).unwrap().handled_by = None;
+        ws.state.task_mut(&parent).unwrap().state = TaskState::Running;
+        ws.state.recover();
+        let original = ws.state.task(&parent).unwrap();
+        assert_eq!(original.handled_by.as_deref(), Some(next.as_str()));
+        assert_eq!(original.intent, Intent::Pause);
+        assert_eq!(ws.state.next_task().unwrap().id, next);
+    }
+
+    #[test]
+    fn export_only_followup_needs_no_ai_service_and_retries_only_failed_formats() {
+        use course2md::config::OutputFormat;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let version = publish_note(&ws.state, &id, false);
+        let original = ws.state.task_mut(&id).unwrap();
+        original.state = TaskState::Partial;
+        original.artifact = Some(version);
+        original.plan.config.llm.enabled = true;
+        original.plan.config.llm.summarize = true;
+        original.plan.config.defaults.formats = Some(vec![OutputFormat::Md, OutputFormat::Html]);
+        original.outcomes = Some(serde_json::json!({"exports":{
+            "md":{"status":"succeeded"}, "html":{"status":"failed","message":"disk full"}
+        }}));
+        let next = ws
+            .state
+            .reprocess(&id, vec!["exports".into()], vec![])
+            .unwrap();
+        let child = ws.state.task(&next).unwrap();
+        assert!(!child.plan.config.llm.enabled && !child.plan.config.llm.summarize);
+        assert_eq!(
+            child.plan.config.defaults.formats,
+            Some(vec![OutputFormat::Html])
+        );
+        let refs = crate::preferences::ServiceRefs {
+            asr: Some("stopped-asr".into()),
+            llm: Some("stopped-ai".into()),
+        };
+        let needed = refs.required_for(&child.plan.config);
+        assert!(needed.asr.is_none() && needed.llm.is_none());
+    }
+
+    #[test]
+    fn old_registered_library_is_upgraded_only_with_matching_owned_artifact_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        publish_note(&ws.state, &id, false);
+        ws.save().unwrap();
+        let mut old = serde_json::to_value(&ws.state).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("marker_registry_version");
+        let marker = ws.state.libraries[0].root.join(".course2md-library-id");
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(ws.storage_path(), serde_json::to_vec(&old).unwrap()).unwrap();
+        let reopened = test_workspace(dir.path());
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            ws.state.default_library
+        );
+        assert_eq!(reopened.state.task(&id).unwrap().state, TaskState::Complete);
+        // Once upgraded, later marker loss is a different event and needs association.
+        reopened.save().unwrap();
+        std::fs::remove_file(&marker).unwrap();
+        let after_loss = test_workspace(dir.path());
+        assert!(!marker.exists());
+        assert!(check_library(&after_loss.state.libraries[0]).is_err());
+    }
+
+    #[test]
+    fn explicit_library_reassociation_retains_identity_and_never_overwrites_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        ws.save().unwrap();
+        let marker = ws.state.libraries[0].root.join(".course2md-library-id");
+        let id = ws.state.default_library.clone();
+        std::fs::remove_file(&marker).unwrap();
+        ws.reassociate_library(&id).unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), id);
+        std::fs::write(&marker, "a-different-library").unwrap();
+        assert!(ws.reassociate_library(&id).is_err());
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "a-different-library"
+        );
+    }
+
+    #[test]
+    fn a_future_primary_schema_is_not_replaced_by_an_older_valid_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = test_workspace(dir.path());
+        ws.save().unwrap();
+        ws.save().unwrap();
+        let mut future = serde_json::to_value(&ws.state).unwrap();
+        future["schema"] = serde_json::json!(SCHEMA + 1);
+        let bytes = serde_json::to_vec(&future).unwrap();
+        std::fs::write(ws.storage_path(), &bytes).unwrap();
+        assert!(
+            Workspace::open_at(
+                ws.path.clone(),
+                dir.path().join("library"),
+                Default::default()
+            )
+            .is_err()
+        );
+        assert!(
+            Workspace::rebuild_at(
+                ws.path.clone(),
+                dir.path().join("library"),
+                Default::default()
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(ws.storage_path()).unwrap(), bytes);
+    }
+}

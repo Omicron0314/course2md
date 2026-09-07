@@ -1,0 +1,2089 @@
+//! Independently committed preferences, incomplete service drafts and immutable service versions.
+//!
+//! This is the desktop's authority after legacy import. Credentials never enter these files.
+//! Calling `apply_defaults` or submitting a task cannot publish a service editor draft.
+
+use crate::credentials::{CredentialRef, CredentialVault, Secret};
+use anyhow::{Context, Result, anyhow, bail};
+use course2md::config::{AsrProvider, TranscriptSource};
+use course2md::settings::{AsrApiMode, ConfigFile, Defaults, DesktopSettings};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub type ServiceId = String;
+pub type ServiceVersionId = String;
+pub type ServiceDraftId = String;
+
+const SCHEMA: u32 = 1;
+
+fn new_id(prefix: &str) -> String {
+    format!("{prefix}-{}", uuid::Uuid::new_v4())
+}
+
+fn valid_id(value: &str, prefix: &str) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+}
+
+fn relative_path_inside(path: &Path, root: &Path) -> Option<PathBuf> {
+    fn normalized(path: &Path) -> PathBuf {
+        let mut value = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    value.pop();
+                }
+                component => value.push(component.as_os_str()),
+            }
+        }
+        value
+    }
+    if !path.is_absolute() || !root.is_absolute() {
+        return None;
+    }
+    let path = normalized(path);
+    let root = normalized(root);
+    path.strip_prefix(&root)
+        .ok()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            path.canonicalize()
+                .ok()?
+                .strip_prefix(root.canonicalize().ok()?)
+                .ok()
+                .map(Path::to_path_buf)
+        })
+}
+
+pub fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreferenceGroup {
+    Generation,
+    Application,
+    Services,
+}
+
+impl PreferenceGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Generation => "生成笔记",
+            Self::Application => "应用",
+            Self::Services => "服务与账号",
+        }
+    }
+
+    fn filename(self) -> &'static str {
+        match self {
+            Self::Generation => "generation.json",
+            Self::Application => "application.json",
+            Self::Services => "services.json",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsIssueKind {
+    Recovered,
+    NeedsReset,
+    SaveFailed,
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsIssue {
+    pub group: PreferenceGroup,
+    pub kind: SettingsIssueKind,
+    pub message: String,
+    pub detail: Option<String>,
+}
+
+pub fn save_failure_message(group: PreferenceGroup, error: &anyhow::Error) -> String {
+    use std::io::ErrorKind;
+    let reason = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .map(|cause| match cause.kind() {
+            ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => "设置目录暂时无法写入",
+            ErrorKind::StorageFull => "设置所在磁盘空间不足",
+            ErrorKind::NotFound => "设置位置暂时不可访问",
+            _ => "设置文件暂时无法写入",
+        })
+        .unwrap_or("设置变更暂时无法保存");
+    let name = match group {
+        PreferenceGroup::Application => "应用偏好",
+        PreferenceGroup::Generation => "生成笔记偏好",
+        PreferenceGroup::Services => "服务配置",
+    };
+    format!("{name}未保存：{reason}")
+}
+
+/// A remembered output path and retired onboarding flags do not create an import task.
+pub fn has_importable_legacy(config: &ConfigFile) -> bool {
+    let baseline = ConfigFile::default();
+    GenerationPreferences::from_legacy(config) != GenerationPreferences::from_legacy(&baseline)
+        || config.desktop.library_cards
+        || config.desktop.library_group_folders
+        || config.desktop.reduce_motion
+        || config.defaults.provider == Some(AsrProvider::Api)
+        || !config.asr_api.api_key.trim().is_empty()
+        || config.llm.enabled
+        || config.llm.summarize
+        || !config.llm.base_url.trim().is_empty()
+        || !config.llm.api_key.trim().is_empty()
+}
+
+/// Validate the fields that desktop import will use. Service configuration may intentionally
+/// be incomplete and becomes a draft; it must not prevent recovery of the original file.
+pub(crate) fn validate_legacy(config: &ConfigFile) -> Result<()> {
+    GenerationPreferences::from_legacy(config).validate_value()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GenerationPreferences {
+    /// Ordinary processing parameters only. Storage is owned by the library registry.
+    pub options: Defaults,
+    pub ai_proofread: bool,
+    pub ai_summary: bool,
+    pub vision: bool,
+    pub prompt: Option<String>,
+    /// Durable editor text is not an active processing rule until explicitly applied.
+    pub prompt_draft: Option<String>,
+    pub local_model_draft: Option<String>,
+    pub subtitle_languages_draft: Option<String>,
+    pub ai_concurrency: usize,
+    pub preferred_subtitle_languages: Vec<String>,
+}
+
+impl Default for GenerationPreferences {
+    fn default() -> Self {
+        Self {
+            options: Defaults {
+                formats: Some(Vec::new()),
+                resume: Some(true),
+                keep_video: Some(false),
+                ..Defaults::default()
+            },
+            ai_proofread: false,
+            ai_summary: false,
+            vision: false,
+            prompt: None,
+            prompt_draft: None,
+            local_model_draft: None,
+            subtitle_languages_draft: None,
+            ai_concurrency: 2,
+            preferred_subtitle_languages: Vec::new(),
+        }
+    }
+}
+
+impl GenerationPreferences {
+    pub fn from_legacy(config: &ConfigFile) -> Self {
+        let mut options = config.defaults.clone();
+        options.out = None;
+        options.resume = Some(true);
+        if options.formats.is_none() {
+            options.formats = Some(Vec::new());
+        }
+        Self {
+            options,
+            ai_proofread: config.llm.enabled,
+            ai_summary: config.llm.summarize,
+            vision: config.llm.vision,
+            prompt: config.llm.prompt.clone(),
+            prompt_draft: None,
+            local_model_draft: None,
+            subtitle_languages_draft: None,
+            ai_concurrency: config.llm.concurrency.max(1),
+            preferred_subtitle_languages: Vec::new(),
+        }
+    }
+
+    pub fn needs_ai(&self) -> bool {
+        self.ai_proofread || self.ai_summary
+    }
+
+    pub fn effective_vision(&self) -> bool {
+        self.ai_proofread && self.vision
+    }
+
+    pub fn apply_to(&self, config: &mut ConfigFile) {
+        let out = config.defaults.out.clone();
+        config.defaults = self.options.clone();
+        config.defaults.out = out;
+        config.defaults.resume = Some(true);
+        config.llm.enabled = self.ai_proofread;
+        config.llm.summarize = self.ai_summary;
+        config.llm.vision = self.effective_vision();
+        config.llm.prompt = self.prompt.clone();
+        config.llm.concurrency = self.ai_concurrency;
+        config.llm.disable_hint = true;
+        clear_service_fields(config);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApplicationPreferences {
+    pub desktop: DesktopSettings,
+    pub font_scale: f32,
+}
+
+impl Default for ApplicationPreferences {
+    fn default() -> Self {
+        Self {
+            font_scale: 1.0,
+            desktop: DesktopSettings {
+                system_titlebar: true,
+                setup_completed: true,
+                ..DesktopSettings::default()
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServicePurpose {
+    Speech,
+    Ai,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceProtocol {
+    SpeechTranscriptions,
+    SpeechChat,
+    AiChat,
+}
+
+impl ServiceProtocol {
+    pub fn purpose(self) -> ServicePurpose {
+        match self {
+            Self::SpeechTranscriptions | Self::SpeechChat => ServicePurpose::Speech,
+            Self::AiChat => ServicePurpose::Ai,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SpeechTranscriptions => "语音转录（/audio/transcriptions）",
+            Self::SpeechChat => "音频聊天（/chat/completions）",
+            Self::AiChat => "AI 聊天（/chat/completions）",
+        }
+    }
+
+    pub fn endpoint_suffix(self) -> &'static str {
+        match self {
+            Self::SpeechTranscriptions => "/audio/transcriptions",
+            Self::SpeechChat | Self::AiChat => "/chat/completions",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Authentication {
+    ApiKey,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceDraft {
+    pub id: ServiceDraftId,
+    pub service_id: ServiceId,
+    pub revision: u64,
+    pub name: String,
+    pub protocol: ServiceProtocol,
+    pub address: String,
+    pub model: String,
+    pub authentication: Authentication,
+    pub credential: Option<CredentialRef>,
+    /// The variable name is informational. The captured value lives in the vault.
+    pub credential_source: Option<String>,
+    pub based_on: Option<ServiceVersionId>,
+}
+
+impl ServiceDraft {
+    pub fn new(purpose: ServicePurpose) -> Self {
+        Self {
+            id: new_id("service-draft"),
+            service_id: new_id("service"),
+            revision: 0,
+            name: String::new(),
+            protocol: match purpose {
+                ServicePurpose::Speech => ServiceProtocol::SpeechTranscriptions,
+                ServicePurpose::Ai => ServiceProtocol::AiChat,
+            },
+            address: String::new(),
+            model: String::new(),
+            authentication: Authentication::ApiKey,
+            credential: None,
+            credential_source: None,
+            based_on: None,
+        }
+    }
+
+    pub fn from_version(version: &ServiceVersion) -> Self {
+        Self {
+            id: new_id("service-draft"),
+            service_id: version.service_id.clone(),
+            revision: 0,
+            name: version.config.name.clone(),
+            protocol: version.config.protocol,
+            address: version.config.endpoint.clone(),
+            model: version.config.model.clone(),
+            authentication: version.config.authentication,
+            credential: version.config.credential.clone(),
+            credential_source: version.config.credential_source.clone(),
+            based_on: Some(version.id.clone()),
+        }
+    }
+
+    pub fn validate(&self) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if let Err(error) = normalize_endpoint(&self.address, self.protocol) {
+            errors.push(FieldError {
+                field: "address",
+                message: error.to_string(),
+            });
+        }
+        if self.model.trim().is_empty() {
+            errors.push(FieldError {
+                field: "model",
+                message: "请输入服务提供的模型 ID".into(),
+            });
+        } else if self.model.chars().any(char::is_control) {
+            errors.push(FieldError {
+                field: "model",
+                message: "模型 ID 不能包含换行或控制字符".into(),
+            });
+        }
+        if self.authentication == Authentication::ApiKey && self.credential.is_none() {
+            errors.push(FieldError {
+                field: "api_key",
+                message: "此认证方式需要 API Key".into(),
+            });
+        }
+        errors
+    }
+
+    /// Static validation only: saving and constructing a test never send a network request.
+    pub fn configuration(&self) -> Result<ServiceConfiguration> {
+        let errors = self.validate();
+        if !errors.is_empty() {
+            bail!(
+                "{}",
+                errors
+                    .iter()
+                    .map(|error| error.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("；")
+            );
+        }
+        let endpoint = normalize_endpoint(&self.address, self.protocol)?;
+        let host = url::Url::parse(&endpoint)?
+            .host_str()
+            .unwrap_or_default()
+            .to_owned();
+        Ok(ServiceConfiguration {
+            name: if self.name.trim().is_empty() {
+                host
+            } else {
+                self.name.trim().to_owned()
+            },
+            protocol: self.protocol,
+            endpoint,
+            model: self.model.trim().to_owned(),
+            authentication: self.authentication,
+            credential: if self.authentication == Authentication::ApiKey {
+                self.credential.clone()
+            } else {
+                None
+            },
+            credential_source: if self.authentication == Authentication::ApiKey {
+                self.credential_source.clone()
+            } else {
+                None
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldError {
+    pub field: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceConfiguration {
+    pub name: String,
+    pub protocol: ServiceProtocol,
+    /// A normalized, complete request URL, never an address containing credentials.
+    pub endpoint: String,
+    pub model: String,
+    pub authentication: Authentication,
+    pub credential: Option<CredentialRef>,
+    pub credential_source: Option<String>,
+}
+
+impl ServiceConfiguration {
+    pub fn host(&self) -> String {
+        url::Url::parse(&self.endpoint)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Structured identity rather than an unstable or collision-prone hash. It contains only
+    /// public configuration and opaque credential IDs, never secret values. Display names do
+    /// not invalidate evidence; the actual content contract does.
+    pub fn fingerprint(&self, contract: &str) -> String {
+        serde_json::to_string(&(
+            self.protocol,
+            &self.endpoint,
+            &self.model,
+            self.authentication,
+            &self.credential,
+            contract,
+        ))
+        .expect("serializing service identity cannot fail")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceVersion {
+    pub id: ServiceVersionId,
+    pub service_id: ServiceId,
+    pub number: u64,
+    pub saved_at: u64,
+    #[serde(default)]
+    pub published_from: Option<ServiceDraftId>,
+    pub config: ServiceConfiguration,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServiceRefs {
+    pub asr: Option<ServiceVersionId>,
+    pub llm: Option<ServiceVersionId>,
+}
+
+impl ServiceRefs {
+    pub fn required_for(&self, config: &ConfigFile) -> Self {
+        Self {
+            asr: (config.defaults.provider == Some(AsrProvider::Api)
+                && config.defaults.transcript_source != Some(TranscriptSource::Subtitle))
+            .then(|| self.asr.clone())
+            .flatten(),
+            llm: (config.llm.enabled || config.llm.summarize)
+                .then(|| self.llm.clone())
+                .flatten(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingScope {
+    /// A save in settings or an explicit "also use by default" choice.
+    Defaults,
+    /// The caller binds the returned ID to exactly one generation draft.
+    CurrentTask,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TestOutcome {
+    Passed,
+    AuthenticationRefused,
+    ModelRefused,
+    ContractMismatch,
+    SampleMismatch,
+    OutcomeUnknown,
+    NotSent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceTestEvidence {
+    pub fingerprint: String,
+    pub contract: String,
+    pub tested_at: u64,
+    pub outcome: TestOutcome,
+    pub message: String,
+    /// Safe, bounded, structured details, never raw response headers or secret-bearing bodies.
+    pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+struct ServicesState {
+    drafts: BTreeMap<ServiceDraftId, ServiceDraft>,
+    versions: BTreeMap<ServiceVersionId, ServiceVersion>,
+    defaults: ServiceRefs,
+    /// Tombstones are retained even when a service is removed from the visible list.
+    stopped: BTreeMap<ServiceId, u64>,
+    tests: BTreeMap<String, ServiceTestEvidence>,
+    discarded_drafts: BTreeSet<ServiceDraftId>,
+    legacy_imported: bool,
+}
+
+/// Runtime-only configuration. Deliberately neither Debug nor Serialize. Consume immediately
+/// into the process stdin payload; do not pass it back to preference or task persistence.
+pub struct ResolvedConfig(ConfigFile);
+
+impl ResolvedConfig {
+    pub fn into_config(mut self) -> ConfigFile {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for ResolvedConfig {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.asr_api.api_key.zeroize();
+        self.0.llm.api_key.zeroize();
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Envelope<T> {
+    schema: u32,
+    revision: u64,
+    value: T,
+}
+
+trait Validate {
+    fn validate_value(&self) -> Result<()>;
+}
+
+impl Validate for GenerationPreferences {
+    fn validate_value(&self) -> Result<()> {
+        if self.options.out.is_some() {
+            bail!("保存位置由存储设置管理");
+        }
+        if self.ai_concurrency == 0 || self.ai_concurrency > 64 {
+            bail!("AI 并发请求数需要在 1 到 64 之间");
+        }
+        for (name, value) in [
+            ("画面相似度", self.options.similarity),
+            ("画面采样间隔", self.options.sample_interval),
+            ("画面间隔", self.options.cooldown),
+            ("稳定画面时长", self.options.stable_secs),
+        ] {
+            if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+                bail!("{name}需要是有效的非负数");
+            }
+        }
+        if self.options.similarity.is_some_and(|value| value > 1.0) {
+            bail!("画面相似度需要在 0 到 1 之间");
+        }
+        if self
+            .options
+            .max_speech
+            .is_some_and(|value| !value.is_finite() || value <= 0.0)
+        {
+            bail!("语音分段长度需要大于 0");
+        }
+        Ok(())
+    }
+}
+
+impl Validate for ApplicationPreferences {
+    fn validate_value(&self) -> Result<()> {
+        if ![1.0, 1.25, 1.5, 2.0].contains(&self.font_scale) {
+            bail!("请选择 100%、125%、150% 或 200% 的文字大小");
+        }
+        Ok(())
+    }
+}
+
+impl Validate for ServicesState {
+    fn validate_value(&self) -> Result<()> {
+        for (id, draft) in &self.drafts {
+            if id != &draft.id
+                || !valid_id(id, "service-draft-")
+                || !valid_id(&draft.service_id, "service-")
+            {
+                bail!("服务草稿记录不完整");
+            }
+        }
+        for (id, version) in &self.versions {
+            if id != &version.id
+                || !valid_id(id, "service-version-")
+                || !valid_id(&version.service_id, "service-")
+            {
+                bail!("服务版本记录不完整");
+            }
+            let config = &version.config;
+            if normalize_endpoint(&config.endpoint, config.protocol)? != config.endpoint
+                || config.model.trim().is_empty()
+                || (config.authentication == Authentication::ApiKey && config.credential.is_none())
+            {
+                bail!("有效服务版本记录不完整");
+            }
+        }
+        for (reference, purpose) in [
+            (&self.defaults.asr, ServicePurpose::Speech),
+            (&self.defaults.llm, ServicePurpose::Ai),
+        ] {
+            if let Some(reference) = reference {
+                let version = self
+                    .versions
+                    .get(reference)
+                    .ok_or_else(|| anyhow!("默认服务版本不存在"))?;
+                if version.config.protocol.purpose() != purpose {
+                    bail!("默认服务用途不匹配");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct Store {
+    root: PathBuf,
+    vault: Arc<dyn CredentialVault>,
+    generation: GenerationPreferences,
+    application: ApplicationPreferences,
+    services: ServicesState,
+    revisions: BTreeMap<PreferenceGroup, u64>,
+    blocked: BTreeSet<PreferenceGroup>,
+    issues: Vec<SettingsIssue>,
+    generation_intent: Option<GenerationPreferences>,
+    application_intent: Option<ApplicationPreferences>,
+    recovery_drafts: BTreeSet<ServiceDraftId>,
+}
+
+impl Store {
+    /// Loading a broken group never makes reading notes or unrelated settings unavailable.
+    pub fn open(root: impl Into<PathBuf>, vault: Arc<dyn CredentialVault>) -> Self {
+        let mut store = Self {
+            root: root.into(),
+            vault,
+            generation: GenerationPreferences::default(),
+            application: ApplicationPreferences::default(),
+            services: ServicesState::default(),
+            revisions: BTreeMap::new(),
+            blocked: BTreeSet::new(),
+            issues: Vec::new(),
+            generation_intent: None,
+            application_intent: None,
+            recovery_drafts: BTreeSet::new(),
+        };
+        store.generation = store.load_group(PreferenceGroup::Generation);
+        store.application = store.load_group(PreferenceGroup::Application);
+        store.services = store.load_group(PreferenceGroup::Services);
+        store.load_recovery_intents();
+        store
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn vault(&self) -> Arc<dyn CredentialVault> {
+        Arc::clone(&self.vault)
+    }
+    pub fn available_environment_credentials(purpose: ServicePurpose) -> Vec<&'static str> {
+        let names: &[&str] = match purpose {
+            ServicePurpose::Speech => &["COURSE2MD_ASR_API_KEY", "OPENROUTER_API_KEY"],
+            ServicePurpose::Ai => &["OPENAI_API_KEY", "OPENROUTER_API_KEY"],
+        };
+        names
+            .iter()
+            .copied()
+            .filter(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(Secret::new)
+                    .is_some_and(|secret| !secret.is_empty())
+            })
+            .collect()
+    }
+    /// The user selects a named environment value explicitly. Capture it into a new vault
+    /// entry now; queued tasks never consult the later process environment.
+    pub fn capture_environment_credential(
+        &mut self,
+        mut draft: ServiceDraft,
+        name: &str,
+    ) -> Result<ServiceDraft> {
+        if !Self::available_environment_credentials(draft.protocol.purpose()).contains(&name) {
+            bail!("这个环境变量当前没有可用的凭据，请重新选择或填写 API Key");
+        }
+        let value = Secret::new(std::env::var(name).map_err(|_| anyhow!("无法读取所选环境变量"))?);
+        let reference = self.vault.insert(value)?;
+        draft.credential = Some(reference.clone());
+        draft.credential_source = Some(format!("环境变量 {name}"));
+        draft.authentication = Authentication::ApiKey;
+        match self.save_service_draft(draft, None) {
+            Ok(draft) => Ok(draft),
+            Err(error) => {
+                let _ = self.vault.remove(&reference);
+                Err(error)
+            }
+        }
+    }
+    pub fn generation(&self) -> &GenerationPreferences {
+        &self.generation
+    }
+    pub fn generation_intent(&self) -> Option<&GenerationPreferences> {
+        self.generation_intent.as_ref()
+    }
+    pub fn application_intent(&self) -> Option<&ApplicationPreferences> {
+        self.application_intent.as_ref()
+    }
+    /// An unsuccessful preference commit may still be preserved as a non-active recovery
+    /// record. This allows an ordinary exit without either losing the edit or activating it.
+    pub fn unsaved_intents_are_preserved(&self) -> bool {
+        let generation = self.generation_intent.as_ref().is_none_or(|intent| {
+            read_envelope::<GenerationPreferences>(
+                &self.recovery_root().join("generation-intent.json"),
+            )
+            .ok()
+            .flatten()
+            .is_some_and(|saved| saved.value == *intent)
+        });
+        let application = self.application_intent.as_ref().is_none_or(|intent| {
+            read_envelope::<ApplicationPreferences>(
+                &self.recovery_root().join("application-intent.json"),
+            )
+            .ok()
+            .flatten()
+            .is_some_and(|saved| saved.value == *intent)
+        });
+        generation && application
+    }
+    pub fn is_recovery_draft(&self, id: &str) -> bool {
+        self.recovery_drafts.contains(id)
+    }
+    pub fn application(&self) -> &ApplicationPreferences {
+        &self.application
+    }
+    pub fn issues(&self) -> &[SettingsIssue] {
+        &self.issues
+    }
+    pub fn is_blocked(&self, group: PreferenceGroup) -> bool {
+        self.blocked.contains(&group)
+    }
+    pub fn default_refs(&self) -> ServiceRefs {
+        self.services.defaults.clone()
+    }
+    pub fn service_drafts(&self) -> impl Iterator<Item = &ServiceDraft> {
+        self.services.drafts.values()
+    }
+    pub fn draft(&self, id: &str) -> Option<&ServiceDraft> {
+        self.services.drafts.get(id)
+    }
+    pub fn versions(&self) -> impl Iterator<Item = &ServiceVersion> {
+        self.services.versions.values()
+    }
+    pub fn version(&self, id: &str) -> Option<&ServiceVersion> {
+        self.services.versions.get(id)
+    }
+    pub fn is_service_stopped(&self, service_id: &str) -> bool {
+        self.services.stopped.contains_key(service_id)
+            || self.root.join("stopped-services").join(service_id).exists()
+    }
+    pub fn test_evidence(
+        &self,
+        config: &ServiceConfiguration,
+        contract: &str,
+    ) -> Option<&ServiceTestEvidence> {
+        self.services.tests.get(&config.fingerprint(contract))
+    }
+
+    pub fn apply_defaults(&self, config: &mut ConfigFile) {
+        self.generation.apply_to(config);
+        config.desktop = self.application.desktop.clone();
+    }
+
+    pub fn defaults_config(&self) -> ConfigFile {
+        let mut config = ConfigFile::default();
+        self.apply_defaults(&mut config);
+        config
+    }
+
+    /// A library move changes only paths physically inside that library. Keep a pending
+    /// ordinary edit intact, and let the existing recovery journal retain a failed commit.
+    pub fn relocate_generation_paths(&mut self, old: &Path, new: &Path) -> Result<()> {
+        let mut next = self
+            .generation_intent
+            .as_ref()
+            .unwrap_or(&self.generation)
+            .clone();
+        let Some(path) = &mut next.options.model_dir else {
+            return Ok(());
+        };
+        let Some(relative) = relative_path_inside(path, old) else {
+            return Ok(());
+        };
+        *path = new.join(relative);
+        self.save_generation(next)
+    }
+
+    /// Backup cleanup must retain the old path while any effective or pending preference
+    /// still names a model directory there. Merely copying the library does not release it.
+    pub fn references_storage_path(&self, root: &Path) -> bool {
+        std::iter::once(&self.generation)
+            .chain(self.generation_intent.iter())
+            .filter_map(|value| value.options.model_dir.as_ref())
+            .any(|path| relative_path_inside(path, root).is_some())
+    }
+
+    pub fn save_generation(&mut self, mut value: GenerationPreferences) -> Result<()> {
+        value.options.out = None;
+        value.options.resume = Some(true);
+        if let Err(error) = self.persist(PreferenceGroup::Generation, &value) {
+            let intent = Envelope {
+                schema: SCHEMA,
+                revision: self
+                    .revisions
+                    .get(&PreferenceGroup::Generation)
+                    .copied()
+                    .unwrap_or(0),
+                value: value.clone(),
+            };
+            if let Ok(bytes) = serde_json::to_vec_pretty(&intent) {
+                let _ = atomic_write_with_retry(
+                    &self.recovery_root().join("generation-intent.json"),
+                    &bytes,
+                );
+            }
+            self.generation_intent = Some(value);
+            return Err(error);
+        }
+        self.generation = value;
+        self.generation_intent = None;
+        let _ = std::fs::remove_file(self.recovery_root().join("generation-intent.json"));
+        Ok(())
+    }
+
+    pub fn save_application(&mut self, mut value: ApplicationPreferences) -> Result<()> {
+        value.desktop.system_titlebar = true;
+        value.desktop.setup_completed = true;
+        if let Err(error) = self.persist(PreferenceGroup::Application, &value) {
+            let intent = Envelope {
+                schema: SCHEMA,
+                revision: self
+                    .revisions
+                    .get(&PreferenceGroup::Application)
+                    .copied()
+                    .unwrap_or(0),
+                value: value.clone(),
+            };
+            if let Ok(bytes) = serde_json::to_vec_pretty(&intent) {
+                let _ = atomic_write_with_retry(
+                    &self.recovery_root().join("application-intent.json"),
+                    &bytes,
+                );
+            }
+            self.application_intent = Some(value);
+            return Err(error);
+        }
+        self.application = value;
+        self.application_intent = None;
+        let _ = std::fs::remove_file(self.recovery_root().join("application-intent.json"));
+        Ok(())
+    }
+
+    /// Incomplete text is a valid draft. Replacing a key allocates a new vault identity before
+    /// the secret-free draft is committed. A stale editor cannot overwrite a newer revision.
+    pub fn save_service_draft(
+        &mut self,
+        mut draft: ServiceDraft,
+        new_key: Option<Secret>,
+    ) -> Result<ServiceDraft> {
+        // Incomplete drafts are durable, but URL-embedded credentials must never be written
+        // to a normal settings file, including when the URL itself is not yet parseable.
+        if draft.address.contains('@') || draft.address.contains('?') || draft.address.contains('#')
+        {
+            bail!("带账号、查询参数或片段的服务地址尚未保存，请将凭据移到 API Key 字段");
+        }
+        if let Some(current) = self.services.drafts.get(&draft.id) {
+            if current.revision != draft.revision {
+                bail!("这份服务草稿已更新，请保留当前输入并重新载入最新版本");
+            }
+        } else if draft.revision != 0 {
+            bail!("找不到这份服务草稿，请保留当前输入后重新保存");
+        }
+        let created_credential = match new_key {
+            Some(secret) => {
+                let reference = self.vault.insert(secret)?;
+                draft.credential = Some(reference.clone());
+                draft.credential_source = None;
+                Some(reference)
+            }
+            None => None,
+        };
+        draft.revision += 1;
+        let mut next = self.services.clone();
+        next.drafts.insert(draft.id.clone(), draft.clone());
+        if let Err(error) = self.persist(PreferenceGroup::Services, &next) {
+            if let Ok(bytes) = serde_json::to_vec_pretty(&draft)
+                && atomic_write_with_retry(
+                    &self.recovery_root().join(format!("{}.json", draft.id)),
+                    &bytes,
+                )
+                .is_ok()
+            {
+                self.services.drafts.insert(draft.id.clone(), draft.clone());
+                self.recovery_drafts.insert(draft.id.clone());
+                return Ok(draft);
+            }
+            if let Some(reference) = created_credential {
+                let _ = self.vault.remove(&reference);
+            }
+            return Err(error);
+        }
+        self.services = next;
+        self.recovery_drafts.remove(&draft.id);
+        let _ = std::fs::remove_file(self.recovery_root().join(format!("{}.json", draft.id)));
+        Ok(draft)
+    }
+
+    pub fn discard_service_draft(&mut self, id: &str) -> Result<()> {
+        let mut next = self.services.clone();
+        next.drafts.remove(id);
+        next.discarded_drafts.insert(id.to_owned());
+        self.persist(PreferenceGroup::Services, &next)?;
+        self.services = next;
+        self.recovery_drafts.remove(id);
+        let _ = std::fs::remove_file(self.recovery_root().join(format!("{id}.json")));
+        Ok(())
+    }
+
+    pub fn publish_service(
+        &mut self,
+        draft_id: &str,
+        scope: BindingScope,
+    ) -> Result<ServiceVersion> {
+        let draft = self
+            .services
+            .drafts
+            .get(draft_id)
+            .ok_or_else(|| anyhow!("找不到这份服务草稿"))?;
+        if self.is_service_stopped(&draft.service_id) {
+            bail!("此服务已停止使用。请添加新的服务，原任务不会自动恢复外发");
+        }
+        let config = draft.configuration()?;
+        if self.services.versions.values().any(|version| {
+            version.service_id == draft.service_id
+                && version.config.protocol.purpose() != config.protocol.purpose()
+        }) {
+            bail!("修改接口不能改变此服务的用途，请添加另一用途的服务");
+        }
+        if let Some(reference) = &config.credential {
+            // Local credential availability is part of static validation, not a paid test.
+            self.vault.resolve(reference)?;
+        }
+        let version = ServiceVersion {
+            id: new_id("service-version"),
+            service_id: draft.service_id.clone(),
+            number: self
+                .services
+                .versions
+                .values()
+                .filter(|version| version.service_id == draft.service_id)
+                .map(|version| version.number)
+                .max()
+                .unwrap_or(0)
+                + 1,
+            saved_at: now_seconds(),
+            published_from: Some(draft.id.clone()),
+            config,
+        };
+        let mut next = self.services.clone();
+        next.versions.insert(version.id.clone(), version.clone());
+        next.drafts.remove(draft_id);
+        if scope == BindingScope::Defaults {
+            match version.config.protocol.purpose() {
+                ServicePurpose::Speech => next.defaults.asr = Some(version.id.clone()),
+                ServicePurpose::Ai => next.defaults.llm = Some(version.id.clone()),
+            }
+        }
+        self.persist(PreferenceGroup::Services, &next)?;
+        self.services = next;
+        self.recovery_drafts.remove(draft_id);
+        let _ = std::fs::remove_file(self.recovery_root().join(format!("{draft_id}.json")));
+        Ok(version)
+    }
+
+    pub fn set_default_service(
+        &mut self,
+        purpose: ServicePurpose,
+        reference: Option<&str>,
+    ) -> Result<()> {
+        if let Some(reference) = reference {
+            let version = self.check_dispatch(reference)?;
+            if version.config.protocol.purpose() != purpose {
+                bail!("此服务不支持所选用途");
+            }
+        }
+        let mut next = self.services.clone();
+        match purpose {
+            ServicePurpose::Speech => next.defaults.asr = reference.map(str::to_owned),
+            ServicePurpose::Ai => next.defaults.llm = reference.map(str::to_owned),
+        }
+        self.persist(PreferenceGroup::Services, &next)?;
+        self.services = next;
+        Ok(())
+    }
+
+    /// Commit the stop intent before returning success. The scheduler must call check_dispatch
+    /// at every request boundary. Already dispatched requests are still received and saved.
+    pub fn stop_service(&mut self, service_id: &str) -> Result<()> {
+        if !self
+            .services
+            .versions
+            .values()
+            .any(|version| version.service_id == service_id)
+        {
+            bail!("找不到此服务");
+        }
+        let mut next = self.services.clone();
+        next.stopped
+            .entry(service_id.to_owned())
+            .or_insert_with(now_seconds);
+        // An independent immutable intent must survive restoration of an older group backup.
+        // Otherwise a corrupt preferences file could undo a user's request to stop egress.
+        atomic_write_with_retry(
+            &self.root.join("stopped-services").join(service_id),
+            b"stopped\n",
+        )?;
+        self.persist(PreferenceGroup::Services, &next)?;
+        self.services = next;
+        Ok(())
+    }
+
+    pub fn check_dispatch(&self, reference: &str) -> Result<&ServiceVersion> {
+        if self.is_blocked(PreferenceGroup::Services) {
+            bail!("服务记录暂时不可用，已保留原文件");
+        }
+        let version = self
+            .version(reference)
+            .ok_or_else(|| anyhow!("找不到任务使用的服务版本，请选择服务后建立新尝试"))?;
+        match std::fs::metadata(self.root.join("stopped-services").join(&version.service_id)) {
+            Ok(_) => bail!("所选服务已停用，尚未发送新的请求"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => bail!("暂时无法确认此服务是否已停用，尚未发送新的请求"),
+        }
+        if self.is_service_stopped(&version.service_id) {
+            bail!("所选服务已停用，尚未发送新的请求");
+        }
+        Ok(version)
+    }
+
+    /// Return only non-secret configuration; unused services do not participate in validation.
+    pub fn config_for_refs(
+        &self,
+        base: &ConfigFile,
+        references: &ServiceRefs,
+    ) -> Result<ConfigFile> {
+        let mut config = base.clone();
+        clear_service_fields(&mut config);
+        let required = references.required_for(base);
+        if base.defaults.provider == Some(AsrProvider::Api)
+            && base.defaults.transcript_source != Some(TranscriptSource::Subtitle)
+        {
+            let id = required
+                .asr
+                .as_deref()
+                .ok_or_else(|| anyhow!("请为这次笔记设置语音服务"))?;
+            let version = self.check_dispatch(id)?;
+            if version.config.protocol.purpose() != ServicePurpose::Speech {
+                bail!("所选服务不支持语音识别");
+            }
+            config.asr_api.base_url = version.config.endpoint.clone();
+            config.asr_api.model = version.config.model.clone();
+            config.asr_api.mode = match version.config.protocol {
+                ServiceProtocol::SpeechTranscriptions => AsrApiMode::Transcriptions,
+                _ => AsrApiMode::Chat,
+            };
+        }
+        if base.llm.enabled || base.llm.summarize {
+            let id = required
+                .llm
+                .as_deref()
+                .ok_or_else(|| anyhow!("请为这次笔记设置 AI 服务"))?;
+            let version = self.check_dispatch(id)?;
+            if version.config.protocol.purpose() != ServicePurpose::Ai {
+                bail!("所选服务不支持 AI 校对或摘要");
+            }
+            config.llm.base_url = version.config.endpoint.clone();
+            config.llm.model = version.config.model.clone();
+        }
+        Ok(config)
+    }
+
+    pub fn resolve_for_execution(
+        &self,
+        base: &ConfigFile,
+        references: &ServiceRefs,
+    ) -> Result<ResolvedConfig> {
+        let mut config = ResolvedConfig(self.config_for_refs(base, references)?);
+        let required = references.required_for(base);
+        for (id, is_asr) in [(required.asr, true), (required.llm, false)] {
+            if let Some(id) = id {
+                let version = self.check_dispatch(&id)?;
+                if let Some(reference) = &version.config.credential {
+                    let secret = self.vault.resolve(reference)?;
+                    if is_asr {
+                        config.0.asr_api.api_key = secret.expose().to_owned();
+                    } else {
+                        config.0.llm.api_key = secret.expose().to_owned();
+                    }
+                }
+            }
+        }
+        Ok(config)
+    }
+
+    /// Async tests may finish after an edit. Only evidence for this exact content is attached
+    /// to the current draft; stale results cannot label replacement fields as tested.
+    pub fn record_draft_test(
+        &mut self,
+        draft_id: &str,
+        evidence: ServiceTestEvidence,
+    ) -> Result<bool> {
+        let Some(draft) = self.draft(draft_id) else {
+            return Ok(false);
+        };
+        let Ok(config) = draft.configuration() else {
+            return Ok(false);
+        };
+        if config.fingerprint(&evidence.contract) != evidence.fingerprint {
+            return Ok(false);
+        }
+        self.record_test(evidence)?;
+        Ok(true)
+    }
+
+    pub fn record_test(&mut self, evidence: ServiceTestEvidence) -> Result<()> {
+        let mut next = self.services.clone();
+        next.tests.insert(evidence.fingerprint.clone(), evidence);
+        self.persist(PreferenceGroup::Services, &next)?;
+        self.services = next;
+        Ok(())
+    }
+
+    pub fn legacy_imported(&self) -> bool {
+        self.services.legacy_imported
+    }
+
+    /// Import is explicit and one-time; callers must not continue saving/reading the old TOML
+    /// as a runtime authority. All groups commit independently, and service publication does
+    /// not occur until its captured credential and full configuration are durable.
+    pub fn import_legacy(&mut self, legacy: &ConfigFile) -> Result<()> {
+        if self.services.legacy_imported {
+            return Ok(());
+        }
+        if self
+            .revisions
+            .get(&PreferenceGroup::Generation)
+            .copied()
+            .unwrap_or(0)
+            == 0
+        {
+            self.save_generation(GenerationPreferences::from_legacy(legacy))?;
+        }
+        if self
+            .revisions
+            .get(&PreferenceGroup::Application)
+            .copied()
+            .unwrap_or(0)
+            == 0
+        {
+            self.save_application(ApplicationPreferences {
+                desktop: legacy.desktop.clone(),
+                ..ApplicationPreferences::default()
+            })?;
+        }
+        let mut next = self.services.clone();
+        let mut new_credentials = Vec::new();
+        let import_service_defaults = self
+            .revisions
+            .get(&PreferenceGroup::Services)
+            .copied()
+            .unwrap_or(0)
+            == 0;
+        for (purpose, address, model, key, protocol) in [
+            (
+                ServicePurpose::Speech,
+                &legacy.asr_api.base_url,
+                &legacy.asr_api.model,
+                &legacy.asr_api.api_key,
+                if legacy.asr_api.mode == AsrApiMode::Chat {
+                    ServiceProtocol::SpeechChat
+                } else {
+                    ServiceProtocol::SpeechTranscriptions
+                },
+            ),
+            (
+                ServicePurpose::Ai,
+                &legacy.llm.base_url,
+                &legacy.llm.model,
+                &legacy.llm.api_key,
+                ServiceProtocol::AiChat,
+            ),
+        ] {
+            // Legacy speech placeholders are not real configured services without either an
+            // explicit cloud selection or a credential. Do not manufacture an active service.
+            let used = match purpose {
+                ServicePurpose::Speech => {
+                    legacy.defaults.provider == Some(AsrProvider::Api) || !key.trim().is_empty()
+                }
+                ServicePurpose::Ai => {
+                    legacy.llm.enabled
+                        || legacy.llm.summarize
+                        || !address.trim().is_empty()
+                        || !key.trim().is_empty()
+                }
+            };
+            if !used {
+                continue;
+            }
+            let mut draft = ServiceDraft::new(purpose);
+            draft.protocol = protocol;
+            draft.address = address.clone();
+            draft.model = model.clone();
+            draft.revision = 1;
+            if !key.trim().is_empty() {
+                match self.vault.insert(Secret::new(key.clone())) {
+                    Ok(reference) => {
+                        draft.credential = Some(reference.clone());
+                        new_credentials.push(reference);
+                    }
+                    Err(error) => {
+                        for reference in &new_credentials {
+                            let _ = self.vault.remove(reference);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            if let Ok(config) = draft.configuration() {
+                let version = ServiceVersion {
+                    id: new_id("service-version"),
+                    service_id: draft.service_id,
+                    number: 1,
+                    saved_at: now_seconds(),
+                    published_from: Some(draft.id.clone()),
+                    config,
+                };
+                if import_service_defaults {
+                    match purpose {
+                        ServicePurpose::Speech => next.defaults.asr = Some(version.id.clone()),
+                        ServicePurpose::Ai => next.defaults.llm = Some(version.id.clone()),
+                    }
+                }
+                next.versions.insert(version.id.clone(), version);
+            } else {
+                next.drafts.insert(draft.id.clone(), draft);
+            }
+        }
+        next.legacy_imported = true;
+        if let Err(error) = self.persist(PreferenceGroup::Services, &next) {
+            for reference in new_credentials {
+                let _ = self.vault.remove(&reference);
+            }
+            return Err(error);
+        }
+        self.services = next;
+        Ok(())
+    }
+
+    /// Only the explicitly affected group is reset. Originals and the last backup are copied
+    /// before publication, and failure leaves the old files and effective state untouched.
+    pub fn reset_group(&mut self, group: PreferenceGroup) -> Result<()> {
+        let path = self.root.join(group.filename());
+        preserve_original(&self.root, &path)?;
+        preserve_original(&self.root, &path.with_extension("json.bak"))?;
+        self.blocked.remove(&group);
+        let result = match group {
+            PreferenceGroup::Generation => self.save_generation(GenerationPreferences::default()),
+            PreferenceGroup::Application => {
+                self.save_application(ApplicationPreferences::default())
+            }
+            PreferenceGroup::Services => {
+                let value = ServicesState::default();
+                self.persist(group, &value).map(|_| {
+                    self.services = value;
+                })
+            }
+        };
+        if result.is_err() {
+            self.blocked.insert(group);
+        }
+        result
+    }
+
+    fn load_group<T: Default + DeserializeOwned + Serialize + Validate>(
+        &mut self,
+        group: PreferenceGroup,
+    ) -> T {
+        let path = self.root.join(group.filename());
+        match read_envelope::<T>(&path) {
+            Ok(Some(envelope)) => {
+                self.revisions.insert(group, envelope.revision);
+                envelope.value
+            }
+            Ok(None) => T::default(),
+            Err(_) => match read_envelope::<T>(&path.with_extension("json.bak")) {
+                Ok(Some(envelope)) => {
+                    let restored = preserve_original(&self.root, &path).and_then(|_| {
+                        let bytes = serde_json::to_vec_pretty(&envelope)?;
+                        atomic_write_with_retry(&path, &bytes)
+                    });
+                    self.revisions.insert(group, envelope.revision);
+                    self.issues.push(SettingsIssue {
+                        group,
+                        kind: if restored.is_ok() {
+                            SettingsIssueKind::Recovered
+                        } else {
+                            SettingsIssueKind::SaveFailed
+                        },
+                        message: if restored.is_ok() {
+                            "已恢复最近一次可用的设置，原文件已保留".into()
+                        } else {
+                            "正在使用最近一次可用的设置，但恢复文件尚未保存；原文件已保留".into()
+                        },
+                        detail: restored
+                            .err()
+                            .map(|error| format!("设置目录：{}\n{error:#}", self.root.display())),
+                    });
+                    envelope.value
+                }
+                _ => {
+                    self.blocked.insert(group);
+                    self.issues.push(SettingsIssue {
+                        group,
+                        kind: SettingsIssueKind::NeedsReset,
+                        message: "此组设置暂时无法读取，原文件已保留。可以保留原文件并重置此组"
+                            .into(),
+                        detail: Some(format!("设置目录：{}", self.root.display())),
+                    });
+                    T::default()
+                }
+            },
+        }
+    }
+
+    fn recovery_root(&self) -> PathBuf {
+        self.root.with_extension("recovery")
+    }
+
+    fn load_recovery_intents(&mut self) {
+        if let Ok(Some(intent)) = read_envelope::<GenerationPreferences>(
+            &self.recovery_root().join("generation-intent.json"),
+        ) {
+            if self
+                .revisions
+                .get(&PreferenceGroup::Generation)
+                .copied()
+                .unwrap_or(0)
+                <= intent.revision
+            {
+                self.generation_intent = Some(intent.value);
+                self.issues.push(SettingsIssue {
+                    group: PreferenceGroup::Generation,
+                    kind: SettingsIssueKind::SaveFailed,
+                    message: "已找回上次未生效的设置变更，可以重试保存；当前仍使用原来的有效选项"
+                        .into(),
+                    detail: None,
+                });
+            }
+        }
+        if let Ok(Some(intent)) = read_envelope::<ApplicationPreferences>(
+            &self.recovery_root().join("application-intent.json"),
+        ) {
+            if self
+                .revisions
+                .get(&PreferenceGroup::Application)
+                .copied()
+                .unwrap_or(0)
+                <= intent.revision
+            {
+                self.application_intent = Some(intent.value);
+                self.issues.push(SettingsIssue {
+                    group: PreferenceGroup::Application,
+                    kind: SettingsIssueKind::SaveFailed,
+                    message: "已找回上次未生效的应用设置，可以重试保存；当前仍使用原来的有效选项"
+                        .into(),
+                    detail: None,
+                });
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(self.recovery_root()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with("service-draft-") || !name.ends_with(".json") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            let Ok(draft) = serde_json::from_slice::<ServiceDraft>(&bytes) else {
+                continue;
+            };
+            if !valid_id(&draft.id, "service-draft-") || !valid_id(&draft.service_id, "service-") {
+                continue;
+            }
+            if self
+                .services
+                .versions
+                .values()
+                .any(|version| version.published_from.as_deref() == Some(&draft.id))
+                || self.services.discarded_drafts.contains(&draft.id)
+            {
+                continue;
+            }
+            if self
+                .services
+                .drafts
+                .get(&draft.id)
+                .is_none_or(|current| current.revision < draft.revision)
+            {
+                self.recovery_drafts.insert(draft.id.clone());
+                self.services.drafts.insert(draft.id.clone(), draft);
+            }
+        }
+        if !self.recovery_drafts.is_empty() {
+            self.issues.push(SettingsIssue {
+                group: PreferenceGroup::Services,
+                kind: SettingsIssueKind::SaveFailed,
+                message: "已从恢复记录找回服务草稿，正在使用的服务版本保持不变".into(),
+                detail: None,
+            });
+        }
+    }
+
+    fn persist<T: Serialize + DeserializeOwned + Validate>(
+        &mut self,
+        group: PreferenceGroup,
+        value: &T,
+    ) -> Result<()> {
+        let result = (|| {
+            if self.blocked.contains(&group) {
+                bail!("此组设置需要先保留原文件并重置");
+            }
+            value.validate_value()?;
+            let path = self.root.join(group.filename());
+            let revision = self.revisions.get(&group).copied().unwrap_or(0) + 1;
+            let bytes = serde_json::to_vec_pretty(&Envelope {
+                schema: SCHEMA,
+                revision,
+                value,
+            })?;
+            if let Ok(Some(previous)) = read_envelope::<T>(&path) {
+                let previous = serde_json::to_vec_pretty(&previous)?;
+                atomic_write_with_retry(&path.with_extension("json.bak"), &previous)
+                    .context("无法保存此组设置的恢复副本")?;
+            } else if path.exists() {
+                // Never replace the last good backup with a corrupt primary file.
+                preserve_original(&self.root, &path)?;
+            }
+            atomic_write_with_retry(&path, &bytes).context("无法保存此组设置")?;
+            self.revisions.insert(group, revision);
+            Ok(())
+        })();
+        self.issues
+            .retain(|issue| issue.group != group || issue.kind == SettingsIssueKind::Recovered);
+        if let Err(error) = &result {
+            self.issues.push(SettingsIssue {
+                group,
+                kind: SettingsIssueKind::SaveFailed,
+                message: save_failure_message(group, error),
+                detail: Some(format!("设置目录：{}\n{error:#}", self.root.display())),
+            });
+        }
+        result
+    }
+}
+
+fn read_envelope<T: DeserializeOwned + Validate>(path: &Path) -> Result<Option<Envelope<T>>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let envelope: Envelope<T> = serde_json::from_slice(&bytes).context("设置记录无法解析")?;
+    if envelope.schema != SCHEMA {
+        bail!("此组设置使用尚不支持的版本");
+    }
+    envelope.value.validate_value()?;
+    Ok(Some(envelope))
+}
+
+fn atomic_write_with_retry(path: &Path, bytes: &[u8]) -> Result<()> {
+    // Only idempotent local persistence is retried. Network tests never use this helper.
+    let mut last_error = None;
+    for _ in 0..3 {
+        match course2md::checkpoint::atomic_write(path, bytes) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("write was attempted"))
+}
+
+fn preserve_original(root: &Path, source: &Path) -> Result<()> {
+    let bytes = match std::fs::read(source) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings");
+    atomic_write_with_retry(
+        &root
+            .join("recovery")
+            .join(format!("{}-{name}", new_id("original"))),
+        &bytes,
+    )
+}
+
+pub fn strip_secrets(config: &mut ConfigFile) {
+    use zeroize::Zeroize;
+    config.asr_api.api_key.zeroize();
+    config.llm.api_key.zeroize();
+}
+
+fn clear_service_fields(config: &mut ConfigFile) {
+    strip_secrets(config);
+    config.asr_api.base_url.clear();
+    config.asr_api.model.clear();
+    config.llm.base_url.clear();
+    config.llm.model.clear();
+}
+
+/// Accept the chosen protocol's full endpoint or a base URL. A known conflicting full
+/// endpoint is an error, never silently changed to another protocol. URL credentials,
+/// query-string tokens and fragments are rejected before they can enter normal files/logs.
+pub fn normalize_endpoint(address: &str, protocol: ServiceProtocol) -> Result<String> {
+    let mut url = url::Url::parse(address.trim())
+        .map_err(|_| anyhow!("请输入包含 http:// 或 https:// 的服务地址"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        bail!("请输入包含 http:// 或 https:// 的服务地址");
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("服务地址不能包含账号、密码、查询参数或片段；请通过认证字段保存凭据");
+    }
+    let path = url.path().trim_end_matches('/');
+    let desired = protocol.endpoint_suffix();
+    for known in [
+        "/audio/transcriptions",
+        "/chat/completions",
+        "/responses",
+        "/completions",
+    ] {
+        if path.ends_with(known) && !path.ends_with(desired) {
+            bail!("此完整地址与所选接口类型不一致，请更换接口类型或填写对应的服务地址");
+        }
+    }
+    if !path.ends_with(desired) {
+        url.set_path(&format!("{path}{desired}"));
+    } else {
+        let path = path.to_owned();
+        url.set_path(&path);
+    }
+    Ok(url.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credentials::MemoryCredentialVault;
+
+    fn isolated() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path(), Arc::new(MemoryCredentialVault::new()));
+        (directory, store)
+    }
+
+    fn complete_draft(store: &mut Store, model: &str) -> ServiceDraft {
+        let mut draft = ServiceDraft::new(ServicePurpose::Ai);
+        draft.address = "https://example.test/v1".into();
+        draft.model = model.into();
+        store
+            .save_service_draft(draft, Some(Secret::new("test-only-secret")))
+            .unwrap()
+    }
+
+    #[test]
+    fn incomplete_service_draft_does_not_block_other_groups_or_replace_effective_service() {
+        let (_directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "old-model");
+        let old = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        let mut draft = ServiceDraft::from_version(&old);
+        draft.address.clear();
+        store.save_service_draft(draft, None).unwrap();
+        let mut generation = store.generation().clone();
+        generation.ai_summary = true;
+        store.save_generation(generation).unwrap();
+        assert!(store.generation().ai_summary);
+        assert_eq!(store.default_refs().llm.as_deref(), Some(old.id.as_str()));
+        assert_eq!(store.service_drafts().count(), 1);
+    }
+
+    #[test]
+    fn task_only_publication_and_key_rotation_do_not_change_default_or_old_snapshot() {
+        let (_directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "old-model");
+        let old = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        let mut edit = ServiceDraft::from_version(&old);
+        edit.model = "new-model".into();
+        let edit = store
+            .save_service_draft(edit, Some(Secret::new("replacement-test-key")))
+            .unwrap();
+        let new = store
+            .publish_service(&edit.id, BindingScope::CurrentTask)
+            .unwrap();
+        assert_eq!(store.default_refs().llm, Some(old.id.clone()));
+        assert_ne!(old.config.credential, new.config.credential);
+        let mut config = ConfigFile::default();
+        config.llm.enabled = true;
+        let old_refs = ServiceRefs {
+            llm: Some(old.id),
+            asr: None,
+        };
+        let runtime = store
+            .resolve_for_execution(&config, &old_refs)
+            .unwrap()
+            .into_config();
+        assert_eq!(runtime.llm.model, "old-model");
+        assert_eq!(runtime.llm.api_key, "test-only-secret");
+        let saved = store.config_for_refs(&config, &old_refs).unwrap();
+        assert!(saved.llm.api_key.is_empty());
+    }
+
+    #[test]
+    fn group_recovery_preserves_corrupt_file_and_keeps_other_group_current() {
+        let (directory, mut store) = isolated();
+        let mut first = store.generation().clone();
+        first.ai_summary = true;
+        store.save_generation(first).unwrap();
+        let mut second = store.generation().clone();
+        second.ai_proofread = true;
+        store.save_generation(second).unwrap();
+        let mut app = store.application().clone();
+        app.desktop.reduce_motion = true;
+        store.save_application(app).unwrap();
+        std::fs::write(directory.path().join("generation.json"), b"broken settings").unwrap();
+        let recovered = Store::open(directory.path(), store.vault());
+        assert!(recovered.generation().ai_summary);
+        assert!(!recovered.generation().ai_proofread);
+        assert!(recovered.application().desktop.reduce_motion);
+        assert!(
+            recovered
+                .issues()
+                .iter()
+                .any(|issue| issue.kind == SettingsIssueKind::Recovered)
+        );
+        let preserved = std::fs::read_dir(directory.path().join("recovery"))
+            .unwrap()
+            .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(preserved.iter().any(|bytes| bytes == b"broken settings"));
+    }
+
+    #[test]
+    fn failed_group_commit_does_not_publish_intent_or_change_other_groups() {
+        let (directory, mut store) = isolated();
+        store.save_generation(store.generation().clone()).unwrap();
+        // A directory in place of the target makes writes fail even when tests run as root.
+        std::fs::remove_file(directory.path().join("generation.json")).unwrap();
+        std::fs::create_dir(directory.path().join("generation.json")).unwrap();
+        let mut next = store.generation().clone();
+        next.ai_summary = true;
+        assert!(store.save_generation(next).is_err());
+        assert!(!store.generation().ai_summary);
+        store.save_application(store.application().clone()).unwrap();
+        assert!(
+            store
+                .issues()
+                .iter()
+                .any(|issue| issue.group == PreferenceGroup::Generation)
+        );
+    }
+
+    #[test]
+    fn broken_unbacked_group_requires_explicit_reset_and_keeps_original() {
+        let (directory, store) = isolated();
+        std::fs::write(
+            directory.path().join("generation.json"),
+            b"original broken content",
+        )
+        .unwrap();
+        let mut reopened = Store::open(directory.path(), store.vault());
+        assert!(reopened.is_blocked(PreferenceGroup::Generation));
+        assert!(
+            reopened
+                .save_generation(GenerationPreferences::default())
+                .is_err()
+        );
+        reopened.reset_group(PreferenceGroup::Generation).unwrap();
+        assert!(!reopened.is_blocked(PreferenceGroup::Generation));
+        assert!(
+            std::fs::read_dir(directory.path().join("recovery"))
+                .unwrap()
+                .count()
+                >= 1
+        );
+    }
+
+    #[test]
+    fn secrets_never_enter_saved_groups_or_nonsecret_configuration() {
+        let (directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "model");
+        store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        for entry in std::fs::read_dir(directory.path()).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(!text.contains("test-only-secret"));
+            // "api_key" is a legitimate authentication-mode value, never a secret field.
+            assert!(!text.contains("\"api_key\":"));
+        }
+    }
+
+    #[test]
+    fn stop_is_persistent_and_only_blocks_actual_service_use() {
+        let (directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "model");
+        let version = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        store.stop_service(&version.service_id).unwrap();
+        let reopened = Store::open(directory.path(), store.vault());
+        assert!(reopened.check_dispatch(&version.id).is_err());
+        assert!(
+            reopened
+                .config_for_refs(&ConfigFile::default(), &reopened.default_refs())
+                .is_ok()
+        );
+        let mut config = ConfigFile::default();
+        config.llm.summarize = true;
+        assert!(
+            reopened
+                .config_for_refs(&config, &reopened.default_refs())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn endpoint_normalization_refuses_protocol_conflicts_and_embedded_credentials() {
+        assert_eq!(
+            normalize_endpoint("https://example.test/v1/", ServiceProtocol::AiChat).unwrap(),
+            "https://example.test/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_endpoint(
+                "http://127.0.0.1:8080/v1/audio/transcriptions",
+                ServiceProtocol::SpeechTranscriptions
+            )
+            .unwrap(),
+            "http://127.0.0.1:8080/v1/audio/transcriptions"
+        );
+        assert!(
+            normalize_endpoint(
+                "https://example.test/v1/chat/completions",
+                ServiceProtocol::SpeechTranscriptions
+            )
+            .is_err()
+        );
+        assert!(
+            normalize_endpoint(
+                "https://user:secret@example.test/v1",
+                ServiceProtocol::AiChat
+            )
+            .is_err()
+        );
+        assert!(
+            normalize_endpoint(
+                "https://example.test/v1?api_key=secret",
+                ServiceProtocol::AiChat
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stale_test_result_cannot_mark_changed_fields_as_passed() {
+        let (_directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "model-a");
+        let config = draft.configuration().unwrap();
+        let evidence = ServiceTestEvidence {
+            fingerprint: config.fingerprint("proofread-v1"),
+            contract: "proofread-v1".into(),
+            tested_at: 1,
+            outcome: TestOutcome::Passed,
+            message: "校对用途测试通过".into(),
+            details: Vec::new(),
+        };
+        let mut renamed = config.clone();
+        renamed.name = "A different display name".into();
+        assert_eq!(
+            config.fingerprint("proofread-v1"),
+            renamed.fingerprint("proofread-v1")
+        );
+        let mut edit = draft.clone();
+        edit.model = "model-b".into();
+        store.save_service_draft(edit, None).unwrap();
+        assert!(!store.record_draft_test(&draft.id, evidence).unwrap());
+    }
+
+    #[test]
+    fn new_defaults_are_local_independent_and_do_not_export_extra_files() {
+        let (_directory, store) = isolated();
+        let preferences = store.generation();
+        assert!(!preferences.ai_proofread && !preferences.ai_summary && !preferences.vision);
+        assert_eq!(preferences.options.formats.as_deref(), Some([].as_slice()));
+        let mut preferences = preferences.clone();
+        preferences.ai_summary = true;
+        preferences.vision = true;
+        let mut config = ConfigFile::default();
+        config.defaults.out = Some(PathBuf::from("/test-library"));
+        config.llm.api_key = "test-only-old-global-key".into();
+        preferences.apply_to(&mut config);
+        assert!(!config.llm.enabled && config.llm.summarize && !config.llm.vision);
+        assert_eq!(config.defaults.out, Some(PathBuf::from("/test-library")));
+        assert!(config.llm.api_key.is_empty());
+    }
+
+    #[test]
+    fn old_storage_and_onboarding_markers_do_not_create_an_empty_settings_import() {
+        let mut config = ConfigFile::default();
+        config.defaults.out = Some(PathBuf::from("/isolated/existing-library"));
+        config.defaults.resume = Some(false);
+        config.desktop.setup_completed = true;
+        config.desktop.system_titlebar = true;
+        assert!(!has_importable_legacy(&config));
+        config.defaults.asr_model = Some("qwen3-0.6b".into());
+        assert!(has_importable_legacy(&config));
+        config.defaults.asr_model = None;
+        config.llm.prompt = Some("Preserve scientific terms.".into());
+        assert!(has_importable_legacy(&config));
+    }
+
+    #[test]
+    fn permission_failure_names_the_actionable_cause_without_a_temporary_filename() {
+        let error = anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "/isolated/settings/.tmpIrEDzg",
+        ))
+        .context("无法保存此组设置的恢复副本");
+        assert_eq!(
+            save_failure_message(PreferenceGroup::Application, &error),
+            "应用偏好未保存：设置目录暂时无法写入"
+        );
+        assert!(format!("{error:#}").contains(".tmpIrEDzg"));
+    }
+
+    #[test]
+    fn failed_ordinary_edits_are_recovered_without_becoming_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("preferences");
+        let mut store = Store::open(&root, Arc::new(MemoryCredentialVault::new()));
+        std::fs::create_dir_all(root.join("generation.json")).unwrap();
+        std::fs::create_dir_all(root.join("application.json")).unwrap();
+        let mut generation = store.generation().clone();
+        generation.prompt_draft = Some("Keep the technical terms.".into());
+        generation.ai_summary = true;
+        let mut application = store.application().clone();
+        application.font_scale = 2.0;
+        assert!(store.save_generation(generation.clone()).is_err());
+        assert!(store.save_application(application.clone()).is_err());
+        assert!(store.unsaved_intents_are_preserved());
+        let mut reopened = Store::open(&root, store.vault());
+        assert!(!reopened.generation().ai_summary);
+        assert_eq!(reopened.application().font_scale, 1.0);
+        assert_eq!(reopened.generation_intent(), Some(&generation));
+        assert_eq!(reopened.application_intent(), Some(&application));
+        std::fs::remove_dir(root.join("generation.json")).unwrap();
+        std::fs::remove_dir(root.join("application.json")).unwrap();
+        reopened.blocked.clear();
+        reopened.save_generation(generation).unwrap();
+        reopened.save_application(application).unwrap();
+        assert!(reopened.generation_intent().is_none());
+        assert!(reopened.application_intent().is_none());
+        let saved = Store::open(&root, reopened.vault());
+        assert!(saved.generation().ai_summary);
+        assert_eq!(saved.application().font_scale, 2.0);
+    }
+
+    #[test]
+    fn recovery_failure_is_distinct_from_a_durable_unapplied_edit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("preferences");
+        let mut store = Store::open(&root, Arc::new(MemoryCredentialVault::new()));
+        std::fs::create_dir_all(root.join("generation.json")).unwrap();
+        std::fs::write(
+            root.with_extension("recovery"),
+            b"blocked recovery location",
+        )
+        .unwrap();
+        let mut edit = store.generation().clone();
+        edit.ai_summary = true;
+        assert!(store.save_generation(edit).is_err());
+        assert!(!store.unsaved_intents_are_preserved());
+        assert!(!store.generation().ai_summary);
+    }
+
+    #[test]
+    fn service_recovery_retains_drafts_but_never_replaces_the_active_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("preferences");
+        let mut store = Store::open(&root, Arc::new(MemoryCredentialVault::new()));
+        let draft = complete_draft(&mut store, "active-model");
+        let version = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        // The verified backup represents the current committed version before the failure.
+        std::fs::copy(root.join("services.json"), root.join("services.json.bak")).unwrap();
+        std::fs::remove_file(root.join("services.json")).unwrap();
+        std::fs::create_dir(root.join("services.json")).unwrap();
+        let mut edit = ServiceDraft::from_version(&version);
+        edit.model = "unapplied-model".into();
+        let saved = store
+            .save_service_draft(edit, Some(Secret::new("isolated-new-key")))
+            .unwrap();
+        assert!(store.is_recovery_draft(&saved.id));
+        let mut reopened = Store::open(&root, store.vault());
+        assert_eq!(
+            reopened.default_refs().llm.as_deref(),
+            Some(version.id.as_str())
+        );
+        assert_eq!(reopened.draft(&saved.id).unwrap().model, "unapplied-model");
+        let recovery = std::fs::read_to_string(
+            root.with_extension("recovery")
+                .join(format!("{}.json", saved.id)),
+        )
+        .unwrap();
+        assert!(!recovery.contains("isolated-new-key"));
+        std::fs::remove_dir(root.join("services.json")).unwrap();
+        let published = reopened
+            .publish_service(&saved.id, BindingScope::CurrentTask)
+            .unwrap();
+        let again = Store::open(&root, reopened.vault());
+        assert!(again.draft(&saved.id).is_none());
+        assert!(again.version(&published.id).is_some());
+        assert_eq!(again.default_refs().llm, Some(version.id));
+    }
+
+    #[test]
+    fn restoring_a_pre_stop_backup_cannot_reenable_service_dispatch() {
+        let (directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "model");
+        let version = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        store.stop_service(&version.service_id).unwrap();
+        std::fs::write(directory.path().join("services.json"), b"corrupt primary").unwrap();
+        let recovered = Store::open(directory.path(), store.vault());
+        assert!(recovered.version(&version.id).is_some());
+        assert!(recovered.is_service_stopped(&version.service_id));
+        assert!(recovered.check_dispatch(&version.id).is_err());
+    }
+
+    #[test]
+    fn credential_bearing_urls_never_enter_incomplete_draft_storage() {
+        let (directory, mut store) = isolated();
+        for address in [
+            "https://user:never-save-me@host.test",
+            "user:never-save-me@host.test",
+            "https:/user:never-save-me@host.test",
+            "https://host.test?key=never-save-me",
+        ] {
+            let mut draft = ServiceDraft::new(ServicePurpose::Ai);
+            draft.address = address.into();
+            let error = store
+                .save_service_draft(draft, None)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("never-save-me"));
+        }
+        assert_eq!(store.service_drafts().count(), 0);
+        assert!(!directory.path().join("services.json").exists());
+    }
+
+    #[test]
+    fn unsupported_text_scale_is_not_published_or_restored_as_active() {
+        let (_directory, mut store) = isolated();
+        let mut app = store.application().clone();
+        app.font_scale = f32::NAN;
+        assert!(store.save_application(app).is_err());
+        assert_eq!(store.application().font_scale, 1.0);
+        assert!(!store.unsaved_intents_are_preserved());
+    }
+
+    #[test]
+    fn library_move_relocates_only_its_models_and_keeps_failed_old_reference_protected() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("preferences");
+        let old = directory.path().join("old-library");
+        let new = directory.path().join("new-library");
+        let outside = directory.path().join("external-models");
+        assert!(relative_path_inside(&old.join("../external-models"), &old).is_none());
+        assert_eq!(
+            relative_path_inside(&outside.join("../old-library/models"), &old),
+            Some(PathBuf::from("models"))
+        );
+        let mut store = Store::open(&root, Arc::new(MemoryCredentialVault::new()));
+        let mut config = store.generation().clone();
+        config.options.model_dir = Some(outside.clone());
+        store.save_generation(config).unwrap();
+        store.relocate_generation_paths(&old, &new).unwrap();
+        assert_eq!(
+            store.generation().options.model_dir.as_ref(),
+            Some(&outside)
+        );
+        let mut config = store.generation().clone();
+        config.options.model_dir = Some(old.join("models"));
+        store.save_generation(config).unwrap();
+        std::fs::remove_file(root.join("generation.json")).unwrap();
+        std::fs::create_dir(root.join("generation.json")).unwrap();
+        assert!(store.relocate_generation_paths(&old, &new).is_err());
+        assert!(store.references_storage_path(&old));
+        assert!(store.references_storage_path(&new));
+        assert!(store.unsaved_intents_are_preserved());
+        std::fs::remove_dir(root.join("generation.json")).unwrap();
+        store
+            .save_generation(store.generation_intent().unwrap().clone())
+            .unwrap();
+        assert!(!store.references_storage_path(&old));
+        assert!(store.references_storage_path(&new));
+    }
+}

@@ -9,21 +9,36 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[derive(Clone)]
+pub struct FolderOrigin {
+    pub root: PathBuf,
+    pub draft_id: Option<String>,
+}
+
+struct FolderDialog {
+    desktop: Entity<Desktop>,
+    title: &'static str,
+    _observation: Subscription,
+}
+
+impl Render for FolderDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("folder-dialog-content")
+            .role(Role::Dialog)
+            .aria_label(self.title)
+            .child(
+                self.desktop
+                    .update(cx, |desktop, cx| desktop.folder_editor_view(cx)),
+            )
+    }
+}
+
 impl Desktop {
     pub fn begin_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.job.is_none()
-            && self.completed_source.as_deref() == Some(self.value(Field::Source, cx).as_str())
-        {
-            self.invalidate_source();
-            self.online = true;
-            self.task_options = ConversionOptions::from_config(&self.config);
-            self.show_options = false;
-            self.last_source_input.clear();
-            self.inputs[&Field::Source].update(cx, |state, cx| state.set_value("", window, cx));
-            self.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
-        }
         self.navigate(Page::New, cx);
-        if self.online {
+        self.restore_draft(window, cx);
+        if self.online && self.value(Field::Source, cx).is_empty() {
             self.inputs[&Field::Source].update(cx, |state, cx| state.focus(window, cx));
         }
     }
@@ -32,117 +47,307 @@ impl Desktop {
         if let Some(cancel) = self.preview_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
-        self.preview_generation += 1;
+        if let Some(cancel) = self.subtitle_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.subtitle_generation = self.subtitle_generation.wrapping_add(1);
         self.source_preview = None;
+        self.source_candidates.clear();
+        self.source_collection_title = None;
+        self.subtitle_loading = false;
+        self.subtitle_error = None;
         self.preview_error = None;
         self.source_validation = None;
         self.show_preview_details = false;
+        self.source_deadline = None;
     }
+
     pub fn inspect_source(&mut self, cx: &mut Context<Self>) {
+        let mut input = self.value(Field::Source, cx);
+        if self.preview_cancel.is_some() && self.last_source_input == input {
+            return;
+        }
+        let previous_source = self.source_preview.clone();
         self.completed_source = None;
         self.invalidate_source();
-        let input = self.value(Field::Source, cx);
-        self.last_source_input = input.clone();
         if input.is_empty() {
             self.source_validation = Some(
                 if self.online {
-                    "请粘贴视频链接"
+                    "先粘贴视频链接"
                 } else {
-                    "请选择视频文件"
+                    "先选择一个视频"
                 }
                 .into(),
             );
             cx.notify();
             return;
         }
-        if self.online
-            && let Err(error) = source::validate_url(&input)
-        {
-            self.source_validation = Some(error.to_string());
-            cx.notify();
+        if self.online {
+            let links = source::video_links(&input);
+            if links.len() > 1 {
+                self.source_candidates = links
+                    .into_iter()
+                    .map(|input| source::SourceCandidate {
+                        title: input.clone(),
+                        input,
+                        identity: None,
+                        duration: None,
+                    })
+                    .collect();
+                self.source_collection_title = Some("分享内容中有多个链接，请选择一个视频".into());
+                self.save_current_draft(cx);
+                cx.notify();
+                return;
+            }
+            if let Some(link) = links.into_iter().next() {
+                if input != link {
+                    // The app owns a single document window. Normalize the input
+                    // without accepting an async result or changing its identity.
+                    if let Some(handle) = cx.windows().first().copied() {
+                        let field = self.inputs[&Field::Source].clone();
+                        let value = link.clone();
+                        let _ = cx.update_window(handle, |_, window, cx| {
+                            field.update(cx, |state, cx| state.set_value(value, window, cx))
+                        });
+                    }
+                    input = link;
+                }
+            }
+            if let Err(error) = source::validate_url(&input) {
+                self.source_validation = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        }
+        self.last_source_input = input.clone();
+        if !self.save_current_draft(cx) {
             return;
         }
+        let token = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.draft())
+            .map(|draft| (draft.id.clone(), draft.revision));
         let generation = self.preview_generation;
+        let request_input = input.clone();
         self.preview_workers += 1;
         let cancel = Arc::new(AtomicBool::new(false));
         self.preview_cancel = Some(cancel.clone());
         let online = self.online;
+        let handle = cx.windows().first().copied();
         let task = cx
             .background_executor()
-            .spawn(async move { source::inspect(input, online, cancel) });
+            .spawn(async move { source::probe(input, online, cancel) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.preview_workers -= 1;
-                if this.closing && this.preview_workers == 0 && this.job.is_none() {
-                    cx.quit();
-                    return;
-                }
-                if this.preview_generation != generation {
-                    return;
-                }
-                this.preview_cancel = None;
-                match result {
-                    Ok(source) => this.source_preview = Some(source),
-                    Err(e) => this.preview_error = Some(format!("无法预览课程：{e:#}")),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+            if let Some(handle) = handle {
+                let _ = cx.update_window(handle, |_, window, cx| this.update(cx, |this, cx| {
+                    this.preview_workers = this.preview_workers.saturating_sub(1);
+                    if this.preview_generation != generation || this.value(Field::Source, cx) != request_input { return; }
+                    if let Some((id, revision)) = &token {
+                        if !this.workspace.as_ref().and_then(|workspace| workspace.state.draft()).is_some_and(|draft| &draft.id == id && &draft.revision == revision) { return; }
+                    }
+                    this.preview_cancel = None;
+                    match result {
+                        Ok(source::SourceProbe::Single(mut source)) => {
+                            if let course2md::subtitle::SubtitleEvidence::Found { tracks, .. } = &mut source.subtitles {
+                                course2md::subtitle::sort_tracks(tracks, &this.preferences.generation().preferred_subtitle_languages, "zh-Hans", source.original_language.as_deref());
+                            }
+                            let title = this.workspace.as_ref().and_then(|workspace| workspace.state.draft())
+                                .filter(|draft| draft.custom_title).map(|draft| draft.title.clone()).unwrap_or_else(|| source.title.clone());
+                            this.draft_loading = true;
+                            this.inputs[&Field::Title].update(cx, |state, cx| state.set_value(title, window, cx));
+                            this.draft_loading = false;
+                            let previous_source = previous_source.as_ref().filter(|previous| previous.identity == source.identity);
+                            let wanted = previous_source.and_then(|previous| previous.subtitle_request.as_ref().map(|track| track.id.clone()).or_else(|| previous.selected_subtitle.as_ref().map(|subtitle| subtitle.track_id.clone())));
+                            let default_track = match &wanted {
+                                Some(id) => source.subtitles.tracks().iter().find(|track| &track.id == id).cloned().or_else(|| previous_source.and_then(|previous| previous.subtitles.tracks().iter().find(|track| &track.id == id && matches!(track.origin, course2md::subtitle::SubtitleOrigin::File { .. })).cloned())),
+                                None => source.subtitles.tracks().first().cloned(),
+                            };
+                            if let Some(previous) = previous_source { source.selected_subtitle = previous.selected_subtitle.clone(); }
+                            if wanted.is_some() && default_track.is_none() {
+                                let message = "原来选择的字幕暂时无法读取。已确认的正文仍保留，请明确选择要使用的文字来源。".to_owned();
+                                this.subtitle_error = Some(message.clone());
+                                source.subtitle_read_error = Some(course2md::subtitle::SubtitleReadError::Failed { message });
+                            }
+                            this.source_preview = Some(source);
+                            if this.online && this.inputs[&Field::Source].focus_handle(cx).is_focused(window) {
+                                // Never remove the field while the user is still typing in it.
+                                this.show_preview_details = true;
+                            }
+                            this.save_current_draft(cx);
+                            if this.task_options.source_mode != 2 && let Some(track) = default_track {
+                                this.confirm_subtitle(track, false, cx);
+                            }
+                        }
+                        Ok(source::SourceProbe::Collection { title, candidates, unavailable_entries }) => {
+                            this.source_collection_title = Some(if title.is_empty() { "请选择本次处理的视频".into() } else { title });
+                            this.source_candidates = candidates;
+                            if this.source_candidates.is_empty() {
+                                this.preview_error = Some("还无法确定要处理哪个视频。请复制具体视频的链接。".into());
+                            } else if unavailable_entries > 0 {
+                                this.preview_error = Some(format!("另有 {unavailable_entries} 个条目暂时无法确认。可选择下列视频，或复制具体视频的链接。"));
+                            }
+                        }
+                        Ok(source::SourceProbe::Unresolved { message }) => this.preview_error = Some(message),
+                        Err(error) => this.preview_error = Some(format!("{error:#}")),
+                    }
+                    cx.notify();
+                }));
+            }
+        }).detach();
         cx.notify();
     }
     fn folder_name(&self, id: Option<u64>) -> String {
-        if self.library_error.is_some() {
-            return "归属暂不可用".into();
+        match id.filter(|id| *id != 0) {
+            None => "未分类".into(),
+            Some(id) => self
+                .library
+                .folders
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| "已删除的文件夹".into()),
         }
-        id.and_then(|id| self.library.folders.get(&id))
-            .cloned()
-            .unwrap_or_else(|| "未分类".into())
     }
+
+    fn current_folder_origin(&self) -> FolderOrigin {
+        if self.page == Page::New {
+            if let Some(workspace) = &self.workspace {
+                if let Some(draft) = workspace.state.draft() {
+                    if let Some(library) = workspace.state.library(&draft.library_id) {
+                        return FolderOrigin {
+                            root: library.root.clone(),
+                            draft_id: Some(draft.id.clone()),
+                        };
+                    }
+                }
+            }
+        }
+        FolderOrigin {
+            root: self.library_root.clone(),
+            draft_id: None,
+        }
+    }
+
     pub fn begin_folder(&mut self, id: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.page, Page::Library | Page::New) {
-            self.folder_filter = None;
             self.navigate(Page::Library, cx);
         }
+        let origin = self.current_folder_origin();
+        let library = match organize::Library::load(&origin.root) {
+            Ok(library) => library,
+            Err(error) => {
+                self.folder_error = Some(format!("无法读取这个保存位置的文件夹：{error:#}"));
+                cx.notify();
+                return;
+            }
+        };
         let name = id
-            .and_then(|id| self.library.folders.get(&id))
+            .and_then(|id| library.folders.get(&id))
             .cloned()
             .unwrap_or_default();
+        self.folder_origin = Some(origin);
         self.folder_editor = Some(id);
         self.folder_error = None;
         self.delete_folder = None;
         self.inputs[&Field::FolderName].update(cx, |state, cx| {
             state.set_value(name, window, cx);
-            state.focus(window, cx);
+        });
+        let desktop = cx.entity();
+        let title = if id.is_some() {
+            "重命名文件夹"
+        } else {
+            "新建文件夹"
+        };
+        let content = cx.new(|cx| FolderDialog {
+            _observation: cx.observe(&desktop, |_, _, cx| cx.notify()),
+            desktop,
+            title,
+        });
+        let weak = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let weak = weak.clone();
+            dialog
+                .title(title)
+                .w(px(420.))
+                .overlay_closable(false)
+                .close_button(false)
+                .child(content.clone())
+                .on_close(move |_, _, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.folder_editor = None;
+                        this.folder_origin = None;
+                        this.folder_error = None;
+                        cx.notify();
+                    });
+                })
+        });
+        let input = self.inputs[&Field::FolderName].clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
         });
         cx.notify();
     }
+
     pub fn save_folder(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.folder_editor else {
             return;
         };
+        let origin = self
+            .folder_origin
+            .clone()
+            .unwrap_or_else(|| self.current_folder_origin());
         let name = self.value(Field::FolderName, cx);
         let mut saved = None;
-        match organize::Library::edit(&self.library_root, |library| {
+        match organize::Library::edit(&origin.root, |library| {
             saved = Some(library.rename(id, &name)?);
             Ok(())
         }) {
             Ok(library) => {
-                self.library = library;
-                self.folder_editor = None;
-                self.folder_error = None;
-                if self.page == Page::New {
-                    self.target_folder = saved;
+                if self.library_root == origin.root {
+                    self.library = library.clone();
+                }
+                self.library_indexes.insert(origin.root.clone(), library);
+                if let Some(draft_id) = &origin.draft_id {
+                    if let Some(workspace) = &mut self.workspace {
+                        if let Err(error) = workspace.transaction(|state| {
+                            if let Some(draft) =
+                                state.drafts.iter_mut().find(|draft| &draft.id == draft_id)
+                            {
+                                draft.folder = saved;
+                            }
+                            Ok(())
+                        }) {
+                            self.folder_error =
+                                Some(format!("文件夹已创建，草稿归属尚未保存：{error:#}"));
+                            self.folder_editor = Some(saved);
+                            cx.notify();
+                            return;
+                        }
+                        if workspace.state.current_draft == *draft_id {
+                            self.target_folder = saved;
+                        }
+                    }
                 } else {
+                    self.library_root = origin.root;
                     self.folder_filter = saved;
                     self.page = Page::Library;
                 }
+                self.folder_editor = None;
+                self.folder_origin = None;
+                self.folder_error = None;
+                if let Some(handle) = cx.windows().first().copied() {
+                    cx.defer(move |cx| {
+                        let _ = cx.update_window(handle, |_, window, cx| window.close_dialog(cx));
+                    });
+                }
             }
-            Err(e) => self.folder_error = Some(format!("{e:#}")),
+            Err(error) => self.folder_error = Some(format!("{error:#}")),
         }
         cx.notify();
     }
+
     pub fn folder_editor_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = v_flex().gap_3();
         if let Some(id) = self.folder_editor {
@@ -152,22 +357,22 @@ impl Desktop {
                 .bg(rgb(SURFACE))
                 .border_1()
                 .border_color(rgb(LINE))
-                .child(if id.is_some() {
-                    "重命名文件夹"
-                } else {
-                    "新建文件夹"
-                })
+                .child(accessible_text("folder-name-label", "文件夹名称"))
                 .child(
                     Input::new(&self.inputs[&Field::FolderName])
                         .aria_label("文件夹名称")
-                        .min_h(px(36.))
-                        .max_h(px(36.))
+                        .min_h(rems(2.6))
+                        .h_auto()
                         .when(self.folder_error.is_some(), |v| {
                             v.border_color(rgb(0xa32626))
                         }),
                 )
                 .when_some(self.folder_error.clone(), |v, error| {
-                    v.child(div().text_sm().text_color(rgb(0xa32626)).child(error))
+                    v.child(
+                        accessible_text("folder-editor-error", error)
+                            .text_sm()
+                            .text_color(rgb(0xa32626)),
+                    )
                 })
                 .child(
                     h_flex()
@@ -175,20 +380,22 @@ impl Desktop {
                         .justify_end()
                         .child(
                             control("cancel-folder")
-                                .h(px(36.))
-                                .min_h(px(36.))
+                                .h_auto()
+                                .min_h(rems(2.6))
                                 .ghost()
                                 .label("取消")
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     this.folder_editor = None;
+                                    this.folder_origin = None;
                                     this.folder_error = None;
+                                    window.close_dialog(cx);
                                     cx.notify();
                                 })),
                         )
                         .child(
                             control("save-folder")
-                                .h(px(36.))
-                                .min_h(px(36.))
+                                .h_auto()
+                                .min_h(rems(2.6))
                                 .primary()
                                 .label(if id.is_some() {
                                     "保存名称"
@@ -200,460 +407,398 @@ impl Desktop {
                 );
         }
         if let Some(id) = self.delete_folder {
-            view = view
-                .p_4()
-                .rounded_lg()
-                .bg(rgb(SURFACE))
-                .border_1()
-                .border_color(rgb(LINE))
-                .child(format!("删除「{}」文件夹？", self.folder_name(Some(id))))
-                .child(
-                    div()
-                        .text_color(rgb(MUTED))
-                        .child("其中的课程会回到未分类，笔记和原视频都会保留。"),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(
-                            control("keep-folder")
-                                .label("保留文件夹")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_folder = None;
-                                    cx.notify();
-                                })),
+            let origin = self
+                .folder_origin
+                .clone()
+                .unwrap_or_else(|| self.current_folder_origin());
+            let name = self
+                .library_indexes
+                .get(&origin.root)
+                .and_then(|library| library.folders.get(&id))
+                .cloned()
+                .unwrap_or_else(|| self.folder_name(Some(id)));
+            view =
+                view.p_4()
+                    .rounded_lg()
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .child(accessible_text(
+                        "folder-delete-title",
+                        format!("删除「{name}」文件夹？"),
+                    ))
+                    .child(
+                        accessible_text(
+                            "folder-delete-description",
+                            "其中的课程会回到未分类，笔记和原视频都会保留。",
                         )
-                        .child(
-                            control("delete-folder")
-                                .label("删除文件夹，保留课程")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    match organize::Library::edit(&this.library_root, |library| {
-                                        library.remove(id);
-                                        Ok(())
-                                    }) {
-                                        Ok(library) => {
-                                            this.library = library;
-                                            this.delete_folder = None;
-                                            if this.folder_filter == Some(id) {
-                                                this.folder_filter = Some(0);
-                                            }
-                                            if this.target_folder == Some(id) {
-                                                this.target_folder = None;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            this.message = Some(format!("无法删除文件夹：{e:#}"))
-                                        }
-                                    }
+                        .text_color(rgb(MUTED)),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .justify_end()
+                            .child(control("keep-folder").label("保留文件夹").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.delete_folder = None;
+                                    this.folder_origin = None;
                                     cx.notify();
-                                })),
-                        ),
-                );
+                                }),
+                            ))
+                            .child(
+                                control("delete-folder")
+                                    .label("删除文件夹，保留课程")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        match organize::Library::edit(&origin.root, |library| {
+                                            library.remove(id);
+                                            Ok(())
+                                        }) {
+                                            Ok(library) => {
+                                                if this.library_root == origin.root {
+                                                    this.library = library.clone();
+                                                }
+                                                this.library_indexes
+                                                    .insert(origin.root.clone(), library);
+                                                this.delete_folder = None;
+                                                this.folder_origin = None;
+                                                if this.library_root == origin.root
+                                                    && this.folder_filter == Some(id)
+                                                {
+                                                    this.folder_filter = Some(0);
+                                                }
+                                                // Drafts keep the deleted folder reference so the
+                                                // next submission asks for a deliberate new destination.
+                                            }
+                                            Err(e) => {
+                                                this.message =
+                                                    Some(format!("无法删除文件夹：{e:#}"))
+                                            }
+                                        }
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
         }
         view
     }
-    pub fn folder_sidebar(&self, cx: &mut Context<Self>) -> Div {
-        if self.library_error.is_some() {
-            return v_flex().px_2().child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child("文件夹暂不可用"),
-            );
-        }
-        let mut entries = vec![(Some(0), "未分类".to_owned())];
-        entries.extend(
-            self.library
-                .folders
-                .iter()
-                .map(|(id, name)| (Some(*id), name.clone())),
+
+    pub fn begin_delete_folder(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let origin = self.current_folder_origin();
+        let name = self
+            .library_indexes
+            .get(&origin.root)
+            .and_then(|library| library.folders.get(&id))
+            .cloned()
+            .unwrap_or_else(|| self.folder_name(Some(id)));
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("删除「{name}」文件夹？"),
+            Some("其中的笔记会回到未分类，笔记正文和原视频都会保留。"),
+            &["删除文件夹", "保留文件夹"],
+            cx,
         );
-        let mut counts = BTreeMap::<u64, usize>::new();
-        for course in &self.courses {
-            *counts
-                .entry(
-                    self.library
-                        .folder(&self.library_root, &course.dir)
-                        .unwrap_or(0),
-                )
-                .or_default() += 1;
-        }
-        v_flex()
-            .gap_1()
-            .child(
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            let _ = this.update_in(cx, |this, _, cx| {
+                match organize::Library::edit(&origin.root, |library| {
+                    library.remove(id);
+                    Ok(())
+                }) {
+                    Ok(library) => {
+                        if this.library_root == origin.root {
+                            this.library = library.clone();
+                            if this.folder_filter == Some(id) {
+                                this.folder_filter = Some(0);
+                            }
+                        }
+                        this.library_indexes.insert(origin.root, library);
+                    }
+                    Err(error) => this.message = Some(format!("无法删除文件夹：{error:#}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    pub fn folder_sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let libraries = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.state.libraries.clone())
+            .unwrap_or_default();
+        let mut view = v_flex().gap_4();
+        for (library_index, location) in libraries.into_iter().enumerate() {
+            let Some(organization) = self.library_indexes.get(&location.root) else {
+                let root = location.root.clone();
+                view = view.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            control(("unavailable-library-nav", library_index))
+                                .ghost()
+                                .disabled(self.loading)
+                                .label(location.name.clone())
+                                .accessibility_label(format!(
+                                    "查看{}的保存位置与恢复状态",
+                                    location.name
+                                ))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.page == Page::New && !this.save_current_draft(cx) {
+                                        return;
+                                    }
+                                    this.library_root = root.clone();
+                                    this.library_error =
+                                        Some("此课程库的位置或分类记录暂时无法读取".into());
+                                    this.folder_filter = None;
+                                    this.navigate(Page::Library, cx);
+                                })),
+                        )
+                        .child(
+                            accessible_text(
+                                ("unavailable-library-state", library_index),
+                                if self.loading {
+                                    "正在读取"
+                                } else {
+                                    "暂时无法读取"
+                                },
+                            )
+                            .text_sm()
+                            .text_color(rgb(MUTED)),
+                        ),
+                );
+                continue;
+            };
+            let root = location.root.clone();
+            let mut entries = vec![(Some(0), "未分类".to_owned())];
+            entries.extend(
+                organization
+                    .folders
+                    .iter()
+                    .map(|(id, name)| (Some(*id), name.clone())),
+            );
+            let mut counts = BTreeMap::<u64, usize>::new();
+            for course in &self.courses {
+                if self
+                    .course_location(course)
+                    .is_some_and(|library| library.root == root)
+                {
+                    *counts
+                        .entry(
+                            organization
+                                .folder(&root, &course.storage_dir())
+                                .unwrap_or(0),
+                        )
+                        .or_default() += 1;
+                }
+            }
+            let add_root = root.clone();
+            let mut group = v_flex().gap_1().child(
                 h_flex()
                     .justify_between()
                     .px_2()
-                    .child(div().text_xs().text_color(rgb(MUTED)).child("文件夹"))
                     .child(
-                        control("new-folder")
+                        accessible_text(("sidebar-library-title", library_index), location.name)
+                            .text_xs()
+                            .text_color(rgb(MUTED)),
+                    )
+                    .child(
+                        control(("new-folder", library_index))
                             .ghost()
                             .icon(IconName::Plus)
-                            .accessibility_label("新建文件夹")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.begin_folder(None, window, cx)
+                            .accessibility_label("在此保存位置新建文件夹")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.page == Page::New && !this.save_current_draft(cx) {
+                                    return;
+                                }
+                                this.library_root = add_root.clone();
+                                if let Some(organization) = this.library_indexes.get(&add_root) {
+                                    this.library = organization.clone();
+                                }
+                                this.page = Page::Library;
+                                this.begin_folder(None, window, cx);
                             })),
                     ),
-            )
-            .children(entries.into_iter().map(|(id, name)| {
+            );
+            for (entry_index, (id, name)) in entries.into_iter().enumerate() {
+                let root = root.clone();
+                let selected = self.page == Page::Library
+                    && self.library_root == root
+                    && self.folder_filter == id;
                 let count = counts.get(&id.unwrap_or(0)).copied().unwrap_or(0);
-                navigation(
-                    control(("folder-nav", id.unwrap_or(0) as usize)),
-                    self.page == Page::Library && self.folder_filter == id,
-                )
-                .w_full()
-                .h(px(36.))
-                .accessibility_label(name.clone())
-                .selected(self.page == Page::Library && self.folder_filter == id)
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(Icon::new(IconName::Folder).size(px(20.)))
-                        .child(div().flex_1().min_w_0().text_ellipsis().child(name))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(
-                                    if self.page == Page::Library && self.folder_filter == id {
-                                        SURFACE
-                                    } else {
-                                        MUTED
-                                    },
-                                ))
-                                .child(count.to_string()),
-                        ),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.folder_filter = id;
-                    this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
-                    this.navigate(Page::Library, cx);
-                }))
-            }))
+                group = group.child(
+                    navigation(
+                        control(("folder-nav", library_index * 100_000 + entry_index)),
+                        selected,
+                    )
+                    .w_full()
+                    .h_auto()
+                    .py_2()
+                    .accessibility_label(format!("{name}，{count} 份笔记"))
+                    .tooltip(name.clone())
+                    .selected(selected)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(Icon::new(IconName::Folder).size(px(18.)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .line_clamp(2)
+                                    .child(name),
+                            )
+                            .child(div().flex_shrink_0().text_xs().child(count.to_string())),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.page == Page::New {
+                            this.save_current_draft(cx);
+                        }
+                        this.library_root = root.clone();
+                        if let Some(organization) = this.library_indexes.get(&root) {
+                            this.library = organization.clone();
+                        }
+                        this.folder_filter = id;
+                        this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
+                        this.navigate(Page::Library, cx);
+                    })),
+                );
+            }
+            view = view.child(group);
+        }
+        view
     }
+
     pub fn folder_picker(
         &self,
         course: Option<PathBuf>,
         index: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let folder = course
+        let storage = course.as_ref().map(|path| {
+            self.courses
+                .iter()
+                .find(|course| &course.dir == path || &course.storage_dir() == path)
+                .map(Course::storage_dir)
+                .unwrap_or_else(|| path.clone())
+        });
+        let origin = if let Some(path) = &storage {
+            let root = self
+                .workspace
+                .as_ref()
+                .and_then(|workspace| {
+                    workspace
+                        .state
+                        .libraries
+                        .iter()
+                        .filter(|library| organize::relative_key(&library.root, path).is_ok())
+                        .max_by_key(|library| library.root.components().count())
+                })
+                .map(|library| library.root.clone())
+                .unwrap_or_else(|| self.library_root.clone());
+            FolderOrigin {
+                root,
+                draft_id: None,
+            }
+        } else {
+            self.current_folder_origin()
+        };
+        let loaded = organize::Library::load(&origin.root);
+        let load_error = loaded
             .as_ref()
-            .and_then(|path| self.library.folder(&self.library_root, path))
+            .err()
+            .map(|error| format!("无法读取文件夹：{error:#}"));
+        let organization = loaded.unwrap_or_default();
+        let folder = storage
+            .as_ref()
+            .and_then(|path| organization.folder(&origin.root, path))
             .or_else(|| {
-                if course.is_none() {
+                if storage.is_none() {
                     self.target_folder
                 } else {
                     None
                 }
             });
-        let label = self.folder_name(folder);
-        let folders = self.library.folders.clone();
+        let label = if load_error.is_some() {
+            "文件夹暂不可用".to_owned()
+        } else if let Some(id) = folder {
+            organization
+                .folders
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| "文件夹已删除，请重新选择".into())
+        } else {
+            "未分类".into()
+        };
+        let folders = organization.folders;
         let entity = cx.entity().downgrade();
-        control(("folder-picker", index))
+        let picker = control(("folder-picker", index))
             .w_full()
             .min_w_0()
             .when(course.is_some(), |button| button.ghost())
-            .h(px(36.))
-            .min_h(px(36.))
-            .disabled(self.library_error.is_some())
+            .h_auto()
+            .min_h(rems(2.6))
+            .py_2()
+            .disabled(load_error.is_some())
             .icon(IconName::Folder)
-            .accessibility_label(format!("移动到文件夹：{label}"))
-            .child(div().flex_1().min_w_0().text_ellipsis().child(label))
-            .child(Icon::new(IconName::ChevronDown).size_4())
+            .accessibility_label(format!("保存到文件夹：{label}"))
+            .tooltip(label.clone())
+            .child(div().flex_1().min_w_0().whitespace_normal().child(label))
+            .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
             .dropdown_menu(move |menu, _, _| {
                 let mut entries = vec![(None, "未分类".to_owned())];
                 entries.extend(folders.iter().map(|(id, name)| (Some(*id), name.clone())));
                 entries.into_iter().fold(menu, |menu, (id, name)| {
                     let entity = entity.clone();
-                    let course = course.clone();
+                    let storage = storage.clone();
+                    let origin = origin.clone();
                     menu.item(PopupMenuItem::new(name).checked(id == folder).on_click(
                         move |_, _, cx| {
                             let _ = entity.update(cx, |this, cx| {
-                                if let Some(path) = &course {
-                                    match organize::Library::edit(&this.library_root, |library| {
-                                        library.assign(&this.library_root, path, id)
+                                if let Some(path) = &storage {
+                                    match organize::Library::edit(&origin.root, |library| {
+                                        library.assign(&origin.root, path, id)
                                     }) {
                                         Ok(library) => {
-                                            this.library = library;
+                                            if this.library_root == origin.root {
+                                                this.library = library.clone();
+                                            }
+                                            this.library_indexes
+                                                .insert(origin.root.clone(), library);
                                         }
-                                        Err(e) => {
-                                            this.message = Some(format!("无法移动课程：{e:#}"))
+                                        Err(error) => {
+                                            this.message = Some(format!("无法移动笔记：{error:#}"))
                                         }
                                     }
-                                } else {
+                                } else if this
+                                    .workspace
+                                    .as_ref()
+                                    .and_then(|workspace| workspace.state.draft())
+                                    .is_some_and(|draft| {
+                                        Some(&draft.id) == origin.draft_id.as_ref()
+                                    })
+                                {
                                     this.target_folder = id;
+                                    this.save_current_draft(cx);
                                 }
                                 cx.notify();
                             });
                         },
                     ))
                 })
+            });
+        v_flex()
+            .gap_1()
+            .child(picker)
+            .when_some(load_error, |view, error| {
+                view.child(
+                    accessible_text(("folder-picker-error", index), error)
+                        .text_sm()
+                        .text_color(rgb(0xa32626)),
+                )
             })
-    }
-    pub fn source_card(&self, cx: &mut Context<Self>) -> Div {
-        let mut view = v_flex().gap_4().child(
-            h_flex()
-                .gap_2()
-                .children([(true, "在线链接"), (false, "本地视频")].into_iter().map(
-                    |(online, label)| {
-                        choice(control(label).label(label), self.online == online).on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                if this.online != online {
-                                    this.online = online;
-                                    this.invalidate_source();
-                                    this.inputs[&Field::Source]
-                                        .update(cx, |state, cx| state.set_value("", window, cx));
-                                }
-                                cx.notify();
-                            }),
-                        )
-                    },
-                )),
-        );
-        if self.online {
-            view = view.child(
-                v_flex()
-                    .gap_2()
-                    .child(div().font_weight(FontWeight::MEDIUM).child("视频链接"))
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(
-                                div().flex_1().min_w_0().child(
-                                    Input::new(&self.inputs[&Field::Source])
-                                        .aria_label("视频链接")
-                                        .min_h(px(36.))
-                                        .max_h(px(36.))
-                                        .when(self.source_validation.is_some(), |v| {
-                                            v.border_color(rgb(0xa32626))
-                                        }),
-                                ),
-                            )
-                            .child(
-                                control("preview-source")
-                                    .w(px(112.))
-                                    .primary()
-                                    .when(self.source_preview.is_some(), |button| {
-                                        button.with_variant(ButtonVariant::Default)
-                                    })
-                                    .h(px(36.))
-                                    .label(if self.preview_cancel.is_some() {
-                                        "正在读取…"
-                                    } else if self.source_preview.is_some() {
-                                        "重新读取"
-                                    } else if self.preview_error.is_some() {
-                                        "重试预览"
-                                    } else {
-                                        "预览课程"
-                                    })
-                                    .disabled(self.preview_cancel.is_some())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        if this.value(Field::Source, cx).is_empty() {
-                                            this.inputs[&Field::Source]
-                                                .update(cx, |input, cx| input.focus(window, cx));
-                                        }
-                                        this.inspect_source(cx);
-                                    })),
-                            ),
-                    ),
-            );
-        } else if self.source_preview.is_none() {
-            view = view.child(
-                v_flex()
-                    .gap_3()
-                    .p_6()
-                    .bg(rgb(SURFACE))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .items_center()
-                    .child(Icon::new(IconName::FolderOpen).size_6())
-                    .child("导入本地视频")
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child("同名 SRT / VTT 字幕会自动读取"),
-                    )
-                    .child(
-                        control("choose-video")
-                            .primary()
-                            .label("选择视频")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.pick(false, window, cx)),
-                            ),
-                    )
-                    .when(!self.value(Field::Source, cx).is_empty(), |view| {
-                        view.child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(MUTED))
-                                .text_ellipsis()
-                                .child(self.value(Field::Source, cx)),
-                        )
-                    }),
-            );
-        }
-        if self.online && course2md::auth::is_bilibili_url(&self.value(Field::Source, cx)) {
-            view = view.child(self.source_account_row(cx));
-        }
-        if let Some(error) = &self.source_validation {
-            view = view.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0xa32626))
-                    .child(error.clone()),
-            );
-        }
-        if self.preview_cancel.is_some() {
-            view = view.child(
-                h_flex()
-                    .gap_3()
-                    .child(div().flex_1().child("正在读取标题、作者和封面…"))
-                    .child(
-                        control("cancel-preview")
-                            .ghost()
-                            .label("取消预览")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.invalidate_source();
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
-        if let Some(error) = &self.preview_error {
-            view = view.child(
-                v_flex()
-                    .gap_2()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(rgb(0xffefeb))
-                    .child(if self.online {
-                        "未能读取课程，请检查链接和网络后重试。"
-                    } else {
-                        "未能读取视频，请确认文件仍可访问，或更换视频。"
-                    })
-                    .child(
-                        control("preview-error-details")
-                            .ghost()
-                            .self_start()
-                            .label("详细原因")
-                            .icon(if self.show_preview_details {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_preview_details = !this.show_preview_details;
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.show_preview_details, |view| {
-                        view.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .text_sm()
-                                .whitespace_normal()
-                                .child(gpui_base::SelectableText::new(
-                                    "preview-error-text",
-                                    error.clone(),
-                                )),
-                        )
-                    })
-                    .when(!self.online, |view| {
-                        view.child(
-                            control("retry-preview")
-                                .label("重新预览")
-                                .on_click(cx.listener(|this, _, _, cx| this.inspect_source(cx))),
-                        )
-                    }),
-            );
-        }
-        if let Some(source) = &self.source_preview {
-            view = view
-                .child(reveal(
-                    h_flex()
-                        .gap_4()
-                        .p_4()
-                        .rounded_md()
-                        .bg(rgb(SURFACE))
-                        .border_1()
-                        .border_color(rgb(LINE))
-                        .child(
-                            div()
-                                .w(px(192.))
-                                .h(px(108.))
-                                .border_1()
-                                .border_color(rgba(0x0000001a))
-                                .flex_shrink_0()
-                                .rounded_lg()
-                                .overflow_hidden()
-                                .bg(rgb(SIDEBAR))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when_some(source.cover.clone(), |view, path| {
-                                    view.child(img(path).size_full().object_fit(ObjectFit::Cover))
-                                })
-                                .when(source.cover.is_none(), |view| view.child("暂无封面")),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(source.title.clone()),
-                                )
-                                .child(div().text_color(rgb(MUTED)).child(source.detail()))
-                                .when(!self.online, |view| {
-                                    view.child(
-                                        control("choose-video")
-                                            .self_start()
-                                            .h(px(36.))
-                                            .min_h(px(36.))
-                                            .ghost()
-                                            .label("更换视频")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.pick(false, window, cx)
-                                            })),
-                                    )
-                                })
-                                .when_some(source.cover_error.clone(), |view, error| {
-                                    view.child(div().text_xs().text_color(rgb(MUTED)).child(error))
-                                }),
-                        ),
-                    ("source-reveal", self.preview_generation as usize),
-                    cx,
-                ))
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .child("归入文件夹")
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(self.folder_picker(None, 0, cx)),
-                        )
-                        .child(
-                            control("add-destination")
-                                .disabled(self.library_error.is_some())
-                                .ghost()
-                                .icon(IconName::Plus)
-                                .label("新建")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.begin_folder(None, window, cx)
-                                })),
-                        ),
-                );
-        }
-        view
     }
 }

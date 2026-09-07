@@ -16,6 +16,7 @@ pub(crate) struct AccountUi {
     has_saved_login: bool,
     status_error: Option<String>,
     retry_source: Option<(u64, String)>,
+    return_focus: Option<FocusHandle>,
 }
 #[derive(Clone)]
 enum QrDialogState {
@@ -42,9 +43,9 @@ struct AccountDialog {
     _observation: Subscription,
 }
 impl Render for AccountDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.desktop
-            .update(cx, |desktop, cx| desktop.account_dialog_content(cx))
+            .update(cx, |desktop, cx| desktop.account_dialog_content(window, cx))
     }
 }
 
@@ -76,144 +77,131 @@ impl Desktop {
         cx.notify();
     }
 
-    pub fn account_settings_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let status = if self.account.checking {
-            "正在验证登录状态…".to_owned()
-        } else if self.account.status_error.is_some() {
-            "暂时无法验证".to_owned()
-        } else {
-            match &self.account.status {
-                Some(AccountStatus::Connected(profile)) => format!("已连接 · {}", profile.name),
-                Some(AccountStatus::Expired) => "登录已失效".into(),
-                Some(AccountStatus::Disconnected) => "未连接".into(),
-                None => "尚未检查登录状态".into(),
-            }
-        };
-        let connected = matches!(self.account.status, Some(AccountStatus::Connected(_)));
+    pub fn account_settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let status = self.account_status_text();
         let saved = self.account.has_saved_login;
+        let expired = matches!(self.account.status, Some(AccountStatus::Expired));
+        let show_login = !saved || expired;
         v_flex()
             .w_full()
-            .max_w(px(760.))
-            .gap_4()
+            .gap_3()
             .child(
-                v_flex()
-                    .w_full()
-                    .gap_4()
-                    .p_4()
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .rounded_lg()
+                div()
+                    .id("bilibili-account-status")
+                    .role(Role::Label)
+                    .aria_label(status.clone())
+                    .child(status),
+            )
+            .child(accessible_text("bilibili-account-policy", if saved {
+                "获取字幕和视频将使用此账号的访问权限。退出登录后停止后续使用，课程和笔记保留。"
+            } else {
+                "公开课程可以直接读取；遇到账号权限限制时，再登录继续。"
+            }).text_sm().text_color(rgb(MUTED)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        div().font_weight(FontWeight::SEMIBOLD).child("Bilibili"),
-                                    )
-                                    .child(div().text_color(rgb(MUTED)).child(status)),
-                            )
-                            .child(
-                                control("account-refresh")
-                                    .ghost()
-                                    .icon(icons::refresh())
-                                    .tooltip("检查账号状态")
-                                    .accessibility_label("检查账号状态")
-                                    .disabled(self.account.checking)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.refresh_account(cx)),
-                                    ),
-                            ),
+                        control("account-refresh")
+                            .ghost()
+                            .label("重新检查")
+                            .disabled(self.account.checking)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_account(cx))),
                     )
-                    .when_some(self.account.status_error.clone(), |view, error| {
-                        view.child(div().text_sm().text_color(rgb(MUTED)).child(error))
+                    .when(show_login, |view| {
+                        view.child(
+                            control("account-login")
+                                .label(if expired {
+                                    "重新登录 Bilibili"
+                                } else {
+                                    "登录 Bilibili"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_account_dialog(window, cx)
+                                })),
+                        )
                     })
-                    .child(div().text_sm().text_color(rgb(MUTED)).child(if saved {
-                        "获取字幕和视频将使用此账号的访问权限。清除登录不会删除课程或笔记。"
-                    } else {
-                        "公开课程可直接添加；需要账号权限时，再登录继续。"
-                    }))
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .flex_wrap()
-                            .child(
-                                control("account-login")
-                                    .primary()
-                                    .label(if connected {
-                                        "重新登录"
-                                    } else {
-                                        "登录 Bilibili"
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_account_dialog(window, cx)
-                                    })),
-                            )
-                            .when(saved, |view| {
-                                view.child(
-                                    control("account-logout")
-                                        .ghost()
-                                        .label("清除本地登录")
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.clear_account(cx)),
-                                        ),
-                                )
-                            }),
-                    ),
+                    .when(saved, |view| {
+                        view.child(
+                            control("account-logout")
+                                .ghost()
+                                .label("退出登录")
+                                .on_click(cx.listener(|this, _, _, cx| this.clear_account(cx))),
+                        )
+                    }),
             )
             .into_any_element()
     }
 
-    /// Compact account status for the Bilibili source row; it never triggers work from render.
-    pub fn source_account_row(&self, cx: &mut Context<Self>) -> Div {
-        let (status, label) = if self.account.checking {
-            ("正在验证账号".to_owned(), "登录 Bilibili")
-        } else if self.account.status_error.is_some() {
-            ("账号暂时无法验证".to_owned(), "重新登录")
-        } else {
-            match &self.account.status {
-                Some(AccountStatus::Connected(profile)) => {
-                    (format!("已连接 · {}", profile.name), "重新登录")
-                }
-                Some(AccountStatus::Expired) => ("登录已失效".into(), "重新登录"),
-                Some(AccountStatus::Disconnected) => ("未连接 Bilibili".into(), "登录 Bilibili"),
-                None => ("Bilibili 账号尚未检查".into(), "登录 Bilibili"),
+    fn account_status_text(&self) -> String {
+        if self.account.checking {
+            return "Bilibili：正在验证登录状态…".into();
+        }
+        if self.account.status_error.as_deref() == Some("退出登录尚未完成，原登录状态已保留。")
+        {
+            return "Bilibili：退出登录尚未完成，原登录状态已保留".into();
+        }
+        if self.account.status_error.is_some() {
+            return if self.account.has_saved_login {
+                "Bilibili：暂时无法验证，已保留登录".into()
+            } else {
+                "Bilibili：暂时无法检查登录状态".into()
+            };
+        }
+        match &self.account.status {
+            Some(AccountStatus::Connected(profile)) if !profile.name.trim().is_empty() => {
+                format!("Bilibili：已登录 · {}", profile.name)
             }
-        };
+            Some(AccountStatus::Connected(_)) => "Bilibili：已登录".into(),
+            Some(AccountStatus::Expired) => "Bilibili：登录已失效".into(),
+            Some(AccountStatus::Disconnected) => "Bilibili：未登录".into(),
+            None if self.account.has_saved_login => "Bilibili：已保留登录，尚未验证".into(),
+            None => "Bilibili：未登录".into(),
+        }
+    }
+
+    /// Only rendered inside source details or a permission repair, never a permanent status row.
+    pub fn source_account_row(&self, cx: &mut Context<Self>) -> Div {
+        let status = self.account_status_text();
+        let temporary = self.account.status_error.is_some() || self.account.checking;
+        let connected = matches!(self.account.status, Some(AccountStatus::Connected(_)));
+        let expired = matches!(self.account.status, Some(AccountStatus::Expired));
         h_flex()
             .w_full()
             .items_center()
             .gap_3()
             .child(
                 div()
+                    .id("source-bilibili-account-status")
+                    .role(Role::Label)
+                    .aria_label(status.clone())
+                    .child(status)
                     .flex_1()
                     .min_w_0()
                     .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child(status),
+                    .text_color(rgb(MUTED)),
             )
             .child(
                 control("source-account-refresh")
                     .ghost()
-                    .icon(icons::refresh())
-                    .tooltip("检查账号状态")
-                    .accessibility_label("检查账号状态")
+                    .label("重新检查")
                     .disabled(self.account.checking)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_account(cx))),
             )
-            .child(
-                control("source-account-login")
-                    .ghost()
-                    .label(label)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.open_account_dialog(window, cx)),
-                    ),
-            )
+            .when(!temporary && !connected, |view| {
+                view.child(
+                    control("source-account-login")
+                        .ghost()
+                        .label(if expired {
+                            "重新登录 Bilibili"
+                        } else {
+                            "登录 Bilibili"
+                        })
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_account_dialog(window, cx)),
+                        ),
+                )
+            })
     }
 
     fn can_retry_account_source(&self, cx: &App) -> bool {
@@ -240,8 +228,7 @@ impl Desktop {
                 self.account.status_error = None;
             }
             Err(_) => {
-                self.account.status_error =
-                    Some("清除本地登录失败，请检查文件访问权限后重试。".into())
+                self.account.status_error = Some("退出登录尚未完成，原登录状态已保留。".into())
             }
         }
         cx.notify();
@@ -266,6 +253,7 @@ impl Desktop {
         } else {
             None
         };
+        self.account.return_focus = window.focused(cx);
         self.start_account_qr(cx);
         let desktop = cx.entity();
         let content = cx.new(|cx| AccountDialog {
@@ -281,8 +269,13 @@ impl Desktop {
                 .w(px(420.))
                 .overlay_closable(false)
                 .child(content.clone())
-                .on_close(move |_, _, cx| {
-                    let _ = closed.update(cx, |this, cx| this.close_account_dialog(cx));
+                .on_close(move |_, window, cx| {
+                    let _ = closed.update(cx, |this, cx| {
+                        this.close_account_dialog(cx);
+                        if let Some(focus) = this.account.return_focus.take() {
+                            focus.focus(window, cx);
+                        }
+                    });
                 })
                 .on_cancel(move |_, _, cx| {
                     let _ = weak.update(cx, |this, cx| this.close_account_dialog(cx));
@@ -365,14 +358,14 @@ impl Desktop {
         cx.notify();
     }
 
-    fn account_dialog_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn account_dialog_content(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let state = self
             .account
             .dialog
             .clone()
             .unwrap_or(QrDialogState::Generating);
         let (message, hint): (String, String) = match &state {
-            QrDialogState::Generating => ("正在获取二维码".into(), "请稍候…".into()),
+            QrDialogState::Generating => ("正在获取二维码".into(), String::new()),
             QrDialogState::Waiting(seconds) => (
                 "请使用哔哩哔哩 App 扫码".into(),
                 format!("二维码约 {seconds} 秒后过期"),
@@ -384,8 +377,12 @@ impl Desktop {
             QrDialogState::Expired => ("二维码已过期".into(), "请刷新二维码后重新扫码。".into()),
             QrDialogState::Error(error) => ("登录未完成".into(), error.clone()),
             QrDialogState::Success(profile) => (
-                "已连接 Bilibili".into(),
-                format!("{}，登录状态已保存。", profile.name),
+                "已登录 Bilibili".into(),
+                if profile.name.trim().is_empty() {
+                    "登录状态已保存。".into()
+                } else {
+                    format!("{}，登录状态已保存。", profile.name)
+                },
             ),
         };
         let retry = matches!(state, QrDialogState::Expired | QrDialogState::Error(_));
@@ -457,16 +454,28 @@ impl Desktop {
             );
         }
         v_flex()
+            .id("account-login-body")
+            .max_h((window.bounds().size.height - px(150.)).max(px(180.)))
+            .overflow_y_scroll()
             .gap_4()
             .items_center()
             .child(visual)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(message))
-            .child(div().text_sm().text_color(rgb(MUTED)).child(hint))
+            .child(
+                accessible_text("bilibili-login-step", message).font_weight(FontWeight::SEMIBOLD),
+            )
+            .when(!hint.is_empty(), |view| {
+                view.child(
+                    accessible_text("bilibili-login-detail", hint)
+                        .text_sm()
+                        .text_color(rgb(MUTED)),
+                )
+            })
             .child(
                 h_flex()
                     .w_full()
                     .justify_end()
                     .gap_3()
+                    .flex_wrap()
                     .when(retry, |view| {
                         view.child(
                             control("account-qr-retry")

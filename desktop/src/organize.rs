@@ -6,6 +6,160 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const FILE: &str = ".course2md-library.json";
+const TITLES: &str = ".course2md-titles.json";
+
+#[derive(Clone)]
+pub struct Recovery {
+    pub has_backup: bool,
+}
+
+/// A registered root and a discovered note may use different filesystem aliases
+/// (for example `/tmp` and `/private/tmp`). Folder and title records always keep
+/// one relative key, regardless of which spelling the importer returned.
+pub fn relative_key(root: &Path, course: &Path) -> Result<PathBuf> {
+    let valid = |key: &Path| {
+        !key.as_os_str().is_empty()
+            && key
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+    };
+    if let Ok(key) = course.strip_prefix(root) {
+        if valid(key) {
+            return Ok(key.to_path_buf());
+        }
+    }
+    let root = std::fs::canonicalize(root).context("课程库位置暂时无法访问")?;
+    let course = std::fs::canonicalize(course).context("笔记位置暂时无法访问")?;
+    let key = course.strip_prefix(root).context("笔记不在这个课程库中")?;
+    ensure!(valid(key), "笔记位置无效");
+    Ok(key.to_path_buf())
+}
+
+fn save_with_backup(path: &Path, bytes: &[u8]) -> Result<()> {
+    let previous = std::fs::read(path);
+    let backup = path.with_extension("json.bak");
+    match previous {
+        Ok(previous) => course2md::checkpoint::atomic_write(&backup, &previous)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            course2md::checkpoint::atomic_write(&backup, bytes)?
+        }
+        Err(error) => return Err(error).context("无法保留原记录"),
+    }
+    course2md::checkpoint::atomic_write(path, bytes)
+}
+
+/// Inspect only. A damaged classification file is never replaced during a read.
+pub fn recovery(root: &Path) -> Result<Option<Recovery>> {
+    metadata_recovery::<Library>(root, FILE)
+}
+
+fn metadata_recovery<T: serde::de::DeserializeOwned>(
+    root: &Path,
+    filename: &str,
+) -> Result<Option<Recovery>> {
+    let path = root.join(filename);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("无法读取分类记录，请检查保存位置的访问权限"),
+    };
+    if serde_json::from_slice::<T>(&bytes).is_ok() {
+        return Ok(None);
+    }
+    let has_backup = std::fs::read(path.with_extension("json.bak"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<T>(&bytes).ok())
+        .is_some();
+    Ok(Some(Recovery { has_backup }))
+}
+
+/// Preserve the damaged bytes before publishing a chosen recovery. Notes and title
+/// aliases live in separate files and are never rewritten by classification recovery.
+pub fn recover(root: &Path, rebuild: bool) -> Result<(Library, PathBuf)> {
+    recover_metadata::<Library>(root, FILE, rebuild)
+}
+
+fn recover_metadata<T: serde::de::DeserializeOwned + Serialize + Default>(
+    root: &Path,
+    filename: &str,
+    rebuild: bool,
+) -> Result<(T, PathBuf)> {
+    ensure!(root.is_dir(), "课程库位置暂时无法访问，请先重新连接");
+    let path = root.join(filename);
+    let _lock = course2md::runtime::lock_file(&path.with_extension("lock"))?;
+    let original = std::fs::read(&path).context("无法读取并保留原记录，尚未恢复")?;
+    ensure!(
+        serde_json::from_slice::<T>(&original).is_err(),
+        "记录已恢复，请刷新课程库"
+    );
+    let library = if rebuild {
+        T::default()
+    } else {
+        serde_json::from_slice::<T>(
+            &std::fs::read(path.with_extension("json.bak"))
+                .context("最近备份无法读取，原记录已保留")?,
+        )
+        .context("最近备份也无法读取，原记录已保留")?
+    };
+    let preserved = root.join(format!(
+        "{}-damaged-{}.json",
+        filename.trim_end_matches(".json"),
+        crate::workspace::new_id("record")
+    ));
+    course2md::checkpoint::atomic_write(&preserved, &original)?;
+    course2md::checkpoint::atomic_write(&path, &serde_json::to_vec_pretty(&library)?)?;
+    Ok((library, preserved))
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Titles {
+    #[serde(default)]
+    names: BTreeMap<PathBuf, String>,
+}
+
+pub fn title_aliases(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
+    match std::fs::read(root.join(TITLES)) {
+        Ok(bytes) => Ok(serde_json::from_slice::<Titles>(&bytes)
+            .context("笔记名称记录无法读取，原文件已保留")?
+            .names),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(error) => Err(error).context("笔记名称记录暂时无法读取"),
+    }
+}
+
+pub fn title_recovery(root: &Path) -> Result<Option<Recovery>> {
+    metadata_recovery::<Titles>(root, TITLES)
+}
+
+pub fn recover_titles(root: &Path, reset: bool) -> Result<PathBuf> {
+    recover_metadata::<Titles>(root, TITLES, reset).map(|(_, preserved)| preserved)
+}
+
+pub fn title_alias(root: &Path, course: &Path) -> Result<Option<String>> {
+    Ok(title_aliases(root)?
+        .get(&relative_key(root, course)?)
+        .cloned())
+}
+
+pub fn rename_course(root: &Path, course: &Path, name: &str) -> Result<()> {
+    let name = name.trim();
+    ensure!(!name.is_empty(), "请输入笔记名称");
+    ensure!(name.chars().count() <= 240, "笔记名称最多 240 个字符");
+    ensure!(
+        root.is_dir() && course.is_dir(),
+        "这份笔记的位置暂时无法访问"
+    );
+    let key = relative_key(root, course)?;
+    let _lock = course2md::runtime::lock_file(&root.join(".course2md-titles.lock"))?;
+    let mut names = title_aliases(root)?;
+    names.insert(key, name.to_owned());
+    save_with_backup(
+        &root.join(TITLES),
+        &serde_json::to_vec_pretty(&Titles { names })?,
+    )
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Library {
     pub folders: BTreeMap<u64, String>,
@@ -15,7 +169,8 @@ pub struct Library {
 }
 impl Library {
     pub fn load(root: &Path) -> Result<Self> {
-        match std::fs::read(root.join(".course2md-library.json")) {
+        ensure!(root.is_dir(), "课程库位置暂时无法访问，请先重新连接");
+        match std::fs::read(root.join(FILE)) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).context("文件夹信息损坏；原文件已保留，请修复后重试")
             }
@@ -24,14 +179,11 @@ impl Library {
         }
     }
     pub fn edit(root: &Path, change: impl FnOnce(&mut Self) -> Result<()>) -> Result<Self> {
-        std::fs::create_dir_all(root)?;
+        ensure!(root.is_dir(), "课程库位置暂时无法访问，请先重新连接");
         let _lock = course2md::runtime::lock_file(&root.join(".course2md-library.lock"))?;
         let mut library = Self::load(root)?;
         change(&mut library)?;
-        course2md::checkpoint::atomic_write(
-            &root.join(".course2md-library.json"),
-            &serde_json::to_vec_pretty(&library)?,
-        )?;
+        save_with_backup(&root.join(FILE), &serde_json::to_vec_pretty(&library)?)?;
         Ok(library)
     }
     pub fn rename(&mut self, id: Option<u64>, name: &str) -> Result<u64> {
@@ -72,15 +224,12 @@ impl Library {
     }
     pub fn folder(&self, root: &Path, course: &Path) -> Option<u64> {
         self.courses
-            .get(course.strip_prefix(root).ok()?)
+            .get(&relative_key(root, course).ok()?)
             .copied()
             .filter(|id| self.folders.contains_key(id))
     }
     pub fn assign(&mut self, root: &Path, course: &Path, folder: Option<u64>) -> Result<()> {
-        let key = course
-            .strip_prefix(root)
-            .context("课程不在当前课程库中")?
-            .to_path_buf();
+        let key = relative_key(root, course)?;
         if let Some(id) = folder {
             ensure!(
                 self.folders.contains_key(&id),
@@ -97,6 +246,136 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn canonical_imports_keep_the_registered_library_folders_and_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("library");
+        let course = root.join("old-lecture");
+        std::fs::create_dir_all(&course).unwrap();
+        let alias = temp.path().join("registered-library");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let imported = std::fs::canonicalize(&course).unwrap();
+        assert_eq!(
+            relative_key(&alias, &imported).unwrap(),
+            Path::new("old-lecture")
+        );
+        let library = Library::edit(&alias, |library| {
+            let folder = library.rename(None, "金融学")?;
+            library.assign(&alias, &imported, Some(folder))
+        })
+        .unwrap();
+        assert_eq!(library.folder(&alias, &imported), Some(1));
+        assert_eq!(library.folder(&root, &alias.join("old-lecture")), Some(1));
+        rename_course(&alias, &imported, "旧课程的新名称").unwrap();
+        assert_eq!(
+            title_alias(&root, &imported).unwrap().as_deref(),
+            Some("旧课程的新名称")
+        );
+        assert_eq!(
+            title_alias(&alias, &alias.join("old-lecture"))
+                .unwrap()
+                .as_deref(),
+            Some("旧课程的新名称")
+        );
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        assert!(relative_key(&alias, &outside).is_err());
+        assert!(relative_key(&alias, &alias.join("../outside")).is_err());
+    }
+
+    #[test]
+    fn damaged_classification_recovers_last_good_backup_without_touching_notes_or_titles() {
+        let root = tempfile::tempdir().unwrap();
+        let course = root.path().join("course");
+        std::fs::create_dir(&course).unwrap();
+        std::fs::write(course.join("course.md"), "hand edited text").unwrap();
+        rename_course(root.path(), &course, "My name").unwrap();
+        Library::edit(root.path(), |library| {
+            let id = library.rename(None, "Math")?;
+            library.assign(root.path(), &course, Some(id))
+        })
+        .unwrap();
+        Library::edit(root.path(), |library| {
+            library.rename(None, "Physics")?;
+            Ok(())
+        })
+        .unwrap();
+        std::fs::write(root.path().join(FILE), "damaged bytes").unwrap();
+        assert!(Library::load(root.path()).is_err());
+        assert!(recovery(root.path()).unwrap().unwrap().has_backup);
+        let (restored, preserved) = recover(root.path(), false).unwrap();
+        assert_eq!(restored.folders.len(), 1);
+        assert_eq!(restored.folder(root.path(), &course), Some(1));
+        assert_eq!(std::fs::read_to_string(preserved).unwrap(), "damaged bytes");
+        assert_eq!(
+            title_alias(root.path(), &course).unwrap().as_deref(),
+            Some("My name")
+        );
+        assert_eq!(
+            std::fs::read_to_string(course.join("course.md")).unwrap(),
+            "hand edited text"
+        );
+    }
+
+    #[test]
+    fn rebuild_only_resets_classification_and_names_are_shared_across_versions() {
+        let root = tempfile::tempdir().unwrap();
+        let course = root.path().join("course");
+        std::fs::create_dir_all(course.join("versions/a")).unwrap();
+        std::fs::create_dir_all(course.join("versions/b")).unwrap();
+        std::fs::write(course.join("versions/a/course.md"), "old content").unwrap();
+        std::fs::write(root.path().join(FILE), "damaged without backup").unwrap();
+        rename_course(root.path(), &course, " Shared name ").unwrap();
+        assert!(!recovery(root.path()).unwrap().unwrap().has_backup);
+        let (rebuilt, _) = recover(root.path(), true).unwrap();
+        assert!(rebuilt.folders.is_empty());
+        assert_eq!(
+            title_alias(root.path(), &course).unwrap().as_deref(),
+            Some("Shared name")
+        );
+        assert_eq!(
+            std::fs::read_to_string(course.join("versions/a/course.md")).unwrap(),
+            "old content"
+        );
+        assert!(rename_course(root.path(), &course, " ").is_err());
+        assert_eq!(
+            title_alias(root.path(), &course).unwrap().as_deref(),
+            Some("Shared name")
+        );
+    }
+
+    #[test]
+    fn title_recovery_is_independent_and_unavailable_roots_are_not_recreated() {
+        let root = tempfile::tempdir().unwrap();
+        let course = root.path().join("course");
+        std::fs::create_dir(&course).unwrap();
+        Library::edit(root.path(), |library| {
+            library.rename(None, "Keep folder")?;
+            Ok(())
+        })
+        .unwrap();
+        let classification = std::fs::read(root.path().join(FILE)).unwrap();
+        rename_course(root.path(), &course, "First name").unwrap();
+        rename_course(root.path(), &course, "Second name").unwrap();
+        std::fs::write(root.path().join(TITLES), "damaged names").unwrap();
+        assert!(title_recovery(root.path()).unwrap().unwrap().has_backup);
+        let preserved = recover_titles(root.path(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(preserved).unwrap(), "damaged names");
+        assert_eq!(
+            title_alias(root.path(), &course).unwrap().as_deref(),
+            Some("First name")
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(FILE)).unwrap(),
+            classification
+        );
+        let missing = root.path().join("disconnected");
+        assert!(Library::load(&missing).is_err());
+        assert!(Library::edit(&missing, |_| Ok(())).is_err());
+        assert!(!missing.exists());
+    }
     #[test]
     fn reserved_name_edits_leave_saved_folders_and_assignments_unchanged() {
         let root = tempfile::tempdir().unwrap();

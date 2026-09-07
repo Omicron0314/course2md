@@ -56,23 +56,14 @@ impl Activity {
         if !running {
             return "已停止".into();
         }
-        let quantity = if stage.starts_with("model/") && stage != "model/apple" {
-            if self.total > 0 {
-                format!("{} / {}", bytes(self.current), bytes(self.total))
-            } else {
-                bytes(self.current)
-            }
-        } else if let Some(fraction) = self.fraction() {
-            if stage == "transcribe" {
-                format!("{} / {} 段", self.current, self.total)
-            } else {
-                format!("{:.0}%", fraction * 100.)
-            }
-        } else {
-            String::new()
-        };
+        let quantity = quantity(stage, self.current, self.total);
         let remaining = if self.updated.elapsed() >= Duration::from_secs(30) && self.current > 0 {
-            "等待响应".into()
+            if stage.starts_with("scenes/") {
+                "仍在处理"
+            } else {
+                "等待响应"
+            }
+            .into()
         } else if self.total > self.current {
             self.rate()
                 .map(|rate| {
@@ -81,7 +72,7 @@ impl Activity {
                         duration((self.total - self.current) as f64 / rate)
                     )
                 })
-                .unwrap_or_else(|| "估算中…".into())
+                .unwrap_or_default()
         } else if self.total > 0 {
             "收尾中…".into()
         } else {
@@ -96,35 +87,95 @@ impl Activity {
         };
         if quantity.is_empty() {
             remaining
+        } else if remaining.is_empty() {
+            format!("{quantity}{speed}")
         } else {
             format!("{quantity}{speed} · {remaining}")
         }
     }
 }
+
+pub fn quantity(stage: &str, current: u64, total: u64) -> String {
+    if stage == "scenes/scan" {
+        format!("已检查 {current} 张画面")
+    } else if stage == "scenes/extract" && total > 0 {
+        format!("已保存 {current} / {total} 张截图")
+    } else if stage.starts_with("model/") && stage != "model/apple" {
+        if total > 0 {
+            format!("{} / {}", bytes(current), bytes(total))
+        } else {
+            bytes(current)
+        }
+    } else if total > 0 {
+        if stage == "transcribe" {
+            format!("{current} / {total} 段")
+        } else {
+            format!(
+                "{:.0}%",
+                (current as f64 / total as f64).clamp(0., 1.) * 100.
+            )
+        }
+    } else {
+        String::new()
+    }
+}
 /// Present actionable feedback while keeping raw tool output in the log.
-pub fn failure_message(message: &str) -> &'static str {
+pub fn failure_message(message: &str) -> &str {
     if message.contains("ffmpeg")
         && (message.contains("does not contain any stream")
             || message.contains("matches no streams"))
     {
-        "未能提取音轨。请改用“字幕优先”读取已有字幕，或更换带声音的视频。"
+        "这个视频没有可提取的音轨。可以选择已有字幕，或更换带声音的视频。"
+    } else if message.trim().is_empty() {
+        "任务中断，已保存的进度仍保留。打开技术详情可以查看处理记录。"
     } else {
-        "任务未完成。请重试，详细原因可在日志中查看。"
+        message
+    }
+}
+
+/// Older saved outcomes combined a stage label, retention message and English
+/// diagnostics. Keep these records readable without rewriting their evidence.
+pub fn component_failure_message(label: &str, message: Option<&str>) -> String {
+    let chinese = message
+        .unwrap_or_default()
+        .split(" / ")
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if chinese.is_empty()
+        || matches!(
+            chinese,
+            "摘要尚未完成，已保留正文"
+                | "校对未全部完成，原文已保留"
+                | "部分校对未完成，原始文字已保留"
+        )
+    {
+        return format!("{label}尚未完成，正文已保存。可以仅补{label}。");
+    }
+    let prefix = format!("{label}尚未完成");
+    if chinese.starts_with(&prefix) {
+        chinese.into()
+    } else {
+        format!("{label}尚未完成：{chinese}")
     }
 }
 
 pub fn stage_order(stage: &str) -> usize {
     match stage {
         "fetch" => 0,
-        "download" => 1,
-        "audio" => 2,
-        s if s.starts_with("model/") => 3,
-        "model-load" => 4,
-        "scenes" => 5,
-        "transcribe" => 6,
-        "llm" => 7,
-        "render" => 8,
-        _ => 9,
+        "subtitle" => 1,
+        "download" => 2,
+        "scenes" | "scenes/scan" => 3,
+        "scenes/extract" => 4,
+        "audio" => 5,
+        s if s.starts_with("model/") => 6,
+        "model-load" => 7,
+        "transcribe" => 8,
+        "llm" => 9,
+        "summary" | "summarize" => 10,
+        "render" => 11,
+        "export" | "exports" => 12,
+        _ => 13,
     }
 }
 
@@ -143,9 +194,14 @@ pub fn title(stage: &str) -> String {
         "fetch" => "读取课程",
         "download" => "下载视频",
         "scenes" => "提取画面",
+        "scenes/scan" => "扫描画面",
+        "scenes/extract" => "生成截图",
         "audio" => "提取音频",
         "transcribe" => "语音转写",
-        "llm" => "整理文字",
+        "subtitle" => "读取字幕",
+        "llm" => "AI 校对",
+        "summary" | "summarize" => "生成摘要",
+        "export" | "exports" => "导出文件",
         "render" => "生成笔记",
         _ => stage,
     }
@@ -172,6 +228,50 @@ fn duration(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completed_scan_cannot_supply_the_new_extraction_counter_or_eta() {
+        let mut scan = Activity::new();
+        scan.update(18, 0, Some("已找到 1 张候选截图".into()));
+        assert!(scan.fraction().is_none());
+        assert!(
+            scan.detail("scenes/scan", true)
+                .contains("已检查 18 张画面")
+        );
+        scan.done = true;
+        let mut extract = Activity::new();
+        extract.update(0, 1, None);
+        extract.started = Instant::now() - Duration::from_secs(25);
+        let detail = extract.detail("scenes/extract", true);
+        assert!(detail.contains("已保存 0 / 1 张截图"), "{detail}");
+        assert!(!detail.contains("100%") && !detail.contains("收尾") && !detail.contains("约剩"));
+        assert_eq!(extract.fraction(), Some(0.));
+        extract.update(1, 1, None);
+        extract.done = true;
+        assert_eq!(extract.detail("scenes/extract", true), "已完成");
+        let mut persisted = crate::workspace::Stage {
+            status: "done".into(),
+            current: 18,
+            total: 18,
+            detail: Some("old sample".into()),
+        };
+        persisted.begin();
+        assert_eq!((persisted.current, persisted.total), (0, 0));
+        assert!(persisted.detail.is_none());
+    }
+    #[test]
+    fn saved_component_failures_have_one_label_and_no_english_diagnostics() {
+        assert_eq!(
+            component_failure_message(
+                "摘要",
+                Some("摘要尚未完成，已保留正文 / Summary incomplete; body retained")
+            ),
+            "摘要尚未完成，正文已保存。可以仅补摘要。"
+        );
+        assert_eq!(
+            component_failure_message("摘要", Some("服务拒绝了请求（HTTP 400）。")),
+            "摘要尚未完成：服务拒绝了请求（HTTP 400）。"
+        );
+    }
     #[test]
     fn retry_and_cached_work_do_not_inflate_eta() {
         let mut item = Activity::new();

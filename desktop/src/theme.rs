@@ -1,6 +1,9 @@
 //! Shared colors keep controls, navigation and document surfaces consistent.
-use gpui::{App, px, rgb};
+use gpui::{App, Window, px, rems, rgb};
 use gpui_component::{Theme, ThemeMode};
+#[path = "choice_group.rs"]
+mod choice_group;
+pub use choice_group::SingleChoiceGroup;
 
 pub const CANVAS: u32 = 0xf8f8f6;
 pub const SURFACE: u32 = 0xffffff;
@@ -12,6 +15,21 @@ pub const CONTROL: u32 = 0x657184;
 pub const BLUE: u32 = 0x315bc5;
 pub const TINT: u32 = 0xeaf0ff;
 pub const SUCCESS: u32 = 0x237552;
+
+/// Plain Div text is not exposed by GPUI's native accessibility bridge. Keep labels on
+/// leaf elements so an ancestor does not replace the accessibility of its controls.
+pub fn accessible_text(
+    id: impl Into<gpui::ElementId>,
+    value: impl Into<gpui::SharedString>,
+) -> gpui::Stateful<gpui::Div> {
+    use gpui::*;
+    let value = value.into();
+    div()
+        .id(id)
+        .role(Role::Label)
+        .aria_label(value.clone())
+        .child(value)
+}
 
 /// Navigation has an explicit current-location treatment, separate from form toggles.
 pub fn navigation(
@@ -31,6 +49,7 @@ pub fn navigation(
 }
 
 pub fn init(cx: &mut App) {
+    choice_group::init(cx);
     Theme::change(ThemeMode::Light, None, cx);
     let theme = Theme::global_mut(cx);
     theme.font_size = px(14.);
@@ -93,8 +112,8 @@ pub fn choice(
     button
         .selected(selected)
         .toggled(selected)
-        .h(px(36.))
-        .min_h(px(36.))
+        .h_auto()
+        .min_h(rems(2.6))
         .bg(rgb(if selected { BLUE } else { SURFACE }))
         .text_color(rgb(if selected { SURFACE } else { INK }))
         .border_color(rgb(if selected { BLUE } else { CONTROL }))
@@ -136,8 +155,26 @@ pub fn disclosure(
 pub fn control(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
     use gpui::Styled;
     gpui_component::button::Button::new(id)
-        .h(px(36.))
-        .min_h(px(36.))
+        .h_auto()
+        .min_h(rems(2.6))
         .flex_shrink_0()
-        .text_size(px(14.))
+        .text_size(rems(1.0))
+}
+
+/// GPUI Component's Root resets rem size from Theme on every render. Update that
+/// authority as well as the current window so parent and modal renders agree.
+pub fn apply_scale(scale: f32, window: &mut Window, cx: &mut App) {
+    let scale = if [1.0, 1.25, 1.5, 2.0].contains(&scale) {
+        scale
+    } else {
+        1.0
+    };
+    let font_size = px(14.0 * scale);
+    if Theme::global(cx).font_size != font_size {
+        let theme = Theme::global_mut(cx);
+        theme.font_size = font_size;
+        theme.mono_font_size = px(13.0 * scale);
+        Theme::sync_base(cx);
+    }
+    window.set_rem_size(font_size);
 }
