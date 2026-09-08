@@ -1,8 +1,42 @@
 //! Pure reader identities, source links, search and proportional reading anchors.
 use std::{
+    collections::BTreeMap,
     ops::Range,
     path::{Path, PathBuf},
 };
+
+/// Content coordinates keyed by document block (or frame), regardless of layout nesting.
+#[derive(Default)]
+pub struct ReadingLayout(BTreeMap<usize, (f32, f32)>);
+
+impl ReadingLayout {
+    pub fn record(&mut self, index: usize, top: f32, height: f32) {
+        self.0.insert(index, (top, height));
+    }
+
+    pub fn top_item(&self, offset: f32) -> Option<(usize, f32, f32)> {
+        let top = -offset;
+        let covering = self
+            .0
+            .iter()
+            .filter(|(_, (y, height))| *y <= top && *y + *height > top)
+            .max_by(|a, b| a.1.0.total_cmp(&b.1.0).then_with(|| b.0.cmp(a.0)));
+        let next = || {
+            self.0
+                .iter()
+                .filter(|(_, (y, _))| *y > top)
+                .min_by(|a, b| a.1.0.total_cmp(&b.1.0).then_with(|| a.0.cmp(b.0)))
+        };
+        let last = || self.0.iter().max_by(|a, b| a.1.0.total_cmp(&b.1.0));
+        let (&index, &(y, height)) = covering.or_else(next).or_else(last)?;
+        Some((index, (y - top).min(0.), height))
+    }
+
+    pub fn restore(&self, index: usize, fraction: Option<f32>, within: f32) -> Option<f32> {
+        let &(top, height) = self.0.get(&index)?;
+        Some(-top + restore_within(fraction, within, height))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceTarget {
@@ -161,6 +195,26 @@ pub fn timestamp_utc(milliseconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_summary_blocks_and_wrapped_frames_use_their_own_coordinates() {
+        let mut body = ReadingLayout::default();
+        body.record(1, 20., 40.); // Summary card paragraphs are nested, not scroll children.
+        body.record(2, 70., 50.);
+        body.record(4, 150., 30.);
+        body.record(5, 200., 400.);
+        assert_eq!(body.top_item(-300.), Some((5, -100., 400.)));
+        assert_eq!(body.restore(2, Some(0.5), 0.), Some(-95.));
+        assert_eq!(body.restore(5, Some(0.25), 0.), Some(-300.));
+        let mut grid = ReadingLayout::default();
+        grid.record(0, 0., 200.);
+        grid.record(1, 0., 200.);
+        grid.record(2, 216., 200.);
+        grid.record(3, 216., 200.);
+        assert_eq!(grid.top_item(-240.), Some((2, -24., 200.)));
+        assert_eq!(grid.restore(3, None, 0.), Some(-216.));
+        grid.record(2, 432., 200.); // The same frame moves after a window resize.
+        assert_eq!(grid.restore(2, Some(0.12), 0.), Some(-456.));
+    }
     #[test]
     fn source_links_do_not_invent_local_or_unknown_seek_support() {
         assert!(source_target("", false).is_none());

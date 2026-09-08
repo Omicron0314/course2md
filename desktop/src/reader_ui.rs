@@ -6,8 +6,10 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 use std::{
+    cell::RefCell,
     ops::Range,
     path::Path,
+    rc::Rc,
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -96,6 +98,7 @@ pub(crate) struct State {
     restore_generation: u64,
     last_position: Option<(String, workspace::ReadingPosition)>,
     layout: Option<(f32, f32, f32)>,
+    item_layout: Rc<RefCell<nav::ReadingLayout>>,
     viewer: Option<ImageViewer>,
     exports: BTreeMap<PathBuf, PathBuf>,
     source_loading: bool,
@@ -161,6 +164,7 @@ impl State {
             restore_generation: 0,
             last_position: None,
             layout: None,
+            item_layout: Rc::default(),
             viewer: None,
             exports: BTreeMap::new(),
             source_loading: false,
@@ -432,7 +436,11 @@ impl Desktop {
     }
     fn capture_reading_position(&self) -> Option<workspace::ReadingPosition> {
         let preview = self.preview.as_ref()?;
-        let (index, within) = self.reader_scroll.logical_scroll_top();
+        let (index, within, height) = self
+            .reader_ui
+            .item_layout
+            .borrow()
+            .top_item(f32::from(self.reader_scroll.offset().y))?;
         let (paragraph, seconds) = if self.result_tab == 0 {
             (
                 preview
@@ -448,11 +456,7 @@ impl Desktop {
                 .map(|frame| (Some(frame.anchor.clone()), frame.seconds))
                 .unwrap_or((None, None))
         };
-        let within = f32::from(within);
-        let fraction = self
-            .reader_scroll
-            .bounds_for_item(index)
-            .map(|bounds| nav::within_fraction(within, f32::from(bounds.size.height)));
+        let fraction = Some(nav::within_fraction(within, height));
         Some(workspace::ReadingPosition {
             paragraph,
             seconds,
@@ -513,6 +517,19 @@ impl Desktop {
                         .iter()
                         .enumerate()
                         .position(|(index, block)| block_anchor(block, index) == *anchor)
+                        .map(|index| {
+                            if anchor == "summary" {
+                                blocks
+                                    .iter()
+                                    .position(|block| {
+                                        matches!(block, PreviewBlock::Paragraph { anchor, .. }
+                                if anchor == "summary-tldr" || anchor.starts_with("key-point-"))
+                                    })
+                                    .unwrap_or(index)
+                            } else {
+                                index
+                            }
+                        })
                 })
                 .or_else(|| {
                     position.seconds.and_then(|seconds| {
@@ -572,15 +589,14 @@ impl Desktop {
             }
             let target = this
                 .position_index(&position)
-                .and_then(|index| this.reader_scroll.bounds_for_item(index))
-                .map(|bounds| {
-                    this.reader_scroll.bounds().top() - bounds.top()
-                        + px(nav::restore_within(
-                            position.fraction,
-                            position.within,
-                            f32::from(bounds.size.height),
-                        ))
+                .and_then(|index| {
+                    this.reader_ui.item_layout.borrow().restore(
+                        index,
+                        position.fraction,
+                        position.within,
+                    )
                 })
+                .map(px)
                 .unwrap_or_else(|| px(position.offset.min(0.)));
             let maximum = this.reader_scroll.max_offset().y;
             this.reader_scroll
@@ -944,12 +960,18 @@ impl Desktop {
                         if refresh {
                             this.reader_ui.loaded = None;
                         }
+                        let has_saved_position = this.reading_key().is_some_and(|key| {
+                            this.workspace.as_ref().is_some_and(|workspace| {
+                                workspace.state.positions.contains_key(&key)
+                            })
+                        });
                         this.restore_reading_position(cx);
                         if refresh {
                             this.reader_ui.pending_restore = position.clone();
                             this.message = Some("已重新读取这份笔记。".into());
                         }
                         if !refresh
+                            && !has_saved_position
                             && let Some(seconds) = position.and_then(|position| position.seconds)
                         {
                             let blocks = &this.preview.as_ref().unwrap().blocks;
@@ -2012,7 +2034,34 @@ impl Desktop {
                 })
                 .unwrap_or_default()
         };
-        let (top_index, _) = self.reader_scroll.logical_scroll_top();
+        let top_index = self
+            .reader_ui
+            .item_layout
+            .borrow()
+            .top_item(f32::from(self.reader_scroll.offset().y))
+            .map(|(index, _, _)| index)
+            .unwrap_or(0);
+        self.reader_ui.item_layout = Rc::default();
+        let item_layout = self.reader_ui.item_layout.clone();
+        let measured_scroll = self.reader_scroll.clone();
+        let measured = |index: usize, child: AnyElement| {
+            let positions = item_layout.clone();
+            let scroll = measured_scroll.clone();
+            div()
+                .w_full()
+                .min_w_0()
+                .flex_shrink_0()
+                .on_children_prepainted(move |bounds, _, _| {
+                    if let Some(bounds) = bounds.first() {
+                        positions.borrow_mut().record(
+                            index,
+                            f32::from(bounds.top() - scroll.bounds().top() - scroll.offset().y),
+                            f32::from(bounds.size.height),
+                        );
+                    }
+                })
+                .child(child)
+        };
         let current_chapter = headings
             .iter()
             .filter(|(index, _, _)| *index <= top_index)
@@ -2071,15 +2120,19 @@ impl Desktop {
                                 .font_weight(FontWeight::SEMIBOLD),
                         )
                         .children(summary_paragraphs.iter().map(|(index, text)| {
-                            div()
-                                .text_size(TEXT_BODY)
-                                .line_height(relative(1.6))
-                                .child(ReaderText::new(
-                                    SharedString::from(format!("summary-text-{index}")),
-                                    text.clone(),
-                                    *index as u64,
-                                    highlight_runs(*index),
-                                ))
+                            measured(
+                                *index,
+                                div()
+                                    .text_size(TEXT_BODY)
+                                    .line_height(relative(1.6))
+                                    .child(ReaderText::new(
+                                        SharedString::from(format!("summary-text-{index}")),
+                                        text.clone(),
+                                        *index as u64,
+                                        highlight_runs(*index),
+                                    ))
+                                    .into_any_element(),
+                            )
                         })),
                 );
             }
@@ -2222,14 +2275,16 @@ impl Desktop {
                             .position(|frame| frame.path.as_ref() == Some(path));
                         let frame = frame_index.and_then(|i| self.reader_ui.frames.get(i));
                         if frame_index.is_none() && !self.reader_ui.data_loading {
-                            article = article.child(
+                            article = article.child(measured(
+                                index,
                                 theme::accessible_text(
                                     ("unreadable-inline-image", index),
                                     "这张截图无法读取；对应正文仍可阅读。",
                                 )
                                 .text_sm()
-                                .text_color(rgb(WARNING)),
-                            );
+                                .text_color(rgb(WARNING))
+                                .into_any_element(),
+                            ));
                             continue;
                         }
                         let label = frame
@@ -2317,7 +2372,7 @@ impl Desktop {
                             .into_any_element()
                     }
                 };
-                article = article.child(div().w_full().flex_shrink_0().child(view));
+                article = article.child(measured(index, view));
             }
         } else {
             if self.reader_ui.data_loading && self.reader_ui.frames.is_empty() {
@@ -2343,10 +2398,7 @@ impl Desktop {
                 let label = frame_label(&preview.course.title, frame, index);
                 let mut card = v_flex()
                     .id(SharedString::from(frame.anchor.clone()))
-                    .flex_1()
-                    .flex_basis(rems(12.))
-                    .min_w(rems(12.))
-                    .max_w(rems(17.))
+                    .w_full()
                     .bg(rgb(SURFACE))
                     .border_1()
                     .border_color(rgb(CARD_LINE))
@@ -2485,7 +2537,16 @@ impl Desktop {
                         false,
                     ));
                 }
-                grid = grid.child(card.child(card_body.child(actions)));
+                grid = grid.child(
+                    measured(
+                        index,
+                        card.child(card_body.child(actions)).into_any_element(),
+                    )
+                    .flex_1()
+                    .flex_basis(rems(12.))
+                    .min_w(rems(12.))
+                    .max_w(rems(17.)),
+                );
             }
             article = article.child(grid);
         }
