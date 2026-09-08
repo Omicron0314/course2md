@@ -143,7 +143,7 @@ impl Desktop {
                     .when(show_login, |view| {
                         view.child(
                             control("account-login")
-                                .icon(icons::login()).primary().label(if expired {
+                                .icon(icons::login()).outline().label(if expired {
                                     "重新登录 Bilibili"
                                 } else {
                                     "登录 Bilibili"

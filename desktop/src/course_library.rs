@@ -147,7 +147,7 @@ impl Render for CourseRenameDialog {
             .aria_label("重命名笔记")
             .gap_3()
             .child(accessible_text("rename-note-label", "笔记名称"))
-            .child(Input::new(&self.input).aria_label("笔记名称"))
+            .child(text_input(&self.input).aria_label("笔记名称"))
             .when_some(self.error.clone(), |view, error| {
                 view.child(
                     accessible_text("rename-note-error", error)
@@ -684,8 +684,7 @@ impl Desktop {
                         .px_6()
                         .gap_4()
                         .items_center()
-                        .rounded(RADIUS_CARD)
-                        .bg(color(INSET))
+                        .text_center()
                         .child(
                             Icon::new(IconName::BookOpen)
                                 .size(px(32.))
@@ -700,12 +699,12 @@ impl Desktop {
                                     {
                                         "已读取的笔记中没有匹配的笔记。"
                                     } else {
-                                        "没有匹配的笔记。"
+                                        "没有匹配的笔记"
                                     }
                                 } else if self.folder_filter.is_some() {
-                                    "这个文件夹还没有笔记。"
+                                    "这个文件夹还没有笔记"
                                 } else {
-                                    "还没有笔记。"
+                                    "还没有笔记"
                                 },
                             )
                             .text_lg()
@@ -723,7 +722,7 @@ impl Desktop {
                                 } else if self.folder_filter.is_some() {
                                     "从全部笔记中选择内容，移到这个文件夹。"
                                 } else {
-                                    "添加视频链接或本地视频，生成课程笔记。"
+                                    "导入视频，生成的内容会保存在这里"
                                 },
                             )
                             .text_color(color(MUTED)),
@@ -745,7 +744,7 @@ impl Desktop {
                             empty.child(
                                 primary_pill("empty-library-add")
                                     .icon(IconName::Plus)
-                                    .label("生成第一篇笔记")
+                                    .label("导入视频")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.begin_add(window, cx)
                                     })),
@@ -981,9 +980,7 @@ impl Desktop {
                 .unwrap_or_else(|| "文件夹已删除".into()),
         };
         control("folder-filter")
-            .h_auto()
-            .min_h(rems(2.286))
-            .rounded(RADIUS_SMALL)
+            .rounded(RADIUS_PILL)
             .px(px(12.))
             .max_w(rems(16.))
             .icon(IconName::Folder)
@@ -1006,8 +1003,20 @@ impl Desktop {
             ))
     }
 
+    pub(super) fn library_controls_visible(&self, cx: &App) -> bool {
+        !(self.courses.is_empty()
+            && self.folder_filter.is_none()
+            && self.value(Field::Search, cx).is_empty()
+            && self.library_error.is_none()
+            && self.library_issues.is_empty()
+            && !self.loading)
+    }
+
     /// Library controls share Material action icons and theme-aware state surfaces.
     pub fn library_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        if !self.library_controls_visible(cx) {
+            return div();
+        }
         let group_on = self.desktop_settings.library_group_folders;
         let cards_on = self.desktop_settings.library_cards;
         let controls = h_flex()
@@ -1022,8 +1031,7 @@ impl Desktop {
                 let entity = cx.entity().downgrade();
                 row.child(
                     control("manage-folder")
-                        .rounded(RADIUS_SMALL)
-                        .min_h(rems(2.286))
+                        .rounded(RADIUS_PILL)
                         .px(px(12.))
                         .icon(icons::edit())
                         .label("管理文件夹")
@@ -1052,8 +1060,7 @@ impl Desktop {
             .when(self.folder_filter.is_none(), |row| {
                 row.child(
                     control("group-folders")
-                        .rounded(RADIUS_SMALL)
-                        .min_h(rems(2.286))
+                        .rounded(RADIUS_PILL)
                         .px(px(12.))
                         .bg(color(if group_on { BADGE_PROGRESS_BG } else { SURFACE }))
                         .border_color(color(CONTROL))
@@ -1075,35 +1082,16 @@ impl Desktop {
                 )
             })
             .child(
-                seg_track().children([
-                    seg_item("view-list", !cards_on)
-                        .icon(icons::toc())
-                        .label("列表")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.desktop_settings.library_cards = false;
-                            this.save_library_presentation(cx);
-                            cx.notify();
-                        })),
-                    seg_item("view-cards", cards_on)
-                        .icon(icons::grid_view())
-                        .label("卡片")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.desktop_settings.library_cards = true;
-                            this.save_library_presentation(cx);
-                            cx.notify();
-                        })),
-                ]),
-            )
-            .child(
-                control("refresh-library")
-                    .ghost()
-                    .rounded(RADIUS_SMALL)
-                    .icon(icons::refresh())
-                    .accessibility_label("刷新课程库")
-                    .tooltip("刷新笔记")
-                    .loading(self.loading)
-                    .disabled(self.loading)
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
+                SingleChoiceGroup::new("library-view", "显示方式")
+                    .options([("list", "列表"), ("cards", "卡片")])
+                    .icon("list", icons::toc())
+                    .icon("cards", icons::grid_view())
+                    .selected(if cards_on { "cards" } else { "list" })
+                    .on_change(cx.listener(|this, value: &SharedString, _, cx| {
+                        this.desktop_settings.library_cards = value.as_ref() == "cards";
+                        this.save_library_presentation(cx);
+                        cx.notify();
+                    })),
             );
         h_flex()
             .w_full()
@@ -1118,15 +1106,16 @@ impl Desktop {
                     .min_w_0()
                     .max_w_full()
                     .child(
-                        Input::new(&self.inputs[&Field::Search])
+                        text_input(&self.inputs[&Field::Search])
                             .aria_label("搜索笔记标题")
                             .w_full()
-                            .min_h(rems(2.286))
-                            .h_auto()
-                            .rounded(RADIUS_SMALL)
                             .border_color(color(CONTROL))
                             .text_size(TEXT_BODY)
-                            .prefix(icons::search().size(px(16.)).text_color(color(GRAY)))
+                            .prefix(
+                                icons::search()
+                                    .size(rems(18. / 14.))
+                                    .text_color(color(GRAY)),
+                            )
                             .cleanable(true),
                     ),
             )
@@ -1338,22 +1327,48 @@ impl Desktop {
                                         }),
                                 )
                                 .child(
-                                    div()
+                                    v_flex()
                                         .w_full()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_size(TEXT_AUX)
-                                        .text_color(color(GRAY))
-                                        .child(Self::course_meta(course)),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_size(TEXT_AUX)
-                                        .text_color(color(GRAY))
-                                        .child(course.description()),
+                                        .min_w_0()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_size(TEXT_AUX)
+                                                .text_color(color(GRAY))
+                                                .child(Self::course_meta(course)),
+                                        )
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_size(TEXT_AUX)
+                                                .text_color(color(GRAY))
+                                                .child(course.description()),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .min_w_0()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(self.folder_chip(
+                                                    Some(course.dir.clone()),
+                                                    index + 1,
+                                                    Some(layout.card_chip_max),
+                                                    false,
+                                                    cx,
+                                                ))
+                                                .child(div().flex_1())
+                                                .child(self.course_actions(
+                                                    course.clone(),
+                                                    *index,
+                                                    cx,
+                                                )),
+                                        ),
                                 )
                                 .child(
                                     outline_pill(("read-card-action", *index))
@@ -1366,23 +1381,6 @@ impl Desktop {
                                                 this.open_course(course.clone(), cx)
                                             })
                                         }),
-                                )
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_w_0()
-                                        .pt_1()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(self.folder_chip(
-                                            Some(course.dir.clone()),
-                                            index + 1,
-                                            Some(layout.card_chip_max),
-                                            false,
-                                            cx,
-                                        ))
-                                        .child(div().flex_1())
-                                        .child(self.course_actions(course.clone(), *index, cx)),
                                 ),
                         )
                     }))
@@ -1450,21 +1448,6 @@ impl Desktop {
                         })),
                 ),
         );
-        if self.reading {
-            section = section.child(crate::motion::enter(
-                "recent-note-opening",
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .py_2()
-                    .child(crate::motion::spinner("recent-note-spinner", cx))
-                    .child(accessible_text(
-                        "recent-note-opening-label",
-                        "正在打开笔记…",
-                    )),
-                cx,
-            ));
-        }
         for task in attention {
             let id = task.id.clone();
             let resend = task.state == crate::workspace::TaskState::Uncertain;

@@ -217,8 +217,8 @@ pub const RADIUS_PILL: Pixels = px(999.);
 pub const RADIUS_CARD: Pixels = px(12.);
 pub const RADIUS_HERO: Pixels = px(16.);
 pub const RADIUS_SMALL: Pixels = px(8.);
-/// Compact form choices stay associated with their labels in a wide pane.
-pub const CONTROL_GROUP_MAX: Pixels = px(520.);
+/// Ordinary controls share this height, including padding, at every text scale.
+pub const CONTROL_HEIGHT: Rems = rems(40. / 14.);
 
 /* ---------- 栏宽（rems，随字号缩放的结构尺寸） ---------- */
 pub const COLUMN: Rems = rems(65.714);
@@ -267,25 +267,6 @@ pub fn accessible_text(
         .child(value)
 }
 
-/// Navigation has an explicit current-location treatment, separate from form toggles.
-pub fn navigation(
-    button: gpui_component::button::Button,
-    selected: bool,
-) -> gpui_component::button::Button {
-    use gpui::{Styled, prelude::FluentBuilder};
-    use gpui_component::{Selectable, button::ButtonVariants};
-    button
-        .ghost()
-        .selected(selected)
-        .toggled(selected)
-        .text_color(color(if selected { ON_PRIMARY } else { INK }))
-        .when(selected, |button| {
-            button
-                .bg(color(BLUE))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-        })
-}
-
 pub fn init(cx: &mut App) {
     choice_group::init(cx);
     Theme::change(ThemeMode::Light, None, cx);
@@ -312,10 +293,26 @@ pub fn disclosure(
 pub fn control(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
     use gpui::Styled;
     gpui_component::button::Button::new(id)
-        .h_auto()
-        .min_h(rems(2.571))
+        .h(CONTROL_HEIGHT)
+        .min_h(CONTROL_HEIGHT)
+        .min_w(CONTROL_HEIGHT)
+        .rounded(RADIUS_PILL)
+        .py_0()
         .flex_shrink_0()
         .text_size(rems(1.0))
+}
+
+/// A framed single-line field. Multiline editors and embedded find text use
+/// their own content layout, without inventing another ordinary field size.
+pub fn text_input(
+    state: &gpui::Entity<gpui_component::input::InputState>,
+) -> gpui_component::input::Input {
+    use gpui::Styled;
+    gpui_component::input::Input::new(state)
+        .h(CONTROL_HEIGHT)
+        .min_h(CONTROL_HEIGHT)
+        .rounded(RADIUS_PILL)
+        .text_size(TEXT_BODY)
 }
 
 /* ---------- 共享控件 ---------- */
@@ -356,7 +353,7 @@ pub fn primary_pill(id: impl Into<gpui::ElementId>) -> gpui_component::button::B
     use gpui_component::button::ButtonVariants;
     control(id)
         .primary()
-        .rounded(RADIUS_SMALL)
+        .rounded(RADIUS_PILL)
         .px(px(16.))
         .gap(px(8.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -367,7 +364,7 @@ pub fn outline_pill(id: impl Into<gpui::ElementId>) -> gpui_component::button::B
     use gpui::Styled;
     control(id)
         .outline()
-        .rounded(RADIUS_SMALL)
+        .rounded(RADIUS_PILL)
         .px(px(16.))
         .gap(px(8.))
 }
@@ -382,21 +379,8 @@ pub fn quiet(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
     use gpui_component::button::ButtonVariants;
     control(id)
         .ghost()
-        .rounded(RADIUS_SMALL)
+        .rounded(RADIUS_PILL)
         .text_color(color(GRAY))
-}
-
-/// Capsule track for mutually exclusive segments (source, view, tabs).
-pub fn seg_track() -> gpui::Div {
-    use gpui::{Styled, div};
-    div()
-        .flex()
-        .items_center()
-        .flex_shrink_0()
-        .gap(px(2.))
-        .p(px(2.))
-        .rounded_full()
-        .bg(color(SEGMENT_TRACK))
 }
 
 /// Inset note for supporting information.
@@ -417,26 +401,6 @@ pub fn banner_note(
         .text_size(TEXT_AUX)
         .text_color(color(GRAY))
         .child(value)
-}
-
-/// One segment: selected uses a raised surface with a soft shadow.
-pub fn seg_item(id: impl Into<gpui::ElementId>, selected: bool) -> gpui_component::button::Button {
-    use gpui::{Styled, prelude::FluentBuilder};
-    use gpui_component::{Selectable, button::ButtonVariants};
-    control(id)
-        .ghost()
-        .rounded(RADIUS_PILL)
-        .min_h(rems(2.286))
-        .px(px(14.))
-        .selected(selected)
-        .toggled(selected)
-        .text_color(color(if selected { INK } else { GRAY }))
-        .when(selected, |button| {
-            button
-                .bg(color(SURFACE))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .shadow(shadow_segment_selected())
-        })
 }
 
 /// Status badge kinds; text always pairs with its tinted background.

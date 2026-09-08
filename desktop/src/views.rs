@@ -18,7 +18,7 @@ fn shell_column_for(page: Page) -> Div {
 
 fn shell_column_width(page: Page) -> AbsoluteLength {
     match page {
-        Page::Settings => px(SETTINGS_SHELL_WIDTH).into(),
+        Page::Settings => rems(SETTINGS_SHELL_WIDTH / 14.).into(),
         Page::Library | Page::Result => WIDE_COLUMN.into(),
         _ => COLUMN.into(),
     }
@@ -33,15 +33,19 @@ pub(super) fn shell_content_width(page: Page, window: &Window) -> f32 {
 }
 
 pub(super) fn settings_uses_sidebar(window: &Window) -> bool {
-    f32::from(window.bounds().size.width) >= SETTINGS_SIDEBAR_BREAKPOINT
+    f32::from(window.bounds().size.width)
+        >= SETTINGS_SIDEBAR_BREAKPOINT * (f32::from(window.rem_size()) / 14.)
+}
+
+pub(super) fn settings_sidebar_width(window: &Window) -> f32 {
+    SETTINGS_SIDEBAR_WIDTH * f32::from(window.rem_size()) / 14.
 }
 
 /// Shared by the settings panel and its grids: exclude the real navigation and gutters.
 pub(super) fn settings_content_width(window: &Window) -> f32 {
     let available_width = shell_content_width(Page::Settings, window);
     if settings_uses_sidebar(window) {
-        (available_width - SETTINGS_SIDEBAR_WIDTH - SETTINGS_COLUMN_GAP)
-            .clamp(0., SETTINGS_CONTENT_MAX_WIDTH)
+        (available_width - settings_sidebar_width(window) - SETTINGS_COLUMN_GAP).max(0.)
     } else {
         available_width
     }
@@ -76,119 +80,75 @@ impl Desktop {
                 })
                 .count()
         });
-        let index = match self.page {
-            Page::Library | Page::Result => 1.,
-            Page::Task => 2.,
-            _ => 0.,
+        let current = match self.page {
+            Page::Library | Page::Result => "library",
+            Page::Task => "tasks",
+            Page::Settings => "settings",
+            _ => "import",
         };
-        let position = crate::motion::value("navigation-indicator", index, window, cx);
-        let task_label = if task_count == 0 {
+        let scale = self.preferences.application().font_scale;
+        let side_width = 96.;
+        let available = (f32::from(window.bounds().size.width) - side_width * 2.).max(0.);
+        let nav_width = (464. * scale).min(available);
+        let compact = nav_width < 464. * scale;
+        let task_label = if task_count == 0 || compact {
             "任务".to_owned()
         } else {
             format!("任务 · {task_count}")
         };
-        // Match the traffic-light reserve with an equal right-hand region.
-        // The navigation is centered in the full window, not the padded TitleBar.
-        let scale = self.preferences.application().font_scale;
-        let side_width = (72. * scale + 16.).max(96.);
-        let nav_width =
-            (360. * scale).min((f32::from(window.bounds().size.width) - side_width * 2.).max(0.));
-        let tab_width = nav_width / 3.;
-        let nav = div()
-            .relative()
-            .w(px(nav_width))
-            .h(px(36.))
-            .flex_shrink_0()
-            .when(self.page != Page::Settings, |view| {
-                view.child(
-                    div()
-                        .absolute()
-                        .left(px(tab_width * position))
-                        .top(px(0.))
-                        .w(px(tab_width))
-                        .h(px(36.))
-                        .rounded(RADIUS_SMALL)
-                        .bg(color(ACCENT)),
+        let nav = div().w(px(nav_width)).child(
+            SingleChoiceGroup::new("main-navigation", "主导航")
+                .tabs()
+                .full_width()
+                .options([
+                    ("import", if compact { "导入" } else { "工作台" }.to_owned()),
+                    (
+                        "library",
+                        if compact { "笔记" } else { "我的笔记" }.to_owned(),
+                    ),
+                    ("tasks", task_label),
+                    ("settings", "设置".to_owned()),
+                ])
+                .icon("import", icons::dashboard())
+                .icon("library", icons::book_open())
+                .icon(
+                    "tasks",
+                    if compact && task_count > 0 {
+                        icons::warning()
+                    } else {
+                        icons::task()
+                    },
                 )
-            })
-            .child(
-                h_flex().w_full().h_full().children(
-                    [
-                        (Page::New, "工作台".to_owned(), icons::dashboard()),
-                        (Page::Library, "我的笔记".to_owned(), icons::book_open()),
-                        (Page::Task, task_label, icons::task()),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (page, label, icon))| {
-                        let active = self.page == page
-                            || (page == Page::Library && self.page == Page::Result);
-                        let coverage = if self.page == Page::Settings {
-                            0.
-                        } else {
-                            (1. - (position - index as f32).abs()).clamp(0., 1.)
-                        };
-                        control(("shell-tab", index))
-                            .ghost()
-                            .w(px(tab_width))
-                            .h(px(36.))
-                            .min_h(px(36.))
-                            .px(px(12.))
-                            .rounded(RADIUS_SMALL)
-                            .bg(gpui::transparent_black())
-                            .text_color(theme::blend(color(GRAY), color(ON_PRIMARY), coverage))
-                            .selected(active)
-                            .toggled(active)
-                            .icon(icon.size(px(18.)))
-                            .label(label)
-                            .when(active, |button| button.font_weight(FontWeight::SEMIBOLD))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if page == Page::Library {
-                                    this.folder_filter = None;
-                                }
-                                this.navigate(page, cx);
-                            }))
-                    }),
-                ),
-            );
-        let settings_problem = self.settings_have_problem();
-        let settings_selected = self.page == Page::Settings;
-        let settings_amount = crate::motion::value(
-            "settings-navigation-selected",
-            if settings_selected { 1. } else { 0. },
-            window,
-            cx,
+                .icon(
+                    "settings",
+                    if self.settings_have_problem() {
+                        icons::warning()
+                    } else {
+                        icons::settings()
+                    },
+                )
+                .selected(current)
+                .on_change(cx.listener(|this, value: &SharedString, window, cx| {
+                    if value.as_ref() == "settings" {
+                        this.open_settings(window, cx);
+                        return;
+                    }
+                    if this.page == Page::Settings && !this.close_service_editor(window, cx) {
+                        return;
+                    }
+                    let page = match value.as_ref() {
+                        "library" => Page::Library,
+                        "tasks" => Page::Task,
+                        _ => Page::New,
+                    };
+                    if page == Page::Library {
+                        this.folder_filter = None;
+                    }
+                    this.navigate(page, cx);
+                })),
         );
-        let gear = quiet("shell-settings")
-            .icon(if settings_problem {
-                icons::warning().text_color(color(if settings_selected {
-                    ON_PRIMARY
-                } else {
-                    WARNING
-                }))
-            } else {
-                icons::settings()
-            })
-            .label("设置")
-            .h(px(36.))
-            .min_h(px(36.))
-            .selected(settings_selected)
-            .toggled(settings_selected)
-            .bg(theme::blend(color(CANVAS), color(ACCENT), settings_amount))
-            .text_color(theme::blend(
-                color(GRAY),
-                color(ON_PRIMARY),
-                settings_amount,
-            ))
-            .when(settings_selected, |b| b.font_weight(FontWeight::SEMIBOLD))
-            .accessibility_label(if settings_problem {
-                "设置，未保存"
-            } else {
-                "设置"
-            })
-            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
         TitleBar::new()
-            .h(px(52.))
+            .h(px(40. * scale + 16.))
             .pl_0()
             .bg(color(CANVAS))
             .border_color(color(HAIRLINE))
@@ -199,14 +159,7 @@ impl Desktop {
                     .h_full()
                     .child(div().w(px(side_width)).flex_shrink_0())
                     .child(h_flex().flex_1().min_w_0().justify_center().child(nav))
-                    .child(
-                        h_flex()
-                            .w(px(side_width))
-                            .flex_shrink_0()
-                            .pr(px(16.))
-                            .justify_end()
-                            .child(gear),
-                    ),
+                    .child(div().w(px(side_width)).flex_shrink_0()),
             )
     }
 
@@ -297,29 +250,36 @@ impl Desktop {
                 .unwrap_or_else(|| "笔记".into()),
         }
     }
-    fn page_header(&self, window: &mut Window) -> Div {
+    fn page_header(&self, cx: &mut Context<Self>) -> Div {
         let row = h_flex()
             .w_full()
             .min_w_0()
             .gap_3()
             .h_auto()
             .min_h(rems(3.5))
-            .flex_wrap()
+            .items_center()
+            .justify_between()
             .child(
                 accessible_text("page-title", self.page_title())
                     .role(Role::Heading)
-                    .when(
-                        f32::from(window.bounds().size.width) < 1000.
-                            || self.preferences.application().font_scale >= 1.5,
-                        |title| title.w_full().flex_shrink_0(),
-                    )
                     .flex_1()
                     .min_w_0()
                     .whitespace_normal()
-                    .text_size(TEXT_TITLE)
+                    .text_size(TEXT_DISPLAY)
                     .font_weight(FontWeight::SEMIBOLD),
-            );
-        v_flex().gap_2().child(row)
+            )
+            .when(self.library_controls_visible(cx), |row| {
+                row.child(
+                    quiet("refresh-library")
+                        .icon(icons::refresh())
+                        .accessibility_label("刷新课程库")
+                        .tooltip("刷新笔记")
+                        .loading(self.loading)
+                        .disabled(self.loading)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
+                )
+            });
+        v_flex().pt(px(24.)).gap_2().child(row)
     }
 }
 
@@ -339,21 +299,23 @@ impl Render for Desktop {
             .when(matches!(self.page, Page::Result | Page::Settings), |v| {
                 v.h_full().min_h_0()
             })
-            .when(self.reading, |v| {
-                v.child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(crate::motion::spinner("opening-note-spinner", cx))
-                        .child(
-                            accessible_text("opening-note", "正在打开笔记…")
-                                .role(Role::Status)
-                                .text_color(color(MUTED)),
-                        ),
-                )
-            })
+            .when(
+                self.reading && !matches!(self.page, Page::Library | Page::Result),
+                |v| {
+                    v.child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(crate::motion::spinner("opening-note-spinner", cx))
+                            .child(
+                                accessible_text("opening-note", "正在打开笔记…")
+                                    .role(Role::Status)
+                                    .text_color(color(MUTED)),
+                            ),
+                    )
+                },
+            )
             .child(content);
-        let content = crate::motion::enter(("page-enter", self.page as usize), content, cx);
         let topbar = self.shell_topbar(window, cx);
         let task_notice = self.task_result_notice(cx);
         let body = v_flex()
@@ -366,7 +328,7 @@ impl Render for Desktop {
                 v.child(
                     shell_column_for(self.page)
                         .flex_shrink_0()
-                        .child(self.page_header(window)),
+                        .child(self.page_header(cx)),
                 )
             })
             .when(self.page == Page::Library, |v| {
@@ -475,9 +437,9 @@ impl Render for Desktop {
             .track_focus(&self.root_focus)
             .tab_stop(false)
             .size_full()
-            .on_action(cx.listener(|this, _: &NewNote, window, cx| {
+            .on_action(cx.listener(|this, _: &ImportVideo, window, cx| {
                 if !window.has_active_dialog(cx) {
-                    this.new_note_from_action(window, cx);
+                    this.import_video_from_action(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &SearchContent, window, cx| {

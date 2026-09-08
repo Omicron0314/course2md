@@ -46,7 +46,7 @@ impl Render for FolderDialog {
 
 impl Desktop {
     pub fn begin_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_note(true, true, window, cx);
+        self.import_video_from_action(window, cx);
         if self.online && self.value(Field::Source, cx).is_empty() {
             self.inputs[&Field::Source].update(cx, |state, cx| state.focus(window, cx));
         }
@@ -62,6 +62,8 @@ impl Desktop {
         self.preview_generation = self.preview_generation.wrapping_add(1);
         self.subtitle_generation = self.subtitle_generation.wrapping_add(1);
         self.source_preview = None;
+        self.source_editor_open = false;
+        self.generation_options_open = false;
         self.source_candidates.clear();
         self.source_collection_title = None;
         self.subtitle_loading = false;
@@ -363,10 +365,8 @@ impl Desktop {
                         .font_weight(FontWeight::MEDIUM),
                 )
                 .child(
-                    Input::new(&self.inputs[&Field::FolderName])
+                    text_input(&self.inputs[&Field::FolderName])
                         .aria_label("文件夹名称")
-                        .min_h(rems(2.6))
-                        .h_auto()
                         .when(self.folder_error.is_some(), |v| {
                             v.border_color(color(DANGER))
                         }),

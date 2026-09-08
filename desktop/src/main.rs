@@ -205,6 +205,8 @@ struct Desktop {
     settings_return_focus: Option<FocusHandle>,
     result_tab: usize,
     settings_tab: usize,
+    source_editor_open: bool,
+    generation_options_open: bool,
     show_options: bool,
     show_export_options: bool,
     show_logs: bool,
@@ -246,7 +248,7 @@ struct Desktop {
 
 actions!(
     course2md_desktop,
-    [Quit, OpenSettings, OpenAbout, NewNote, SearchContent]
+    [Quit, OpenSettings, OpenAbout, ImportVideo, SearchContent]
 );
 
 impl Desktop {
@@ -471,6 +473,8 @@ impl Desktop {
             settings_return_focus: None,
             result_tab: 0,
             settings_tab: 4,
+            source_editor_open: false,
+            generation_options_open: false,
             show_options: false,
             show_export_options: false,
             show_logs: false,
@@ -560,18 +564,13 @@ impl Desktop {
         root
     }
 
-    fn new_note_from_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let previous = self
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.state.current_draft.clone());
-        self.new_note(true, false, window, cx);
-        if self.page == Page::New
-            && self
-                .workspace
-                .as_ref()
-                .is_some_and(|workspace| Some(&workspace.state.current_draft) != previous.as_ref())
-        {
+    fn import_video_from_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == Page::Settings && !self.close_service_editor(window, cx) {
+            return;
+        }
+        self.source_editor_open = true;
+        self.navigate(Page::New, cx);
+        if self.online {
             self.inputs[&Field::Source].update(cx, |input, cx| input.focus(window, cx));
         }
     }
@@ -628,8 +627,7 @@ impl Desktop {
                     .font_weight(FontWeight::MEDIUM),
             )
             .child(
-                Input::new(&self.inputs[&field])
-                    .min_h(rems(2.6))
+                theme::text_input(&self.inputs[&field])
                     .aria_label(label)
                     .when(error.is_some(), |input| {
                         input.border_color(theme::color(theme::DANGER))
@@ -1173,9 +1171,9 @@ fn main() {
                         this.open_settings(window, cx);
                     });
                 });
-                cx.on_action(move |_: &NewNote, cx| {
+                cx.on_action(move |_: &ImportVideo, cx| {
                     dispatch_desktop_action(&new_view, cx, |this, window, cx| {
-                        this.new_note_from_action(window, cx);
+                        this.import_video_from_action(window, cx);
                     });
                 });
                 cx.on_action(move |_: &SearchContent, cx| {
@@ -1225,7 +1223,7 @@ fn main() {
             KeyBinding::new("enter", NoAction, Some("Dialog")),
             KeyBinding::new("secondary-q", Quit, None),
             KeyBinding::new("secondary-,", OpenSettings, None),
-            KeyBinding::new("secondary-n", NewNote, None),
+            KeyBinding::new("secondary-n", ImportVideo, None),
             KeyBinding::new("secondary-f", SearchContent, None),
         ]);
         cx.set_menus([
@@ -1234,7 +1232,7 @@ fn main() {
                 gpui::MenuItem::action("设置…", OpenSettings),
                 gpui::MenuItem::action("退出 course2md", Quit),
             ]),
-            gpui::Menu::new("文件").items([gpui::MenuItem::action("生成笔记", NewNote)]),
+            gpui::Menu::new("文件").items([gpui::MenuItem::action("导入视频", ImportVideo)]),
             gpui::Menu::new("查找")
                 .items([gpui::MenuItem::action("搜索课程或当前笔记", SearchContent)]),
         ]);

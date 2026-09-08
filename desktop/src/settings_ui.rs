@@ -14,6 +14,7 @@ use gpui_component::{
     button::*,
     checkbox::Checkbox,
     input::{InputContentType, Textarea, TextareaState},
+    menu::{DropdownMenu, PopupMenuItem},
     switch::Switch,
 };
 use std::sync::{
@@ -110,9 +111,18 @@ impl State {
         ]
         .into_iter()
         .map(|field| {
+            let placeholder = match field {
+                EditField::Address => "https://api.example.com/v1",
+                EditField::Model => "服务商提供的模型 ID",
+                _ => "",
+            };
             (
                 field,
-                cx.new(|cx| InputState::new(window, cx).masked(field == EditField::Key)),
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(placeholder)
+                        .masked(field == EditField::Key)
+                }),
             )
         })
         .collect();
@@ -185,6 +195,120 @@ pub(super) fn field_label(
         .text_size(TEXT_BODY)
         .font_weight(FontWeight::MEDIUM)
 }
+
+/// A field and its control share a row; the control moves below the label when
+/// the pane cannot accommodate both columns. Widths follow the app's text scale.
+pub(super) fn settings_row(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    hint: &'static str,
+    control: impl IntoElement,
+) -> Div {
+    let id = id.into();
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .min_h(CONTROL_HEIGHT)
+        .items_center()
+        .flex_wrap()
+        .gap_4()
+        .child(
+            v_flex()
+                .flex_1()
+                .flex_basis(rems(160. / 14.))
+                .min_w(rems(140. / 14.))
+                .gap_1()
+                .child(field_label(id.clone(), label))
+                .when(!hint.is_empty(), |view| {
+                    view.child(
+                        text(SharedString::from(format!("{id:?}-hint")), hint)
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_size(TEXT_AUX)
+                            .text_color(color(MUTED)),
+                    )
+                }),
+        )
+        .child(
+            h_flex()
+                .w(rems(360. / 14.))
+                .max_w_full()
+                .min_w_0()
+                .flex_shrink_0()
+                .ml_auto()
+                .justify_start()
+                .items_center()
+                .child(control),
+        )
+}
+
+/// Section boundaries use hierarchy and space, without a second card outline.
+pub(super) fn settings_section(id: impl Into<ElementId>, title: &'static str, icon: Icon) -> Div {
+    v_flex().w_full().min_w_0().gap_4().child(
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(icon.size_5().flex_shrink_0().text_color(color(MUTED)))
+            .child(
+                text(id, title)
+                    .role(Role::Heading)
+                    .text_size(TEXT_TITLE)
+                    .font_weight(FontWeight::SEMIBOLD),
+            ),
+    )
+}
+
+pub(super) fn settings_detail_group(id: impl Into<ElementId>, title: &'static str) -> Div {
+    v_flex().w_full().min_w_0().gap_3().child(
+        field_label(id, title)
+            .role(Role::Heading)
+            .font_weight(FontWeight::SEMIBOLD),
+    )
+}
+
+/// Diagnostic values begin on a common reading axis. They can wrap and grow
+/// vertically without moving short values to the far edge of the window.
+pub(super) fn settings_detail_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    value: impl IntoElement,
+) -> Div {
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .min_h(rems(28. / 14.))
+        .items_start()
+        .flex_wrap()
+        .gap_x_4()
+        .gap_y_1()
+        .child(
+            field_label(id, label)
+                .w(rems(160. / 14.))
+                .max_w_full()
+                .flex_shrink_0()
+                .whitespace_normal(),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .flex_basis(rems(240. / 14.))
+                .min_w_0()
+                .items_start()
+                .child(value),
+        )
+}
+
+pub(super) fn settings_value(
+    id: impl Into<ElementId>,
+    value: impl Into<SharedString>,
+) -> Stateful<Div> {
+    text(id, value)
+        .w_full()
+        .min_w_0()
+        .whitespace_normal()
+        .text_size(TEXT_BODY)
+        .text_color(color(INK))
+}
 fn service_protocol_label(protocol: ServiceProtocol) -> &'static str {
     match protocol {
         ServiceProtocol::SpeechTranscriptions => "语音转录",
@@ -222,65 +346,28 @@ fn settings_tab_position(index: usize) -> usize {
 }
 
 fn group(id: &'static str, title: &'static str) -> Div {
-    v_flex()
-        .w_full()
-        .gap_4()
-        .pt_5()
-        .border_t_1()
-        .border_color(color(LINE))
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    match id {
-                        "language-settings" => icons::subtitles(),
-                        "asr-default-settings" | "speech-services-heading" => icons::microphone(),
-                        "ai-default-settings" | "ai-services-heading" => icons::science(),
-                        "export-default-settings" => icons::download(),
-                        "account-settings-heading" => icons::login(),
-                        "appearance-motion" => icons::tune(),
-                        "diagnostics-heading" => icons::settings(),
-                        _ => icons::info(),
-                    }
-                    .size_5()
-                    .text_color(color(MUTED)),
-                )
-                .child(
-                    text(id, title)
-                        .role(Role::Heading)
-                        .text_size(TEXT_TITLE)
-                        .font_weight(FontWeight::SEMIBOLD),
-                ),
-        )
+    let icon = match id {
+        "language-settings" => icons::subtitles(),
+        "asr-default-settings" | "speech-services-heading" => icons::microphone(),
+        "ai-default-settings" | "ai-services-heading" => icons::science(),
+        "export-default-settings" => icons::download(),
+        "account-settings-heading" => icons::login(),
+        "appearance-motion" => icons::tune(),
+        "diagnostics-heading" => icons::settings(),
+        _ => icons::info(),
+    };
+    settings_section(id, title, icon)
 }
 pub(super) fn preference(label: &'static str, hint: &'static str, control: Switch) -> Div {
-    h_flex()
-        .w_full()
-        .min_h(rems(44.0 / 14.0))
-        .gap_4()
-        .items_center()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(field_label(
-                    SharedString::from(format!("preference-label-{label}")),
-                    label,
-                ))
-                .when(!hint.is_empty(), |view| {
-                    view.child(
-                        text(SharedString::from(format!("preference-hint-{label}")), hint)
-                            .text_size(TEXT_AUX)
-                            .text_color(color(MUTED)),
-                    )
-                }),
-        )
-        .child(crate::focus_scroll::FocusRing::new(
+    settings_row(
+        SharedString::from(format!("preference-label-{label}")),
+        label,
+        hint,
+        crate::focus_scroll::FocusRing::new(
             SharedString::from(format!("preference-focus-{label}")),
             coral_switch(control).accessibility_label(label).p_2(),
-        ))
+        ),
+    )
 }
 
 impl Desktop {
@@ -332,7 +419,6 @@ impl Desktop {
             SharedString::from(format!("preference-reveal-{label}")),
             preference(label, hint, control),
         )
-        .when(self.page == Page::Settings, |row| row.max_w(CONTROL_GROUP_MAX))
     }
     fn setting_field(&self, field: EditField, label: &'static str, _cx: &App) -> Div {
         let error = self
@@ -358,7 +444,7 @@ impl Desktop {
                 .gap_2()
                 .child(field_label(("setting-field-label", field as usize), label))
                 .child(
-                    Input::new(&self.settings_ui.inputs[&field])
+                    text_input(&self.settings_ui.inputs[&field])
                         .w_full()
                         .when(field == EditField::Key, |input| {
                             input.content_type(InputContentType::Password)
@@ -382,6 +468,16 @@ impl Desktop {
                         text(("setting-error", field as usize), error)
                             .text_sm()
                             .text_color(color(DANGER)),
+                    )
+                })
+                .when(field == EditField::Address, |view| {
+                    view.child(
+                        text(
+                            "service-address-hint",
+                            "可填写基础地址或完整接口地址，需包含 http:// 或 https://。",
+                        )
+                        .text_size(TEXT_AUX)
+                        .text_color(color(MUTED)),
                     )
                 }),
         )
@@ -476,141 +572,55 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let navigation_width = if sidebar {
-            crate::views::SETTINGS_SIDEBAR_WIDTH
-        } else {
-            crate::views::settings_content_width(window)
-        };
-        let gap = if sidebar { 8. } else { 4. };
-        let tab_height = f32::from(window.rem_size()) * 40. / 14.;
-        let tab_width = if sidebar {
-            navigation_width
-        } else {
-            (navigation_width - gap * 4.).max(0.) / 5.
-        };
-        let position = crate::motion::value(
-            ("settings-navigation-position", usize::from(sidebar)),
-            settings_tab_position(self.settings_tab) as f32,
-            window,
-            cx,
-        );
-        let indicator = div()
-            .absolute()
-            .w(px(tab_width))
-            .h(px(tab_height))
-            .rounded(RADIUS_SMALL)
-            .bg(color(ACCENT_SOFT))
-            .when(sidebar, |view| {
-                view.left(px(0.)).top(px(position * (tab_height + gap)))
-            })
-            .when(!sidebar, |view| {
-                view.left(px(position * (tab_width + gap))).top(px(0.))
-            })
-            .child(
-                div()
-                    .absolute()
-                    .rounded_full()
-                    .bg(color(ACCENT))
-                    .when(sidebar, |view| {
-                        view.left(px(0.))
-                            .top(px(8.))
-                            .w(px(3.))
-                            .h(px(tab_height - 16.))
-                    })
-                    .when(!sidebar, |view| {
-                        view.left(px(12.))
-                            .bottom(px(0.))
-                            .w(px((tab_width - 24.).max(0.)))
-                            .h(px(3.))
-                    }),
-            );
-        gpui_base::Tabs::new("settings-tabs")
-            .aria_label("设置分类")
-            .key_context("SettingsTabs")
-            .on_action(cx.listener(|this, _: &NextSettingsTab, window, cx| {
-                let position = (settings_tab_position(this.settings_tab) + 1) % SETTINGS_TABS.len();
-                this.select_settings_tab(SETTINGS_TABS[position].0, window, cx)
+        let scale = f32::from(window.rem_size()) / 14.;
+        let short = !sidebar && crate::views::settings_content_width(window) < 640. * scale;
+        let group = SingleChoiceGroup::new("settings-tabs", "设置分类")
+            .tabs()
+            .full_width()
+            .options(SETTINGS_TABS.into_iter().map(|(index, label)| {
+                (
+                    index.to_string(),
+                    if short {
+                        match index {
+                            0 => "生成",
+                            1 => "服务",
+                            _ => label,
+                        }
+                    } else {
+                        label
+                    }
+                    .to_owned(),
+                )
             }))
-            .on_action(cx.listener(|this, _: &PreviousSettingsTab, window, cx| {
-                let position = (settings_tab_position(this.settings_tab) + SETTINGS_TABS.len() - 1)
-                    % SETTINGS_TABS.len();
-                this.select_settings_tab(SETTINGS_TABS[position].0, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FirstSettingsTab, window, cx| {
-                this.select_settings_tab(4, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &LastSettingsTab, window, cx| {
-                this.select_settings_tab(3, window, cx)
-            }))
-            .relative()
-            .flex()
-            .min_w_0()
-            .flex_shrink_0()
-            .gap(px(gap))
-            .when(sidebar, |view| {
-                view.flex_col().w(px(navigation_width)).self_start()
-            })
-            .when(!sidebar, |view| view.flex_row().w_full().h(px(tab_height)))
-            .child(indicator)
-            .children(
+            .selected(self.settings_tab.to_string())
+            .focus_handles(
                 SETTINGS_TABS
                     .into_iter()
-                    .enumerate()
-                    .map(|(position, (index, label))| {
-                        let selected = self.settings_tab == index;
-                        gpui_base::Tab::new(("settings-group", index))
-                            .accessibility_label(label)
-                            .set_position(position + 1, SETTINGS_TABS.len())
-                            .selected(selected)
-                            .track_focus(&self.settings_ui.tab_focus[index])
-                            .w(px(tab_width))
-                            .h(px(tab_height))
-                            .min_w_0()
-                            .flex_shrink_0()
-                            .px(px(12.))
-                            .text_size(TEXT_BODY)
-                            .rounded(RADIUS_SMALL)
-                            .border_2()
-                            .border_color(gpui::transparent_black())
-                            .bg(gpui::transparent_black())
-                            .text_color(color(if selected { ACCENT_STRONG } else { INK }))
-                            .when(selected, |tab| tab.font_weight(FontWeight::SEMIBOLD))
-                            .hover(move |style| {
-                                style.bg(color(HOVER_WARM)).border_color(color(if selected {
-                                    ACCENT
-                                } else {
-                                    HAIRLINE
-                                }))
-                            })
-                            .active(|style| {
-                                style
-                                    .bg(color(PRIMARY_ACTIVE))
-                                    .border_color(color(PRIMARY_ACTIVE))
-                                    .text_color(color(ON_PRIMARY))
-                            })
-                            .focus(|style| style.border_color(color(ACCENT)).shadow_sm())
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .min_w_0()
-                                    .gap(px(8.))
-                                    .items_center()
-                                    .when(!sidebar, |view| view.justify_center())
-                                    .child(settings_tab_icon(index).size(px(18.)).flex_shrink_0())
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .child(label),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_settings_tab(index, window, cx)
-                            }))
-                    }),
+                    .map(|(index, _)| self.settings_ui.tab_focus[index].clone()),
             )
-            .into_any_element()
+            .icon("4", settings_tab_icon(4))
+            .icon("0", settings_tab_icon(0))
+            .icon("1", settings_tab_icon(1))
+            .icon("2", settings_tab_icon(2))
+            .icon("3", settings_tab_icon(3))
+            .on_change(cx.listener(|this, value: &SharedString, window, cx| {
+                if let Ok(index) = value.parse() {
+                    this.select_settings_tab(index, window, cx);
+                }
+            }));
+        if sidebar {
+            div()
+                .w(px(crate::views::settings_sidebar_width(window)))
+                .flex_shrink_0()
+                .child(group.vertical())
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .flex_shrink_0()
+                .child(group)
+                .into_any_element()
+        }
     }
 
     pub fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -629,44 +639,15 @@ impl Desktop {
         let content_width = crate::views::settings_content_width(window);
         let layout_width = content_width
             + if sidebar {
-                crate::views::SETTINGS_SIDEBAR_WIDTH + crate::views::SETTINGS_COLUMN_GAP
+                crate::views::settings_sidebar_width(window) + crate::views::SETTINGS_COLUMN_GAP
             } else {
                 0.
             };
-        let origin = self.settings_origin.unwrap_or(Page::New);
-        let header = h_flex()
-            .w_full()
-            .min_w_0()
-            .flex_shrink_0()
-            .gap(px(24.))
-            .items_center()
-            .justify_between()
-            .child(
-                text("settings-page-title", "设置")
-                    .role(Role::Heading)
-                    .text_size(TEXT_DISPLAY)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
-            .child(
-                quiet("settings-back")
-                    .icon(icons::arrow_left())
-                    .label(match origin {
-                        Page::Library => "返回我的笔记",
-                        Page::Result => "返回阅读",
-                        Page::Task => "返回任务",
-                        _ => "返回工作台",
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if !this.close_service_editor(window, cx) {
-                            return;
-                        }
-                        this.settings_origin = None;
-                        this.navigate(origin, cx);
-                        if let Some(focus) = this.settings_return_focus.take() {
-                            focus.focus(window, cx);
-                        }
-                    })),
-            );
+        let header = text("settings-page-title", "设置")
+            .role(Role::Heading)
+            .text_size(TEXT_DISPLAY)
+            .font_weight(FontWeight::SEMIBOLD)
+            .flex_shrink_0();
         let navigation = self.settings_navigation(sidebar, window, cx);
         let mut panel = v_flex()
             .id("settings-panel")
@@ -676,17 +657,7 @@ impl Desktop {
             .min_w_0()
             .min_h_0()
             .w(px(content_width))
-            .gap(px(24.))
-            .child(
-                text(
-                    "settings-section-title",
-                    settings_tab_label(self.settings_tab),
-                )
-                .role(Role::Heading)
-                .flex_shrink_0()
-                .text_size(TEXT_TITLE)
-                .font_weight(FontWeight::SEMIBOLD),
-            );
+            .gap(px(24.));
         for group in [
             PreferenceGroup::Generation,
             PreferenceGroup::Services,
@@ -780,11 +751,7 @@ impl Desktop {
                 .w_full()
                 .overflow_y_scroll()
                 .track_scroll(&self.scrolls[Page::Settings as usize])
-                .child(crate::motion::enter(
-                    ("settings-page-transition", self.settings_tab),
-                    div().w_full().min_w_0().pb(px(24.)).child(content),
-                    cx,
-                )),
+                .child(div().w_full().min_w_0().pb(px(24.)).child(content)),
         );
         let body = div()
             .flex()
@@ -828,16 +795,19 @@ impl Desktop {
                     .text_sm()
                     .text_color(color(MUTED)),
             )
-            .child(field_label("subtitle-language-label", "字幕语言"))
-            .child(
+            .child(settings_row(
+                "subtitle-language-label",
+                "字幕语言",
+                "",
                 self.setting_choices("default-subtitle-language", "字幕语言")
                     .options([
                         ("", "自动"),
-                        ("zh-Hans", "简体中文"),
-                        ("zh-Hant", "繁體中文"),
-                        ("en", "English"),
-                        ("ja", "日本語"),
+                        ("zh-Hans", "简体"),
+                        ("zh-Hant", "繁體"),
+                        ("en", "英语"),
+                        ("ja", "日语"),
                     ])
+                    .full_width()
                     .selected(language.to_owned())
                     .on_change(cx.listener(|this, selected: &SharedString, window, cx| {
                         let mut next = this.generation_edit_base();
@@ -855,7 +825,7 @@ impl Desktop {
                                 });
                         }
                     })),
-            )
+            ))
             .when(language == "custom", |view| {
                 view.child(
                     text(
@@ -910,9 +880,13 @@ impl Desktop {
                 cx,
             ));
         let mut recognition = group("asr-default-settings", "语音识别")
-            .child(
+            .child(settings_row(
+                "asr-method-label",
+                "识别方式",
+                "",
                 self.setting_choices("default-asr-device", "默认语音识别方式")
                     .options([("", "自动"), ("local", "本机识别"), ("api", "在线语音服务")])
+                    .full_width()
                     .selected(if provider.is_empty() {
                         ""
                     } else if provider == "api" {
@@ -929,7 +903,7 @@ impl Desktop {
                         };
                         this.commit_generation(next, cx);
                     })),
-            )
+            ))
             .child(
                 text(
                     "asr-default-help",
@@ -1193,7 +1167,7 @@ impl Desktop {
             .child(
                 text(
                     "generation-default-scope",
-                    "用于新建笔记，也会更新当前未单独修改的选项。",
+                    "用于后续生成，也会更新当前未单独修改的选项。",
                 )
                 .text_sm()
                 .text_color(color(MUTED)),
@@ -1265,12 +1239,12 @@ impl Desktop {
             .asr_model
             .as_deref()
             .unwrap_or("qwen3-1.7b");
-        let mut models = vec![("qwen3-1.7b", "Qwen3-ASR 1.7B")];
+        let mut models = vec![("qwen3-1.7b", "Qwen3 1.7B")];
         if provider == Some(AsrProvider::Coreml)
             || (provider.is_none() && cfg!(target_os = "macos"))
             || provider == Some(AsrProvider::Npu)
         {
-            models.extend([("qwen3-0.6b", "Qwen3-ASR 0.6B"), ("whisper", "Whisper")]);
+            models.extend([("qwen3-0.6b", "Qwen3 0.6B"), ("whisper", "Whisper")]);
         }
         if provider == Some(AsrProvider::Npu) {
             models.extend([
@@ -1280,23 +1254,66 @@ impl Desktop {
             ]);
         }
         let known = models.iter().any(|(id, _)| *id == selected);
-        let mut view = v_flex()
-            .gap_2()
-            .child(field_label("local-model-heading", "识别模型"))
-            .child(
-                self.setting_choices("default-local-model", "默认识别模型")
-                    .options(models)
-                    .selected(selected.to_owned())
-                    .on_change(cx.listener(move |this, id: &SharedString, window, cx| {
-                        let mut next = this.generation_edit_base();
-                        next.options.asr_model = Some(id.to_string());
-                        next.local_model_draft = None;
-                        if this.commit_generation(next, cx) {
-                            this.settings_ui.inputs[&EditField::LocalModel]
-                                .update(cx, |input, cx| input.set_value(id.clone(), window, cx));
-                        }
-                    })),
-            );
+        let picker = if models.len() > 3 {
+            let current = selected.to_owned();
+            let label = models
+                .iter()
+                .find(|(id, _)| *id == selected)
+                .map(|(_, label)| *label)
+                .unwrap_or("自定义模型");
+            let entity = cx.entity().downgrade();
+            self.reveal_setting(
+                "default-local-model-menu-reveal",
+                control("default-local-model-menu")
+                    .w_full()
+                    .label(label)
+                    .child(Icon::new(IconName::ChevronDown).size_4())
+                    .dropdown_menu(move |menu, _, _| {
+                        models.iter().fold(menu, |menu, (id, label)| {
+                            let id = (*id).to_owned();
+                            let entity = entity.clone();
+                            menu.item(PopupMenuItem::new(*label).checked(id == current).on_click(
+                                move |_, window, cx| {
+                                    let _ =
+                                        entity.update(cx, |this, cx| {
+                                            let mut next = this.generation_edit_base();
+                                            next.options.asr_model = Some(id.clone());
+                                            next.local_model_draft = None;
+                                            if this.commit_generation(next, cx) {
+                                                this.settings_ui.inputs[&EditField::LocalModel]
+                                                    .update(cx, |input, cx| {
+                                                        input.set_value(id.clone(), window, cx);
+                                                    });
+                                            }
+                                        });
+                                },
+                            ))
+                        })
+                    }),
+            )
+            .into_any_element()
+        } else {
+            self.setting_choices("default-local-model", "默认识别模型")
+                .options(models)
+                .full_width()
+                .selected(selected.to_owned())
+                .on_change(cx.listener(move |this, id: &SharedString, window, cx| {
+                    let mut next = this.generation_edit_base();
+                    next.options.asr_model = Some(id.to_string());
+                    next.local_model_draft = None;
+                    if this.commit_generation(next, cx) {
+                        this.settings_ui.inputs[&EditField::LocalModel]
+                            .update(cx, |input, cx| input.set_value(id.clone(), window, cx));
+                    }
+                }))
+                .into_any_element()
+        };
+        let mut view = v_flex().w_full().min_w_0().gap_2().child(settings_row(
+            "local-model-heading",
+            "识别模型",
+            "",
+            picker,
+        ));
         if !known && provider != Some(AsrProvider::Npu) {
             view = view.child(text("unavailable-fixed-model", format!("已保留指定模型 {selected}，当前识别方式不支持此模型。请选择上面的实际模型。")).text_sm().text_color(color(DANGER)));
         }
@@ -2033,7 +2050,8 @@ impl Desktop {
         );
         view = view
             .child(self.setting_field(EditField::Name, "服务名称", cx))
-            .child(
+            .when(protocol.purpose() == ServicePurpose::Speech, |view| {
+                view.child(
                 v_flex()
                     .gap_2()
                     .child(field_label("service-protocol-heading", "接口类型"))
@@ -2072,6 +2090,7 @@ impl Desktop {
                             })),
                     ),
             )
+            })
             .child(self.setting_field(EditField::Address, "服务地址", cx));
         if let Ok(endpoint) =
             preferences::normalize_endpoint(&self.setting_value(EditField::Address, cx), protocol)
@@ -2688,7 +2707,11 @@ impl Desktop {
         }
         cx.notify();
     }
-    fn close_service_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn close_service_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Some(editor) = &self.settings_ui.editor {
             // Tests can stage a private edit, but cancelling never publishes
             // it. A cleanup failure cannot make these hidden records active.
@@ -2929,6 +2952,14 @@ impl Desktop {
             })
     }
     pub(crate) fn group_feedback(&self, group: PreferenceGroup, cx: &mut Context<Self>) -> Div {
+        self.group_feedback_with_retry_emphasis(group, false, cx)
+    }
+    pub(crate) fn group_feedback_with_retry_emphasis(
+        &self,
+        group: PreferenceGroup,
+        primary_retry: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut view = v_flex().w_full().min_w_0().gap_2();
         if let Some((message, error)) = self.settings_group_notice(group) {
             view = view.child(crate::motion::enter(
@@ -2967,8 +2998,14 @@ impl Desktop {
                 PreferenceGroup::Services => false,
             };
             if error && has_pending {
+                let id = ("retry-settings-save", group as usize);
+                let retry = if primary_retry {
+                    primary_pill(id)
+                } else {
+                    control(id)
+                };
                 view = view.child(
-                    control(("retry-settings-save", group as usize))
+                    retry
                         .icon(icons::refresh())
                         .label("重试保存")
                         .self_start()
@@ -3041,7 +3078,7 @@ impl Desktop {
                 .child(
                     text(
                         "storage-policy",
-                        "在这些位置保存笔记。更改默认位置只影响新建笔记。",
+                        "在这些位置保存笔记。更改默认位置只影响后续生成的笔记。",
                     )
                     .flex_1()
                     .min_w_0()
@@ -3078,7 +3115,7 @@ impl Desktop {
                         if let Some(workspace)=&mut this.workspace{
                             let result=workspace.state.library(&id).ok_or_else(||anyhow!("此位置已不在课程库中")).and_then(|library|tempfile::NamedTempFile::new_in(&library.root).map(drop).context("此位置暂时不能写入，请重新连接磁盘或恢复文件夹访问权限"))
                                 .and_then(|_|workspace.transaction(|state|{state.default_library=id.clone();Ok(())}));
-                            if let Err(error)=result{this.workspace_error=Some(format!("默认位置尚未更改：{error:#}"));}else{this.message=Some("新建笔记将使用此位置，已有笔记和任务保持原位置".into());}
+                            if let Err(error)=result{this.workspace_error=Some(format!("默认位置尚未更改：{error:#}"));}else{this.message=Some("后续生成的笔记将保存在此位置，已有笔记和任务保持原位置".into());}
                         }cx.notify();
                     }))))
                     .child(outline_pill(("move-storage-location",index)).icon(icons::storage()).label("移动课程库…").on_click(cx.listener(move|this,_,window,cx|this.begin_library_move(move_id.clone(),window,cx)))))
@@ -3202,41 +3239,37 @@ impl Desktop {
     }
     pub(crate) fn appearance_controls(&self, cx: &mut Context<Self>) -> Div {
         group("appearance-motion", "界面偏好")
-            .child(
-                v_flex()
-                    .w_full()
-                    .max_w(CONTROL_GROUP_MAX)
-                    .gap_2()
-                    .child(field_label("app-font-scale-label", "界面文字大小"))
-                    .child(
-                        self.setting_choices("app-font-scale", "应用文字大小")
-                            .options([1.0_f32, 1.25, 1.5, 2.0].into_iter().map(|scale| {
-                                (
-                                    (scale * 100.).round().to_string(),
-                                    format!("{}%", (scale * 100.) as u32),
-                                )
-                            }))
-                            .full_width()
-                            .selected(
-                                (self.preferences.application().font_scale * 100.)
-                                    .round()
-                                    .to_string(),
-                            )
-                            .on_change(cx.listener(
-                                move |this, selected: &SharedString, window, cx| {
-                                    let Ok(percent) = selected.parse::<f32>() else {
-                                        return;
-                                    };
-                                    let scale = percent / 100.;
-                                    let mut next = this.application_edit_base();
-                                    next.font_scale = scale;
-                                    if this.commit_application(next, cx) {
-                                        theme::apply_scale(scale, window, cx);
-                                    }
-                                },
-                            )),
+            .child(settings_row(
+                "app-font-scale-label",
+                "界面文字大小",
+                "",
+                self.setting_choices("app-font-scale", "应用文字大小")
+                    .options([1.0_f32, 1.25, 1.5, 2.0].into_iter().map(|scale| {
+                        (
+                            (scale * 100.).round().to_string(),
+                            format!("{}%", (scale * 100.) as u32),
+                        )
+                    }))
+                    .full_width()
+                    .selected(
+                        (self.preferences.application().font_scale * 100.)
+                            .round()
+                            .to_string(),
+                    )
+                    .on_change(
+                        cx.listener(move |this, selected: &SharedString, window, cx| {
+                            let Ok(percent) = selected.parse::<f32>() else {
+                                return;
+                            };
+                            let scale = percent / 100.;
+                            let mut next = this.application_edit_base();
+                            next.font_scale = scale;
+                            if this.commit_application(next, cx) {
+                                theme::apply_scale(scale, window, cx);
+                            }
+                        }),
                     ),
-            )
+            ))
             .child(
                 self.setting_preference(
                     "减少动态效果",
@@ -3248,15 +3281,27 @@ impl Desktop {
                             next.desktop.reduce_motion = *enabled;
                             this.commit_application(next, cx);
                         })),
-                )
-                .max_w(CONTROL_GROUP_MAX),
+                ),
             )
     }
     fn application_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let legacy = &self.settings_ui.legacy;
+        let show_legacy = legacy.problem.is_some()
+            || (!self.preferences.legacy_imported() && legacy.importable)
+            || self.settings_ui.legacy_status.is_some()
+            || self.settings_ui.legacy_preserved.is_some()
+            || self.settings_ui.legacy_action_detail.is_some();
         v_flex()
+            .w_full()
+            .min_w_0()
             .gap_6()
             .child(group("about-heading", "关于").child(self.about_page(cx)))
-            .child(self.legacy_migration_panel(cx))
+            .when(show_legacy, |view| {
+                view.child(
+                    group("legacy-settings-heading", "旧版设置")
+                        .child(self.legacy_migration_panel(cx)),
+                )
+            })
             .child(self.environment_page(window, cx))
             .into_any_element()
     }
@@ -3445,14 +3490,7 @@ impl Desktop {
         view
     }
     fn environment_page(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let mut card = v_flex()
-            .w_full()
-            .gap_4()
-            .p_4()
-            .bg(color(SURFACE))
-            .border_1()
-            .border_color(color(CARD_LINE))
-            .rounded(RADIUS_CARD);
+        let mut card = v_flex().w_full().min_w_0().gap_3();
         if let Some(e) = &self.environment {
             let speech_service = self.preferences.generation().options.provider
                 == Some(course2md::config::AsrProvider::Api);
@@ -3468,54 +3506,40 @@ impl Desktop {
             .into_iter()
             .enumerate()
             {
-                card = card.child(
-                    h_flex()
-                        .gap_3()
-                        .items_center()
-                        .flex_wrap()
-                        .child(
-                            match index {
-                                0 => icons::movie(),
-                                1 => icons::link(),
-                                _ => icons::microphone(),
-                            }
-                            .size_5()
-                            .text_color(color(MUTED)),
-                        )
-                        .child(
-                            text(("diagnostic-capability", index), label)
-                                .flex_1()
-                                .min_w_0(),
-                        )
-                        .child(
-                            badge(if ready {
-                                BadgeKind::Success
-                            } else if optional {
-                                BadgeKind::Neutral
-                            } else {
-                                BadgeKind::Warning
-                            })
-                            .child(if ready {
-                                "已就绪"
-                            } else if optional {
-                                "使用在线服务"
-                            } else {
-                                "需要设置"
-                            }),
-                        ),
-                );
+                card = card.child(settings_detail_row(
+                    ("diagnostic-capability", index),
+                    label,
+                    badge(if ready {
+                        BadgeKind::Success
+                    } else if optional {
+                        BadgeKind::Neutral
+                    } else {
+                        BadgeKind::Warning
+                    })
+                    .child(if ready {
+                        if index == 2 {
+                            "运行环境就绪"
+                        } else {
+                            "已就绪"
+                        }
+                    } else if optional {
+                        "使用在线服务"
+                    } else {
+                        "需要设置"
+                    }),
+                ));
             }
             if !e.engine {
                 card = card
                     .child(
-                        text(
+                        settings_value(
                             "repair-bundled-engine",
                             "转换程序暂时无法运行。重新安装应用后可继续，已有笔记会保留。",
                         )
-                        .text_sm(),
+                        .text_size(TEXT_AUX),
                     )
                     .child(
-                        outline_pill("download-repair-app")
+                        control("download-repair-app")
                             .icon(icons::download())
                             .label("下载安装包")
                             .self_start()
@@ -3525,48 +3549,22 @@ impl Desktop {
                     );
             }
             if !e.ffmpeg || !e.ffprobe || !e.ytdlp {
-                let (help, command) = if cfg!(target_os = "macos") {
-                    (
-                        "需要安装媒体工具。在终端运行以下命令，完成后重新检查。",
-                        "brew install ffmpeg yt-dlp",
-                    )
-                } else if cfg!(target_os = "windows") {
-                    (
-                        "需要安装媒体工具。在 PowerShell 运行以下命令，完成后重新检查。",
-                        "winget install Gyan.FFmpeg; winget install yt-dlp.yt-dlp",
-                    )
-                } else {
-                    (
-                        "使用系统软件包管理器安装 ffmpeg，并使用 pipx 安装下载工具，完成后重新检查。",
-                        "pipx install yt-dlp",
-                    )
-                };
                 card = card.child(
-                    v_flex()
-                        .gap_2()
-                        .p_3()
-                        .rounded(RADIUS_SMALL)
-                        .bg(color(WARNING_BG))
-                        .child(text("install-media-tools-help", help).text_sm())
-                        .child(text("install-media-tools-command", command).text_sm())
-                        .child(
-                            quiet("copy-media-install-command")
-                                .icon(icons::content_copy())
-                                .label("复制安装命令")
-                                .self_start()
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(command.into()))
-                                }),
-                        ),
+                    settings_value(
+                        "media-tools-unavailable",
+                        "部分媒体功能暂不可用。展开诊断详情可查看修复方式。",
+                    )
+                    .text_size(TEXT_AUX)
+                    .text_color(color(MUTED)),
                 );
             }
             if !speech_service && !(e.apple || e.npu || e.llama) {
                 card = card.child(
-                    text(
+                    settings_value(
                         "local-recognition-help",
                         "本机识别尚未就绪。展开详情查看安装方式，或在生成设置中选择在线语音服务。",
                     )
-                    .text_sm()
+                    .text_size(TEXT_AUX)
                     .text_color(color(MUTED)),
                 );
             }
@@ -3576,7 +3574,7 @@ impl Desktop {
                     .gap_2()
                     .items_center()
                     .child(crate::motion::spinner("diagnostic-checking-spinner", cx))
-                    .child(text("diagnostic-checking", "正在检查本机能力…").text_sm()),
+                    .child(settings_value("diagnostic-checking", "正在检查本机能力…")),
             );
         }
         let open = self.settings_ui.diagnostics_details_open;
@@ -3585,7 +3583,7 @@ impl Desktop {
                 .gap_2()
                 .flex_wrap()
                 .child(
-                    outline_pill("refresh-environment")
+                    control("refresh-environment")
                         .icon(icons::refresh())
                         .label("重新检查")
                         .loading(self.environment.is_none())
@@ -3607,8 +3605,9 @@ impl Desktop {
                         })),
                 ),
         );
-        let mut details = v_flex().gap_3();
+        let mut details = v_flex().w_full().min_w_0().gap_6().pt_3();
         if let Some(e) = &self.environment {
+            let mut programs = settings_detail_group("diagnostic-programs-heading", "所需程序");
             for (index, (name, found)) in [
                 ("转换程序", e.engine),
                 ("ffmpeg", e.ffmpeg),
@@ -3619,30 +3618,53 @@ impl Desktop {
             .into_iter()
             .enumerate()
             {
-                details =
-                    details.child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                if found {
-                                    icons::check_circle()
-                                } else {
-                                    icons::info()
-                                }
-                                .size_4()
-                                .text_color(color(if found { SUCCESS } else { MUTED })),
-                            )
-                            .child(
-                                text(
-                                    ("diagnostic-tool", index),
-                                    format!("{name} · {}", if found { "已安装" } else { "未安装" }),
-                                )
-                                .text_sm()
-                                .text_color(color(MUTED)),
-                            ),
-                    );
+                programs = programs.child(settings_detail_row(
+                    ("diagnostic-tool-label", index),
+                    name,
+                    settings_value(
+                        ("diagnostic-tool", index),
+                        if found { "已安装" } else { "未安装" },
+                    ),
+                ));
             }
+            if !e.ffmpeg || !e.ffprobe || !e.ytdlp {
+                let (help, command) = if cfg!(target_os = "macos") {
+                    (
+                        "在终端运行以下命令，安装完成后重新检查。",
+                        "brew install ffmpeg yt-dlp",
+                    )
+                } else if cfg!(target_os = "windows") {
+                    (
+                        "在 PowerShell 运行以下命令，安装完成后重新检查。",
+                        "winget install Gyan.FFmpeg; winget install yt-dlp.yt-dlp",
+                    )
+                } else {
+                    (
+                        "使用系统软件包管理器安装 ffmpeg，并使用 pipx 安装下载工具，完成后重新检查。",
+                        "pipx install yt-dlp",
+                    )
+                };
+                programs = programs.child(settings_detail_row(
+                    "media-tools-repair-label",
+                    "修复方式",
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .child(settings_value("install-media-tools-help", help))
+                        .child(settings_value("install-media-tools-command", command))
+                        .child(
+                            quiet("copy-media-install-command")
+                                .icon(icons::content_copy())
+                                .label("复制安装命令")
+                                .self_start()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(command.into()))
+                                }),
+                        ),
+                ));
+            }
+            details = details.child(programs);
         }
         details = details.child(self.model_diagnostics_panel(window, cx));
         card = card.child(crate::motion::disclosure(

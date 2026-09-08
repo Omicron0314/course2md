@@ -1,7 +1,69 @@
 //! Appearance preferences with real palette previews and immediate, durable selection.
 use super::*;
 use crate::palettes::{ALL, Appearance, PaletteId};
+use crate::preferences::PreferenceGroup;
+use crate::settings_ui::{field_label, settings_row};
 use crate::theme::*;
+
+const PALETTE_GAP: f32 = 16.;
+const PICKER_GUTTER: f32 = 24.;
+const PICKER_PADDING: f32 = 24.;
+const PICKER_BORDER: f32 = 1.;
+const PICKER_MAX_WIDTH: f32 = 920.;
+
+fn picker_width(window: &Window) -> f32 {
+    (f32::from(window.viewport_size().width) - PICKER_GUTTER * 2.).clamp(0., PICKER_MAX_WIDTH)
+}
+
+fn picker_inner_width(window: &Window) -> f32 {
+    // The dialog below owns this width and padding. Its scrollbar overlays the
+    // body, so there is no second page-width estimate or scrollbar deduction.
+    (picker_width(window) - (PICKER_PADDING + PICKER_BORDER) * 2.).max(0.)
+}
+
+fn palette_minimum_width(palettes: &[PaletteId], window: &Window) -> f32 {
+    let mut style = window.text_style();
+    style.font_weight = FontWeight::SEMIBOLD;
+    let label_width = palettes
+        .iter()
+        .map(|palette| {
+            let label = SharedString::from(palette.name());
+            f32::from(
+                window
+                    .text_system()
+                    .shape_line(
+                        label.clone(),
+                        window.rem_size(),
+                        &[style.to_run(label.len())],
+                        None,
+                    )
+                    .width,
+            )
+        })
+        .fold(0., f32::max);
+    // Match the actual footer: 12px padding, 8px gap, an 18px marker and the
+    // card's 2px border. A larger font changes the required width immediately.
+    (label_width + 24. + 8. + 18. + 4.).max(168.)
+}
+
+fn palette_columns(width: f32, minimum_width: f32, maximum: u16) -> u16 {
+    (((width + PALETTE_GAP) / (minimum_width + PALETTE_GAP)).floor() as u16).clamp(1, maximum)
+}
+
+struct PalettePicker {
+    desktop: Entity<Desktop>,
+    dark: bool,
+    scroll: ScrollHandle,
+    _observation: Subscription,
+}
+
+impl Render for PalettePicker {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.desktop.update(cx, |desktop, cx| {
+            desktop.palette_picker_content(self.dark, self.scroll.clone(), window, cx)
+        })
+    }
+}
 
 fn sample(palette: PaletteId) -> Div {
     let p = palette.colors();
@@ -86,12 +148,72 @@ fn sample(palette: PaletteId) -> Div {
         )
 }
 
+fn palette_choice(palette: PaletteId, selected: bool, amount: f32) -> gpui_base::Button {
+    selection_card(("palette", palette as usize), selected, amount)
+        .w_full()
+        .p(px(0.))
+        .overflow_hidden()
+        .accessibility_label(format!(
+            "{}，{}{}",
+            palette.name(),
+            if palette.is_dark() {
+                "深色主题"
+            } else {
+                "浅色主题"
+            },
+            if selected { "，已选择" } else { "" }
+        ))
+        .when(cfg!(test), |card| {
+            card.debug_selector(move || format!("palette-card-{}", palette as usize).into())
+        })
+        .child(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .text_left()
+                .child(sample(palette))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_h(rems(3.43))
+                        .flex_1()
+                        .gap(px(8.))
+                        .p(px(12.))
+                        .items_center()
+                        .bg(theme::blend(color(SURFACE), color(ACCENT_SOFT), amount))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(TEXT_BODY)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(color(INK))
+                                .when(cfg!(test), |label| {
+                                    label.debug_selector(move || {
+                                        format!("palette-label-{}", palette as usize).into()
+                                    })
+                                })
+                                .child(palette.name()),
+                        )
+                        .child(
+                            icons::check_circle()
+                                .text_color(color(ACCENT))
+                                .size(px(18.))
+                                .opacity(amount)
+                                .flex_shrink_0(),
+                        ),
+                ),
+        )
+}
+
 impl Desktop {
     fn palette_grid(
         &self,
         dark: bool,
         selected_palette: PaletteId,
         width: f32,
+        scroll: ScrollHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -99,22 +221,14 @@ impl Desktop {
             .into_iter()
             .filter(|id| id.is_dark() == dark)
             .collect::<Vec<_>>();
-        let rem = f32::from(window.rem_size());
-        let minimum_card_width = if dark { 200. } else { 180. };
-        let available =
-            (((width + 16.) / (minimum_card_width * rem / 14. + 16.)).floor() as usize).clamp(1, 4);
-        // Keep complete rows when four/six presets do not divide into the
-        // available columns, rather than leaving one isolated preview below.
-        let columns =
-            if (cards.len() == 4 && available == 3) || (cards.len() == 6 && available == 4) {
-                available - 1
-            } else {
-                available
-            };
-        let mut grid = v_flex().w_full().min_w_0().gap(px(16.));
-        for row in cards.chunks(columns) {
-            let mut line = h_flex().w_full().min_w_0().gap(px(16.)).items_stretch();
-            for &palette in row {
+        let columns = palette_columns(width, palette_minimum_width(&cards, window), 4);
+        div()
+            .grid()
+            .grid_cols(columns)
+            .w_full()
+            .min_w_0()
+            .gap(px(PALETTE_GAP))
+            .children(cards.into_iter().map(|palette| {
                 let selected = palette == selected_palette;
                 let amount = crate::motion::value(
                     ("palette-selection", palette as usize),
@@ -122,78 +236,176 @@ impl Desktop {
                     window,
                     cx,
                 );
-                line = line.child(
-                    selection_card(("palette", palette as usize), selected, amount)
-                        .flex_1()
-                        .p(px(0.))
-                        .overflow_hidden()
-                        .accessibility_label(format!(
-                            "{}，{}{}",
-                            palette.name(),
-                            if dark { "深色主题" } else { "浅色主题" },
-                            if selected { "，已选择" } else { "" }
-                        ))
-                        .child(
-                            v_flex()
-                                .w_full()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .text_left()
-                                .child(sample(palette))
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_h(rems(3.43))
-                                        .flex_1()
-                                        .gap(px(8.))
-                                        .p(px(12.))
-                                        .items_center()
-                                        .bg(theme::blend(
-                                            color(SURFACE),
-                                            color(ACCENT_SOFT),
-                                            amount,
-                                        ))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .text_size(TEXT_BODY)
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(color(INK))
-                                                .child(palette.name()),
-                                        )
-                                        .child(
-                                            icons::check_circle()
-                                                .text_color(color(ACCENT))
-                                                .size(px(18.))
-                                                .opacity(amount)
-                                                .flex_shrink_0(),
-                                        ),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let mut next = this.application_edit_base();
+                crate::focus_scroll::RevealFocus::new(
+                    ("palette-choice-focus", palette as usize),
+                    palette_choice(palette, selected, amount).on_click(cx.listener(
+                        move |this, _, window, cx| {
                             let previous = if dark {
-                                next.appearance.dark
+                                this.preferences.application().appearance.dark
                             } else {
-                                next.appearance.light
+                                this.preferences.application().appearance.light
                             };
                             if previous == palette {
                                 return;
                             }
+                            let mut next = this.application_edit_base();
                             next.appearance.select(palette);
                             if this.commit_application(next, cx) {
                                 window.refresh();
                             }
-                        })),
-                );
-            }
-            for _ in row.len()..columns {
-                line = line.child(div().flex_1());
-            }
-            grid = grid.child(line);
-        }
-        grid
+                        },
+                    )),
+                    scroll.clone(),
+                )
+            }))
+    }
+
+    fn palette_picker_content(
+        &self,
+        dark: bool,
+        scroll: ScrollHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let preference = &self.preferences.application().appearance;
+        let grid = self.palette_grid(
+            dark,
+            if dark {
+                preference.dark
+            } else {
+                preference.light
+            },
+            picker_inner_width(window),
+            scroll.clone(),
+            window,
+            cx,
+        );
+        let available_height = (f32::from(window.viewport_size().height)
+            - PICKER_GUTTER * 2.
+            - PICKER_PADDING * 2.
+            - PICKER_BORDER * 2.
+            - f32::from(window.rem_size()) * 3.
+            - 16.)
+            .max(120.);
+        let save_failed = self
+            .settings_group_notice(PreferenceGroup::Application)
+            .is_some_and(|(_, error)| error);
+        let finish = if save_failed {
+            outline_pill("finish-palette-picker")
+                .icon(icons::close())
+                .label("关闭")
+        } else {
+            primary_pill("finish-palette-picker")
+                .icon(icons::check_circle())
+                .label("完成")
+        };
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .max_h(px(available_height))
+            .gap(px(16.))
+            .when(save_failed, |view| {
+                view.child(
+                    self.group_feedback_with_retry_emphasis(PreferenceGroup::Application, true, cx)
+                        .flex_shrink_0(),
+                )
+            })
+            .child(
+                div()
+                    .id(("palette-picker-scroll", usize::from(dark)))
+                    .w_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .child(grid),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .flex_shrink_0()
+                    .child(finish.on_click(|_, window, cx| window.close_dialog(cx))),
+            )
+    }
+
+    fn open_palette_picker(&mut self, dark: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let desktop = cx.entity();
+        let content = cx.new(|cx| PalettePicker {
+            _observation: cx.observe(&desktop, |_, _, cx| cx.notify()),
+            desktop,
+            dark,
+            scroll: ScrollHandle::new(),
+        });
+        window.open_dialog(cx, move |dialog, window, _| {
+            dialog
+                .title(if dark { "深色主题" } else { "浅色主题" })
+                .w(px(picker_width(window)))
+                .p(px(PICKER_PADDING))
+                .margin_top(px(PICKER_GUTTER))
+                .child(content.clone())
+        });
+    }
+
+    fn palette_preset(&self, dark: bool, palette: PaletteId, cx: &mut Context<Self>) -> Div {
+        let label = if dark { "深色主题" } else { "浅色主题" };
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap(px(8.))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(
+                        if dark { icons::moon() } else { icons::sun() }
+                            .size(px(18.))
+                            .text_color(color(MUTED)),
+                    )
+                    .child(field_label(
+                        ("palette-preset-label", usize::from(dark)),
+                        label,
+                    )),
+            )
+            .child(
+                outline_pill(("palette-preset", usize::from(dark)))
+                    .w_full()
+                    .min_w_0()
+                    .h_auto()
+                    .p(px(0.))
+                    .rounded(RADIUS_CARD)
+                    .overflow_hidden()
+                    .accessibility_label(format!("{label}：{}，选择主题", palette.name()))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_left()
+                            .child(sample(palette))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .min_h(rems(3.43))
+                                    .gap(px(8.))
+                                    .p(px(12.))
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(TEXT_BODY)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(palette.name()),
+                                    )
+                                    .child(icons::chevron_down().size(px(18.)).flex_shrink_0()),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_palette_picker(dark, window, cx);
+                    })),
+            )
     }
 
     pub(crate) fn appearance_page(
@@ -230,46 +442,143 @@ impl Desktop {
                     window.refresh();
                 }
             }));
-        let mut view = v_flex()
+        // Both stored values remain in place in every appearance mode. Measure
+        // against every supported name so selecting a longer one cannot move
+        // the preference rows below these two fields.
+        let columns = palette_columns(width, palette_minimum_width(&ALL, window), 2);
+        v_flex()
             .w_full()
             .min_w_0()
-            .gap(px(28.))
-            .child(div().w_full().max_w(CONTROL_GROUP_MAX).child(modes));
-        // The two saved palettes remain editable without turning system mode
-        // off. Section labels identify appearance; cards only need their names.
-        for dark in [false, true] {
-            if (preference.mode == Appearance::Light && dark)
-                || (preference.mode == Appearance::Dark && !dark)
-            {
-                continue;
-            }
-            view = view.child(
+            .gap(px(24.))
+            .child(settings_row("appearance-mode-row", "外观模式", "", modes))
+            .child(
                 v_flex()
                     .w_full()
                     .min_w_0()
                     .gap(px(16.))
                     .child(
-                        accessible_text(
-                            ("palette-group", usize::from(dark)),
-                            if dark { "深色主题" } else { "浅色主题" },
-                        )
-                        .role(Role::Heading)
-                        .text_size(TEXT_TITLE)
-                        .font_weight(FontWeight::SEMIBOLD),
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(icons::palette().size(px(18.)).text_color(color(MUTED)))
+                            .child(
+                                accessible_text("palette-presets-heading", "主题配色")
+                                    .role(Role::Heading)
+                                    .text_size(TEXT_TITLE)
+                                    .font_weight(FontWeight::SEMIBOLD),
+                            ),
                     )
-                    .child(self.palette_grid(
-                        dark,
-                        if dark {
-                            preference.dark
-                        } else {
-                            preference.light
-                        },
-                        width,
-                        window,
-                        cx,
-                    )),
-            );
+                    .child(
+                        div()
+                            .grid()
+                            .grid_cols(columns)
+                            .w_full()
+                            .min_w_0()
+                            .gap(px(PALETTE_GAP))
+                            .child(self.palette_preset(false, preference.light, cx))
+                            .child(self.palette_preset(true, preference.dark, cx)),
+                    ),
+            )
+            .child(self.appearance_controls(cx))
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PALETTE_GAP, palette_choice, palette_columns, palette_minimum_width};
+    use crate::palettes::ALL;
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
+
+    struct PaletteLayoutHarness {
+        width: f32,
+        rem: f32,
+    }
+
+    impl Render for PaletteLayoutHarness {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            window.set_rem_size(px(self.rem));
+            let cards = ALL
+                .into_iter()
+                .filter(|id| id.is_dark())
+                .collect::<Vec<_>>();
+            let columns = palette_columns(self.width, palette_minimum_width(&cards, window), 4);
+            div()
+                .w(px(self.width))
+                .grid()
+                .grid_cols(columns)
+                .gap(px(PALETTE_GAP))
+                .debug_selector(|| "palette-layout-grid".into())
+                .children(
+                    cards
+                        .into_iter()
+                        .map(|palette| palette_choice(palette, false, 0.)),
+                )
         }
-        view.child(self.appearance_controls(cx)).into_any_element()
+    }
+
+    fn inspect_palette_layout(cx: &mut VisualTestContext) -> usize {
+        let grid = cx.debug_bounds("palette-layout-grid").unwrap();
+        let mut first_row = 0;
+        for palette in ALL.into_iter().filter(|id| id.is_dark()) {
+            let card = cx
+                .debug_bounds(Box::leak(
+                    format!("palette-card-{}", palette as usize).into_boxed_str(),
+                ))
+                .unwrap();
+            let label = cx
+                .debug_bounds(Box::leak(
+                    format!("palette-label-{}", palette as usize).into_boxed_str(),
+                ))
+                .unwrap();
+            assert!(card.left() >= grid.left() && card.right() <= grid.right() + px(0.5));
+            assert!(
+                card.size.height >= px(144.),
+                "the preview keeps its natural height"
+            );
+            let required = cx.update(|window, _| palette_minimum_width(&[palette], window) - 54.);
+            assert!(
+                label.size.width + px(0.5) >= px(required),
+                "{} needs room for its name",
+                palette.name()
+            );
+            if card.top() == grid.top() {
+                first_row += 1;
+            }
+        }
+        first_row
+    }
+
+    #[gpui::test]
+    fn palette_names_reflow_on_the_first_font_and_width_change(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| PaletteLayoutHarness {
+            width: 760.,
+            rem: 14.,
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let original_columns = inspect_palette_layout(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.rem = 28.;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        let large_columns = inspect_palette_layout(cx);
+        assert!(
+            large_columns < original_columns,
+            "200% text must reduce columns before labels collide"
+        );
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.width = 520.;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert!(inspect_palette_layout(cx) <= large_columns);
     }
 }

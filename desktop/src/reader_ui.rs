@@ -1488,68 +1488,22 @@ impl Desktop {
             ));
             page = page.child(meta_version);
         }
-        let mut toolbar = h_flex().gap_2().flex_wrap().items_center().child(reveal(
-            "reveal-reader-tabs",
-            (gpui_base::Tabs::new("reader-tabs")
-                .key_context("ReaderViews")
-                .on_action(cx.listener(|this, _: &NextReaderView, window, cx| {
-                    this.select_reader_view((this.result_tab + 1) % 2, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &PreviousReaderView, window, cx| {
-                    this.select_reader_view((this.result_tab + 1) % 2, window, cx)
-                }))
-                .flex()
-                .flex_shrink_0()
-                .gap(px(2.))
-                .p(px(2.))
-                .rounded_full()
-                .bg(color(SEGMENT_TRACK))
-                .children(
-                    ["笔记", "截图"]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, label)| {
-                            let selected = self.result_tab == index;
-                            gpui_base::Tab::new(("reader-view", index))
-                                .selected(selected)
-                                .accessibility_label(label)
-                                .set_position(index + 1, 2)
-                                .track_focus(&self.reader_ui.view_focus[index])
-                                .tab_stop(selected)
-                                .min_h(rems(2.286))
-                                .h_auto()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .px(px(14.))
-                                .py(px(2.))
-                                .text_size(TEXT_BODY)
-                                .rounded(RADIUS_PILL)
-                                .border_2()
-                                .border_color(transparent_black())
-                                .text_color(color(if selected { INK } else { GRAY }))
-                                .when(selected, |tab| {
-                                    tab.bg(color(SURFACE))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .shadow(shadow_segment_selected())
-                                })
-                                .focus(|style| style.border_color(color(INK)).shadow_sm())
-                                .child(
-                                    if index == 0 {
-                                        icons::article()
-                                    } else {
-                                        icons::image()
-                                    }
-                                    .size(px(18.)),
-                                )
-                                .child(label)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.select_reader_view(index, window, cx)
-                                }))
-                        }),
-                ))
-            .into_any_element(),
-        ));
+        let mut toolbar = h_flex().gap_2().flex_wrap().items_center().child(
+            SingleChoiceGroup::new("reader-tabs", "阅读视图")
+                .tabs()
+                .options([("note", "笔记"), ("images", "截图")])
+                .icon("note", icons::article())
+                .icon("images", icons::image())
+                .focus_handles(self.reader_ui.view_focus.iter().cloned())
+                .selected(if self.result_tab == 0 {
+                    "note"
+                } else {
+                    "images"
+                })
+                .on_change(cx.listener(|this, selected: &SharedString, window, cx| {
+                    this.select_reader_view(usize::from(selected.as_ref() == "images"), window, cx);
+                })),
+        );
         toolbar = toolbar.child(div().flex_1());
         toolbar = toolbar.child(reveal(
             "reveal-find-note",
@@ -1565,8 +1519,6 @@ impl Desktop {
             toolbar = toolbar.child(reveal(
                 "reveal-note-contents",
                 (control("note-contents")
-                    .rounded(RADIUS_SMALL)
-                    .min_h(rems(2.286))
                     .px(px(12.))
                     .bg(color(if toc_on { BADGE_PROGRESS_BG } else { SURFACE }))
                     .border_color(color(CONTROL))
@@ -1675,7 +1627,6 @@ impl Desktop {
             "reveal-note-files",
             (control("note-files")
                 .ghost()
-                .rounded(RADIUS_SMALL)
                 .icon(IconName::FolderOpen)
                 .accessibility_label("在文件夹中显示这份笔记")
                 .tooltip("显示笔记文件")
@@ -1836,7 +1787,11 @@ impl Desktop {
                         .px(px(12.))
                         .py(px(6.))
                         .min_h(rems(2.571))
-                        .child(icons::search().size(px(16.)).text_color(color(GRAY)))
+                        .child(
+                            icons::search()
+                                .size(rems(18. / 14.))
+                                .text_color(color(GRAY)),
+                        )
                         .child(
                             div().min_w(rems(6.)).flex_1().child(reveal(
                                 "reveal-reader-find",
@@ -2459,6 +2414,8 @@ impl Desktop {
                                             .ghost()
                                             .p_0()
                                             .w_full()
+                                            .h_auto()
+                                            .min_h(px(0.))
                                             .rounded_t(RADIUS_CARD)
                                             .rounded_b(px(0.))
                                             .aspect_ratio(16. / 9.)
@@ -2615,6 +2572,8 @@ impl Desktop {
                             .ghost()
                             .p_0()
                             .w_full()
+                            .h_auto()
+                            .min_h(px(0.))
                             .rounded_t(RADIUS_CARD)
                             .rounded_b(px(0.))
                             .aspect_ratio(16. / 9.)

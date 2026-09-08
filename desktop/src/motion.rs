@@ -64,6 +64,28 @@ pub fn value(id: impl Into<ElementId>, target: f32, window: &mut Window, cx: &mu
     value
 }
 
+/// Selection starts and ends at rest; no overshoot or abrupt launch.
+pub fn selection_value(
+    id: impl Into<ElementId>,
+    target: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
+    let id = id.into();
+    #[cfg(feature = "performance")]
+    let trace_id = id.clone();
+    let amount = gpui_base::transition(
+        id,
+        target,
+        gpui_base::Transition::new(Duration::from_millis(180)).ease(|t| t * t * (3. - 2. * t)),
+        window,
+        cx,
+    );
+    #[cfg(feature = "performance")]
+    crate::performance::record_motion(trace_id, target, amount);
+    amount
+}
+
 pub fn progress(
     id: impl Into<ElementId>,
     progress: f32,

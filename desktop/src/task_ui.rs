@@ -300,47 +300,6 @@ impl Desktop {
         cx.notify();
     }
 
-    pub fn new_note(
-        &mut self,
-        online: bool,
-        inherit_folder: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
-        if let Some(workspace) = &mut self.workspace {
-            let destination = if inherit_folder {
-                self.folder_filter.filter(|id| *id != 0).and_then(|folder| {
-                    workspace
-                        .state
-                        .libraries
-                        .iter()
-                        .find(|lib| lib.root == self.library_root)
-                        .map(|lib| (lib.id.clone(), folder))
-                })
-            } else {
-                None
-            };
-            match workspace.transaction(|state| {
-                state.reset_input(online, defaults, destination);
-                Ok(())
-            }) {
-                Ok(()) => {
-                    self.invalidate_source();
-                    self.completed_source = None;
-                    self.show_options = false;
-                    self.show_export_options = false;
-                    self.show_engine_details = false;
-                    self.message = None;
-                    self.restore_draft(window, cx);
-                    self.page = Page::New;
-                }
-                Err(error) => self.workspace_error = Some(format!("尚未开始新笔记：{error:#}")),
-            }
-        }
-        cx.notify();
-    }
-
     pub fn switch_source_kind(
         &mut self,
         online: bool,
@@ -565,7 +524,14 @@ impl Desktop {
             Ok(plan) => plan,
             Err(error) => {
                 self.source_validation = Some(format!("{error:#}"));
+                let subtitle_attention = self.subtitle_attention_required();
+                if self.source_preview.is_some() && !subtitle_attention {
+                    // Name, destination and processing controls must exist in
+                    // the next frame before a validation error focuses them.
+                    self.generation_options_open = true;
+                }
                 let field = if self.source_preview.is_some()
+                    && !subtitle_attention
                     && self.value(Field::Title, cx).trim().is_empty()
                 {
                     Some(Field::Title)
@@ -575,9 +541,11 @@ impl Desktop {
                     None
                 };
                 if let Some(field) = field {
-                    self.inputs[&field].update(cx, |input, cx| input.focus(window, cx));
+                    let input = self.inputs[&field].clone();
+                    window.on_next_frame(move |window, cx| {
+                        input.update(cx, |input, cx| input.focus(window, cx));
+                    });
                 }
-                self.show_options = true;
                 cx.notify();
                 return;
             }
@@ -1160,13 +1128,13 @@ impl Desktop {
                 )
                 .child(accessible_text(
                     "task-empty-description",
-                    "选择视频后，处理进度和生成结果会保留在这里。",
+                    "开始生成后，可以在这里查看处理进度和生成结果",
                 ))
                 .child(
                     primary_pill("task-new")
-                        .icon(icons::add())
-                        .label("生成笔记")
-                        .on_click(cx.listener(|this, _, window, cx| this.begin_add(window, cx))),
+                        .icon(icons::arrow_left())
+                        .label("返回工作台")
+                        .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::New, cx))),
                 )
                 .into_any_element();
         }
@@ -1240,6 +1208,8 @@ impl Desktop {
                     }
                 ))
                 .w_full()
+                .h_auto()
+                .min_h(px(0.))
                 .gap_3()
                 .items_center()
                 .cursor_pointer()
