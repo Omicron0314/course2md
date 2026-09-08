@@ -1,0 +1,124 @@
+{
+  "source_commit": "0382e6fd6328",
+  "build": "release with opt-in performance instrumentation",
+  "scope": "14+ native titlebar/settings/appearance interactions; local model and service detail views; not full production load",
+  "draw": {
+    "count": 725,
+    "p50_ms": 3.817471,
+    "p95_ms": 5.758975,
+    "p99_ms": 14.196735,
+    "max_ms": 34.701311,
+    "over_16_7_ms": 6,
+    "over_100_ms": 0
+  },
+  "input_to_present": {
+    "count": 20,
+    "p50_ms": 20.332543,
+    "p95_ms": 31.277055,
+    "p99_ms": 35.356671,
+    "max_ms": 35.356671,
+    "over_16_7_ms": 14,
+    "over_100_ms": 0
+  },
+  "intermediate_values": 55,
+  "examples": [
+    {
+      "id": "main-navigation-selection-position",
+      "target": 3.0,
+      "value": 1.0,
+      "elapsed_ms": 2125.940417
+    },
+    {
+      "id": "main-navigation-selection-position",
+      "target": 3.0,
+      "value": 1.3700741529464722,
+      "elapsed_ms": 2175.4025420000003
+    },
+    {
+      "id": "main-navigation-selection-position",
+      "target": 3.0,
+      "value": 1.881653904914856,
+      "elapsed_ms": 2208.824458
+    },
+    {
+      "id": "main-navigation-selection-position",
+      "target": 3.0,
+      "value": 2.6598868370056152,
+      "elapsed_ms": 2258.765417
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 1.0,
+      "value": 0.0,
+      "elapsed_ms": 3466.3876670000004
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 1.0,
+      "value": 0.13834257423877716,
+      "elapsed_ms": 3508.459083
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 1.0,
+      "value": 0.38277214765548706,
+      "elapsed_ms": 3542.202292
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 1.0,
+      "value": 0.7826828956604004,
+      "elapsed_ms": 3592.1990419999997
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 1.0,
+      "value": 0.9983867406845093,
+      "elapsed_ms": 3642.180375
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 2.0,
+      "value": 1.0,
+      "elapsed_ms": 4142.588583000001
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 2.0,
+      "value": 1.1864533424377441,
+      "elapsed_ms": 4192.2635
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 2.0,
+      "value": 1.4446989297866821,
+      "elapsed_ms": 4225.9397500000005
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 2.0,
+      "value": 1.7168049812316895,
+      "elapsed_ms": 4259.397875000001
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 2.0,
+      "value": 1.9835686683654785,
+      "elapsed_ms": 4308.914583
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 1.0,
+      "value": 2.0,
+      "elapsed_ms": 4818.585375
+    },
+    {
+      "id": "appearance-mode-selection-position",
+      "target": 1.0,
+      "value": 1.8706438541412354,
+      "elapsed_ms": 4859.1309169999995
+    }
+  ],
+  "idle_samples_without_frame_events": 158,
+  "samples": 490
+}
