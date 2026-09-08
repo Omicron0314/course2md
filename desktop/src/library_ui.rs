@@ -183,10 +183,6 @@ impl Desktop {
                                 source.subtitle_read_error = Some(course2md::subtitle::SubtitleReadError::Failed { message });
                             }
                             this.source_preview = Some(source);
-                            if this.online && this.inputs[&Field::Source].focus_handle(cx).is_focused(window) {
-                                // Never remove the field while the user is still typing in it.
-                                this.show_preview_details = true;
-                            }
                             this.save_current_draft(cx);
                             if this.task_options.source_mode != 2 && let Some(track) = default_track {
                                 this.confirm_subtitle(track, false, cx);
@@ -363,26 +359,24 @@ impl Desktop {
         let mut view = v_flex().gap_3();
         if let Some(id) = self.folder_editor {
             view = view
-                .p_4()
-                .rounded_lg()
-                .bg(color(SURFACE))
-                .border_1()
-                .border_color(color(LINE))
-                .child(accessible_text("folder-name-label", "文件夹名称"))
+                .child(
+                    accessible_text("folder-name-label", "文件夹名称")
+                        .font_weight(FontWeight::MEDIUM),
+                )
                 .child(
                     Input::new(&self.inputs[&Field::FolderName])
                         .aria_label("文件夹名称")
                         .min_h(rems(2.6))
                         .h_auto()
                         .when(self.folder_error.is_some(), |v| {
-                            v.border_color(rgb(0xa32626))
+                            v.border_color(color(DANGER))
                         }),
                 )
                 .when_some(self.folder_error.clone(), |v, error| {
                     v.child(
                         accessible_text("folder-editor-error", error)
                             .text_sm()
-                            .text_color(rgb(0xa32626)),
+                            .text_color(color(DANGER)),
                     )
                 })
                 .child(
@@ -391,6 +385,7 @@ impl Desktop {
                         .justify_end()
                         .child(
                             control("cancel-folder")
+                                .icon(IconName::Close)
                                 .h_auto()
                                 .min_h(rems(2.6))
                                 .ghost()
@@ -405,6 +400,11 @@ impl Desktop {
                         )
                         .child(
                             control("save-folder")
+                                .icon(if id.is_some() {
+                                    icons::edit()
+                                } else {
+                                    icons::create_new_folder()
+                                })
                                 .h_auto()
                                 .min_h(rems(2.6))
                                 .primary()
@@ -614,39 +614,42 @@ impl Desktop {
                 let entity = entity.clone();
                 let storage = storage.clone();
                 let origin = origin.clone();
-                menu.item(PopupMenuItem::new(name).checked(id == current).on_click(
-                    move |_, _, cx| {
-                        let _ = entity.update(cx, |this, cx| {
-                            if let Some(path) = &storage {
-                                match organize::Library::edit(&origin.root, |library| {
-                                    library.assign(&origin.root, path, id)
-                                }) {
-                                    Ok(library) => {
-                                        if this.library_root == origin.root {
-                                            this.library = library.clone();
+                menu.item(
+                    PopupMenuItem::new(name)
+                        .icon(IconName::Folder)
+                        .checked(id == current)
+                        .on_click(move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| {
+                                if let Some(path) = &storage {
+                                    match organize::Library::edit(&origin.root, |library| {
+                                        library.assign(&origin.root, path, id)
+                                    }) {
+                                        Ok(library) => {
+                                            if this.library_root == origin.root {
+                                                this.library = library.clone();
+                                            }
+                                            this.library_indexes
+                                                .insert(origin.root.clone(), library);
                                         }
-                                        this.library_indexes
-                                            .insert(origin.root.clone(), library);
+                                        Err(error) => {
+                                            this.message = Some(format!("无法移动笔记：{error:#}"))
+                                        }
                                     }
-                                    Err(error) => {
-                                        this.message = Some(format!("无法移动笔记：{error:#}"))
-                                    }
+                                } else if this
+                                    .workspace
+                                    .as_ref()
+                                    .and_then(|workspace| workspace.state.draft())
+                                    .is_some_and(|draft| {
+                                        Some(&draft.id) == origin.draft_id.as_ref()
+                                    })
+                                {
+                                    this.target_folder = id;
+                                    this.save_current_draft(cx);
                                 }
-                            } else if this
-                                .workspace
-                                .as_ref()
-                                .and_then(|workspace| workspace.state.draft())
-                                .is_some_and(|draft| {
-                                    Some(&draft.id) == origin.draft_id.as_ref()
-                                })
-                            {
-                                this.target_folder = id;
-                                this.save_current_draft(cx);
-                            }
-                            cx.notify();
-                        });
-                    },
-                ))
+                                cx.notify();
+                            });
+                        }),
+                )
             })
         }
     }
@@ -662,16 +665,22 @@ impl Desktop {
         current: Option<u64>,
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         move |menu, _, _| {
-            let menu = menu.item(PopupMenuItem::new("全部笔记").checked(current.is_none()).on_click({
-                let entity = entity.clone();
-                move |_, _, cx| {
-                    let _ = entity.update(cx, |this, cx| {
-                        this.folder_filter = None;
-                        this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
-                        cx.notify();
-                    });
-                }
-            }));
+            let menu = menu.item(
+                PopupMenuItem::new("全部笔记")
+                    .icon(IconName::BookOpen)
+                    .checked(current.is_none())
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.folder_filter = None;
+                                this.scrolls[Page::Library as usize]
+                                    .set_offset(point(px(0.), px(0.)));
+                                cx.notify();
+                            });
+                        }
+                    }),
+            );
             let mut menu = menu;
             for (root, library_name, folders) in sections.iter() {
                 let mut entries: Vec<(u64, String)> = vec![(0u64, "未分类".to_owned())];
@@ -686,31 +695,38 @@ impl Desktop {
                     } else {
                         name
                     };
-                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
-                        move |_, _, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                this.library_root = root.clone();
-                                if let Some(organization) = this.library_indexes.get(&root) {
-                                    this.library = organization.clone();
-                                }
-                                this.folder_filter = Some(id);
-                                this.scrolls[Page::Library as usize]
-                                    .set_offset(point(px(0.), px(0.)));
-                                this.navigate(Page::Library, cx);
-                            });
-                        },
-                    ));
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .icon(IconName::Folder)
+                            .checked(checked)
+                            .on_click(move |_, _, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.library_root = root.clone();
+                                    if let Some(organization) = this.library_indexes.get(&root) {
+                                        this.library = organization.clone();
+                                    }
+                                    this.folder_filter = Some(id);
+                                    this.scrolls[Page::Library as usize]
+                                        .set_offset(point(px(0.), px(0.)));
+                                    this.navigate(Page::Library, cx);
+                                });
+                            }),
+                    );
                 }
             }
-            menu.separator().item(PopupMenuItem::new("新建文件夹…").on_click({
-                let entity = entity.clone();
-                move |_, window, cx| {
-                    let _ = entity.update(cx, |this, cx| this.begin_folder(None, window, cx));
-                }
-            }))
+            menu.separator().item(
+                PopupMenuItem::new("新建文件夹…")
+                    .icon(icons::create_new_folder())
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, window, cx| {
+                            let _ =
+                                entity.update(cx, |this, cx| this.begin_folder(None, window, cx));
+                        }
+                    }),
+            )
         }
     }
-
 
     pub fn folder_picker(
         &self,
@@ -757,7 +773,7 @@ impl Desktop {
                 view.child(
                     accessible_text(("folder-picker-error", index), error)
                         .text_sm()
-                        .text_color(rgb(0xa32626)),
+                        .text_color(color(DANGER)),
                 )
             })
     }

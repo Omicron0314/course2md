@@ -59,16 +59,13 @@ impl Render for CourseRenameDialog {
                 view.child(
                     accessible_text("rename-note-error", error)
                         .role(Role::Alert)
-                        .text_color(rgb(0xa32626)),
+                        .text_color(color(DANGER)),
                 )
             })
             .child(
-                accessible_text(
-                    "rename-note-scope",
-                    "更改在课程库中显示的名称，已生成的正文和原视频保持完整。",
-                )
-                .text_sm()
-                .text_color(color(MUTED)),
+                accessible_text("rename-note-scope", "仅修改笔记名称。")
+                    .text_sm()
+                    .text_color(color(MUTED)),
             )
             .child(
                 h_flex()
@@ -76,11 +73,13 @@ impl Render for CourseRenameDialog {
                     .gap_2()
                     .child(
                         control("cancel-note-rename")
+                            .icon(IconName::Close)
                             .label("取消")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
                         control("save-note-rename")
+                            .icon(icons::edit())
                             .primary()
                             .label("保存名称")
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
@@ -210,16 +209,20 @@ impl Desktop {
                 let path = course.storage_dir();
                 let mut menu = menu
                     .item(
-                        PopupMenuItem::new("重命名笔记…").on_click(move |_, window, cx| {
-                            let _ = rename.update(cx, |this, cx| {
-                                this.begin_course_rename(selected.clone(), window, cx)
-                            });
-                        }),
+                        PopupMenuItem::new("重命名笔记…")
+                            .icon(icons::edit())
+                            .on_click(move |_, window, cx| {
+                                let _ = rename.update(cx, |this, cx| {
+                                    this.begin_course_rename(selected.clone(), window, cx)
+                                });
+                            }),
                     )
                     .item(
                         PopupMenuItem::new("打开笔记保存位置")
+                            .icon(IconName::FolderOpen)
                             .on_click(move |_, _, cx| cx.open_with_system(&path)),
-                    );
+                    )
+                    .separator();
                 for (format, label) in [
                     (course2md::config::OutputFormat::Md, "导出 Markdown 包…"),
                     (course2md::config::OutputFormat::Html, "导出网页文件…"),
@@ -227,11 +230,13 @@ impl Desktop {
                 ] {
                     let entity = entity.clone();
                     let course = course.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        let _ = entity.update(cx, |this, cx| {
-                            this.export_course(course.clone(), format, window, cx)
-                        });
-                    }));
+                    menu = menu.item(PopupMenuItem::new(label).icon(icons::download()).on_click(
+                        move |_, window, cx| {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.export_course(course.clone(), format, window, cx)
+                            });
+                        },
+                    ));
                 }
                 menu
             })
@@ -262,34 +267,40 @@ impl Desktop {
         &self,
         access: &crate::storage::LibraryAccess,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> Option<Div> {
         let mut view = v_flex().gap_3();
-        let Some(workspace) = &self.workspace else {
-            return view;
-        };
+        let workspace = self.workspace.as_ref()?;
+        let mut has_notice = false;
         for (index, location) in workspace.state.libraries.iter().enumerate() {
             if access.unavailable.contains(&location.root) {
+                has_notice = true;
                 let name = location.name.clone();
                 let root = location.root.clone();
                 view = view.child(
                     v_flex()
-                        .gap_2()
+                        .gap_3()
+                        .p_4()
+                        .bg(color(WARNING_BG))
+                        .rounded(RADIUS_CARD)
+                        .child(badge(BadgeKind::Warning).child("保存位置不可用"))
                         .child(accessible_text(
                             ("library-unavailable", index),
-                            format!(
-                                "{name} 的保存位置暂时无法访问：{}。重新连接后，笔记会继续显示。",
-                                root.display()
-                            ),
+                            format!("{name} 暂时无法访问。连接后可继续浏览笔记。"),
                         ))
                         .child(
                             control(("retry-library-location", index))
+                                .icon(icons::refresh())
                                 .label("重新检查保存位置")
+                                .tooltip(root.display().to_string())
+                                .self_start()
+                                .loading(self.loading)
                                 .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
                         ),
                 );
                 continue;
             }
             if let Ok(Some(recovery)) = organize::recovery(&location.root) {
+                has_notice = true;
                 let restore = location.root.clone();
                 let rebuild = location.root.clone();
                 let folder = location.root.clone();
@@ -297,6 +308,7 @@ impl Desktop {
                 if recovery.has_backup {
                     row = row.child(
                         control(("restore-classification", index))
+                            .icon(icons::history())
                             .label("恢复最近分类备份")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.recover_library_folders(restore.clone(), false, cx)
@@ -306,6 +318,7 @@ impl Desktop {
                 row = row
                     .child(
                         control(("rebuild-classification", index))
+                            .icon(icons::refresh())
                             .label("保留损坏记录并重建分类")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.recover_library_folders(rebuild.clone(), true, cx)
@@ -314,13 +327,17 @@ impl Desktop {
                     .child(
                         control(("show-classification-files", index))
                             .ghost()
+                            .icon(IconName::FolderOpen)
                             .label("打开保存位置")
                             .on_click(move |_, _, cx| cx.open_with_system(&folder)),
                     );
-                view = view.child(v_flex().gap_2().child(accessible_text(("classification-recovery", index), format!("{} 的分类记录无法读取。现有笔记文件会保留；重建分类后可重新整理到文件夹。", location.name)))
+                view = view.child(v_flex().gap_3().p_4().bg(color(WARNING_BG)).rounded(RADIUS_CARD)
+                    .child(badge(BadgeKind::Warning).child("分类需要恢复"))
+                    .child(accessible_text(("classification-recovery", index), format!("{} 的分类记录无法读取。现有笔记文件会保留；重建分类后可重新整理到文件夹。", location.name)))
                     .child(row));
             }
             if let Ok(Some(recovery)) = organize::title_recovery(&location.root) {
+                has_notice = true;
                 let mut row = h_flex().gap_2().flex_wrap();
                 for reset in [false, true] {
                     if !reset && !recovery.has_backup {
@@ -336,6 +353,11 @@ impl Desktop {
                             },
                             index,
                         ))
+                        .icon(if reset {
+                            icons::refresh()
+                        } else {
+                            icons::history()
+                        })
                         .label(if reset {
                             "保留损坏记录并恢复原名称"
                         } else {
@@ -360,7 +382,11 @@ impl Desktop {
                 }
                 view = view.child(
                     v_flex()
-                        .gap_2()
+                        .gap_3()
+                        .p_4()
+                        .bg(color(WARNING_BG))
+                        .rounded(RADIUS_CARD)
+                        .child(badge(BadgeKind::Warning).child("笔记名称需要恢复"))
                         .child(accessible_text(
                             ("title-recovery", index),
                             format!(
@@ -372,7 +398,7 @@ impl Desktop {
                 );
             }
         }
-        view
+        has_notice.then_some(view)
     }
 
     pub fn library_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -447,7 +473,25 @@ impl Desktop {
         let mut view = v_flex()
             .w_full()
             .gap_6()
-            .child(self.library_recovery_view(&all_access, cx));
+            .children(self.library_recovery_view(&all_access, cx));
+        if self.reading {
+            view = view.child(crate::motion::enter(
+                "library-opening-note",
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .rounded(RADIUS_CARD)
+                    .bg(color(INSET))
+                    .child(crate::motion::spinner("library-note-spinner", cx))
+                    .child(accessible_text(
+                        "library-note-opening-label",
+                        "正在打开笔记…",
+                    )),
+                cx,
+            ));
+        }
         if coverage != crate::storage::LibraryCoverage::Complete {
             let message = if coverage == crate::storage::LibraryCoverage::Unavailable {
                 if query.is_empty() {
@@ -482,7 +526,10 @@ impl Desktop {
                 v_flex()
                     .gap_2()
                     .p_3()
-                    .bg(rgb(0xfff0db))
+                    .bg(color(WARNING_BG))
+                    .border_1()
+                    .border_color(color(WARNING_BG))
+                    .rounded(RADIUS_CARD)
                     .child(accessible_text(
                         "library-issues-title",
                         "有笔记或分类记录暂时无法读取。列表和搜索结果仅包含已读取的笔记。",
@@ -513,10 +560,7 @@ impl Desktop {
             view = view.child(
                 accessible_text(
                     "library-materials-state",
-                    format!(
-                        "发现 {} 份尚无可读正文的历史任务材料。原文件已保留。",
-                        materials.len()
-                    ),
+                    format!("有 {} 份历史任务尚未生成可读笔记。", materials.len()),
                 )
                 .text_sm()
                 .text_color(color(MUTED)),
@@ -524,6 +568,7 @@ impl Desktop {
             view = view.child(
                 control("open-library-materials")
                     .self_start()
+                    .icon(IconName::FolderOpen)
                     .label("查看保留的任务材料")
                     .dropdown_menu(move |menu, _, _| {
                         materials.iter().fold(menu, |menu, path| {
@@ -538,7 +583,14 @@ impl Desktop {
         }
         if self.loading {
             return view
-                .child(accessible_text("library-loading", "正在读取课程…"))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .py_6()
+                        .child(crate::motion::spinner("library-scan-spinner", cx))
+                        .child(accessible_text("library-loading", "正在读取笔记…")),
+                )
                 .into_any_element();
         }
         if coverage == crate::storage::LibraryCoverage::Unavailable {
@@ -553,11 +605,15 @@ impl Desktop {
                 return view.into_any_element();
             }
             return view
-                .child(
+                .child(crate::motion::enter(
+                    "library-empty-state",
                     v_flex()
                         .py_12()
+                        .px_6()
                         .gap_4()
                         .items_center()
+                        .rounded(RADIUS_CARD)
+                        .bg(color(INSET))
                         .child(
                             Icon::new(IconName::BookOpen)
                                 .size(px(32.))
@@ -593,7 +649,7 @@ impl Desktop {
                                         "试试更短的关键词。"
                                     }
                                 } else if self.folder_filter.is_some() {
-                                    "把笔记移进这个文件夹，或在筛选菜单里新建文件夹。"
+                                    "从全部笔记中选择内容，移到这个文件夹。"
                                 } else {
                                     "添加视频链接或本地视频，生成课程笔记。"
                                 },
@@ -601,28 +657,52 @@ impl Desktop {
                             .text_color(color(MUTED)),
                         )
                         .when(!query.is_empty(), |empty| {
-                            empty.child(quiet("clear-search").label("清除搜索").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.inputs[&Field::Search]
-                                        .update(cx, |state, cx| state.set_value("", window, cx));
-                                    cx.notify();
-                                }),
-                            ))
+                            empty.child(
+                                outline_pill("clear-search")
+                                    .icon(IconName::Close)
+                                    .label("清除搜索")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.inputs[&Field::Search].update(cx, |state, cx| {
+                                            state.set_value("", window, cx)
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
                         })
                         .when(query.is_empty() && self.folder_filter.is_none(), |empty| {
-                            empty.child(quiet("empty-library-add").label("去工作台生成").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.begin_add(window, cx)
-                                }),
-                            ))
+                            empty.child(
+                                primary_pill("empty-library-add")
+                                    .icon(IconName::Plus)
+                                    .label("生成第一篇笔记")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.begin_add(window, cx)
+                                    })),
+                            )
+                        })
+                        .when(query.is_empty() && self.folder_filter.is_some(), |empty| {
+                            empty.child(
+                                outline_pill("empty-folder-all-notes")
+                                    .icon(IconName::BookOpen)
+                                    .label("浏览全部笔记")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.folder_filter = None;
+                                        this.scrolls[Page::Library as usize]
+                                            .set_offset(point(px(0.), px(0.)));
+                                        cx.notify();
+                                    })),
+                            )
                         }),
-                )
+                    cx,
+                ))
                 .into_any_element();
         }
         if !query.is_empty() {
             let raw = self.value(Field::Search, cx);
             let scoped = if self.folder_filter.is_some() {
-                format!("在当前文件夹中搜索「{raw}」，找到 {} 篇笔记。", courses.len())
+                format!(
+                    "在当前文件夹中搜索「{raw}」，找到 {} 篇笔记。",
+                    courses.len()
+                )
             } else {
                 format!("在全部笔记中搜索「{raw}」，找到 {} 篇笔记。", courses.len())
             };
@@ -638,6 +718,7 @@ impl Desktop {
                     )
                     .child(
                         quiet("clear-search-scope")
+                            .icon(IconName::Close)
                             .label("清空搜索")
                             .min_h(rems(1.6))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -791,17 +872,19 @@ impl Desktop {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|location| {
-                self.library_indexes.get(&location.root).map(|organization| {
-                    (
-                        location.root.clone(),
-                        location.name.clone(),
-                        organization
-                            .folders
-                            .iter()
-                            .map(|(id, name)| (*id, name.clone()))
-                            .collect(),
-                    )
-                })
+                self.library_indexes
+                    .get(&location.root)
+                    .map(|organization| {
+                        (
+                            location.root.clone(),
+                            location.name.clone(),
+                            organization
+                                .folders
+                                .iter()
+                                .map(|(id, name)| (*id, name.clone()))
+                                .collect(),
+                        )
+                    })
             })
             .collect();
         if sections.is_empty() {
@@ -828,7 +911,7 @@ impl Desktop {
         control("folder-filter")
             .h_auto()
             .min_h(rems(2.286))
-            .rounded(RADIUS_PILL)
+            .rounded(RADIUS_SMALL)
             .px(px(12.))
             .max_w(rems(16.))
             .icon(IconName::Folder)
@@ -851,10 +934,7 @@ impl Desktop {
             ))
     }
 
-    /// Notes toolbar, mirroring docs/ux-mock `notesToolbar`: capsule search with a
-    /// search-icon prefix and built-in clear, folder filter as an outlined capsule,
-    /// 按文件夹 as a toggle button (✓ + tinted track when on), 列表/卡片 as capsule
-    /// segments, and a round refresh icon button.
+    /// Library controls share Material action icons and theme-aware state surfaces.
     pub fn library_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let group_on = self.desktop_settings.library_group_folders;
         let cards_on = self.desktop_settings.library_cards;
@@ -870,34 +950,37 @@ impl Desktop {
                 let entity = cx.entity().downgrade();
                 row.child(
                     control("manage-folder")
-                        .rounded(RADIUS_PILL)
+                        .rounded(RADIUS_SMALL)
                         .min_h(rems(2.286))
                         .px(px(12.))
+                        .icon(icons::edit())
                         .label("管理文件夹")
                         .dropdown_menu(move |menu, _, _| {
                             let rename = entity.clone();
                             let remove = entity.clone();
-                            menu.item(PopupMenuItem::new("重命名").on_click(
+                            menu.item(PopupMenuItem::new("重命名").icon(icons::edit()).on_click(
                                 move |_, window, cx| {
                                     let _ = rename.update(cx, |this, cx| {
                                         this.begin_folder(Some(id), window, cx)
                                     });
                                 },
                             ))
-                            .item(PopupMenuItem::new("删除文件夹…").on_click(
-                                move |_, window, cx| {
-                                    let _ = remove.update(cx, |this, cx| {
-                                        this.begin_delete_folder(id, window, cx)
-                                    });
-                                },
-                            ))
+                            .item(
+                                PopupMenuItem::new("删除文件夹…")
+                                    .icon(icons::delete())
+                                    .on_click(move |_, window, cx| {
+                                        let _ = remove.update(cx, |this, cx| {
+                                            this.begin_delete_folder(id, window, cx)
+                                        });
+                                    }),
+                            )
                         }),
                 )
             })
             .when(self.folder_filter.is_none(), |row| {
                 row.child(
                     control("group-folders")
-                        .rounded(RADIUS_PILL)
+                        .rounded(RADIUS_SMALL)
                         .min_h(rems(2.286))
                         .px(px(12.))
                         .bg(color(if group_on { BADGE_PROGRESS_BG } else { SURFACE }))
@@ -909,25 +992,8 @@ impl Desktop {
                         } else {
                             "按文件夹分组：关"
                         })
-                        .child(
-                            h_flex()
-                                .gap(px(6.))
-                                .items_center()
-                                .child(
-                                    div()
-                                        .w(px(14.))
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .justify_center()
-                                        .text_color(if group_on {
-                                            color(INK)
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .child("✓"),
-                                )
-                                .child("按文件夹"),
-                        )
+                        .icon(IconName::Folder)
+                        .label("按文件夹")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.desktop_settings.library_group_folders =
                                 !this.desktop_settings.library_group_folders;
@@ -936,28 +1002,34 @@ impl Desktop {
                         })),
                 )
             })
-            .child(seg_track().children([
-                seg_item("view-list", !cards_on)
-                    .label("列表")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.desktop_settings.library_cards = false;
-                        this.save_library_presentation(cx);
-                        cx.notify();
-                    })),
-                seg_item("view-cards", cards_on)
-                    .label("卡片")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.desktop_settings.library_cards = true;
-                        this.save_library_presentation(cx);
-                        cx.notify();
-                    })),
-            ]))
+            .child(
+                seg_track().children([
+                    seg_item("view-list", !cards_on)
+                        .icon(icons::toc())
+                        .label("列表")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.desktop_settings.library_cards = false;
+                            this.save_library_presentation(cx);
+                            cx.notify();
+                        })),
+                    seg_item("view-cards", cards_on)
+                        .icon(icons::grid_view())
+                        .label("卡片")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.desktop_settings.library_cards = true;
+                            this.save_library_presentation(cx);
+                            cx.notify();
+                        })),
+                ]),
+            )
             .child(
                 control("refresh-library")
                     .ghost()
-                    .rounded_full()
+                    .rounded(RADIUS_SMALL)
                     .icon(icons::refresh())
                     .accessibility_label("刷新课程库")
+                    .tooltip("刷新笔记")
+                    .loading(self.loading)
                     .disabled(self.loading)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
             );
@@ -979,7 +1051,7 @@ impl Desktop {
                             .w_full()
                             .min_h(rems(2.286))
                             .h_auto()
-                            .rounded(RADIUS_PILL)
+                            .rounded(RADIUS_SMALL)
                             .border_color(color(CONTROL))
                             .text_size(TEXT_BODY)
                             .prefix(icons::search().size(px(16.)).text_color(color(GRAY)))
@@ -1026,86 +1098,104 @@ impl Desktop {
         show_chip: bool,
         cx: &mut Context<Self>,
     ) -> Div {
+        let collection_id = courses.first().map(|(index, _)| *index).unwrap_or(0);
         if !self.desktop_settings.library_cards {
-            return v_flex().gap_2().children(courses.iter().map(|(index, course)| {
-                let mut read = h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .items_center()
-                    .gap(px(12.));
-                if let Some(thumbnail) = &course.thumbnail {
+            let rows = v_flex()
+                .gap_2()
+                .children(courses.iter().map(|(index, course)| {
+                    let mut read = h_flex().w_full().min_w_0().items_center().gap(px(12.));
+                    if let Some(thumbnail) = &course.thumbnail {
+                        read = read.child(
+                            img(thumbnail.clone())
+                                .w(rems(6.857))
+                                .h(rems(3.857))
+                                .object_fit(ObjectFit::Cover)
+                                .rounded(RADIUS_SMALL)
+                                .flex_shrink_0(),
+                        );
+                    }
                     read = read.child(
-                        img(thumbnail.clone())
-                            .w(rems(6.857))
-                            .h(rems(3.857))
-                            .object_fit(ObjectFit::Cover)
-                            .rounded(RADIUS_SMALL)
-                            .flex_shrink_0(),
-                    );
-                }
-                read = read.child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_1()
-                        .child(
-                            div()
-                                .w_full()
-                                .whitespace_normal()
-                                .text_ellipsis()
-                                .line_clamp(2)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(course.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(TEXT_AUX)
-                                .text_color(color(GRAY))
-                                .child(Self::course_meta(course)),
-                        ),
-                );
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .p_3()
-                    .gap(px(12.))
-                    .bg(color(SURFACE))
-                    .border_1()
-                    .border_color(color(CARD_LINE))
-                    .rounded(RADIUS_CARD)
-                    .child(
-                        control(("read-course", *index))
-                            .ghost()
+                        v_flex()
                             .flex_1()
                             .min_w_0()
-                            .h_auto()
-                            .p_0()
-                            .justify_start()
-                            .accessibility_label(format!("阅读 {}", course.title))
-                            .child(read)
-                            .on_click({
-                                let course = course.clone();
-                                cx.listener(move |this, _, _, cx| {
-                                    this.open_course(course.clone(), cx)
-                                })
-                            }),
-                    )
-                    .when(show_chip, |row| {
-                        row.child(self.folder_chip(
-                            Some(course.dir.clone()),
-                            index + 1,
-                            Some(layout.chip_max),
-                            layout.compact,
-                            cx,
-                        ))
-                    })
-                    .child(self.course_actions(course.clone(), *index, cx))
-            }));
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .whitespace_normal()
+                                    .text_ellipsis()
+                                    .line_clamp(2)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(course.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(TEXT_AUX)
+                                    .text_color(color(GRAY))
+                                    .child(Self::course_meta(course)),
+                            ),
+                    );
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .p_4()
+                        .gap_4()
+                        .bg(color(SURFACE))
+                        .border_1()
+                        .border_color(color(CARD_LINE))
+                        .rounded(RADIUS_CARD)
+                        .child(
+                            control(("read-course", *index))
+                                .ghost()
+                                .flex_1()
+                                .min_w_0()
+                                .h_auto()
+                                .p_0()
+                                .justify_start()
+                                .accessibility_label(format!("阅读 {}", course.title))
+                                .tooltip("阅读笔记")
+                                .child(read)
+                                .on_click({
+                                    let course = course.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.open_course(course.clone(), cx)
+                                    })
+                                }),
+                        )
+                        .when(show_chip, |row| {
+                            row.child(self.folder_chip(
+                                Some(course.dir.clone()),
+                                index + 1,
+                                Some(layout.chip_max),
+                                layout.compact,
+                                cx,
+                            ))
+                        })
+                        .child(
+                            outline_pill(("read-course-action", *index))
+                                .icon(IconName::BookOpen)
+                                .when(!layout.compact, |button| button.label("阅读"))
+                                .accessibility_label(format!("阅读 {}", course.title))
+                                .tooltip("阅读笔记")
+                                .on_click({
+                                    let course = course.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.open_course(course.clone(), cx)
+                                    })
+                                }),
+                        )
+                        .child(self.course_actions(course.clone(), *index, cx))
+                }));
+            return v_flex().w_full().child(crate::motion::enter(
+                ("library-list", collection_id),
+                rows,
+                cx,
+            ));
         }
-        v_flex()
+        let cards = v_flex()
             .gap_4()
             .children(courses.chunks(layout.columns).map(|row| {
                 h_flex()
@@ -1127,11 +1217,14 @@ impl Desktop {
                                     .w_full()
                                     .h_auto()
                                     .p_0()
+                                    .rounded_t(RADIUS_CARD)
+                                    .rounded_b(px(0.))
                                     .aspect_ratio(16. / 9.)
                                     .accessibility_label(format!("阅读 {}", course.title))
                                     .child(
                                         img(thumbnail.clone())
                                             .size_full()
+                                            .rounded_t(RADIUS_CARD)
                                             .object_fit(ObjectFit::Cover),
                                     )
                                     .on_click({
@@ -1146,8 +1239,8 @@ impl Desktop {
                             v_flex()
                                 .w_full()
                                 .min_w_0()
-                                .p_3()
-                                .gap(px(6.))
+                                .p_4()
+                                .gap_2()
                                 .child(
                                     control(("read-title", *index))
                                         .accessibility_label(format!("阅读 {}", course.title))
@@ -1191,6 +1284,18 @@ impl Desktop {
                                         .child(course.description()),
                                 )
                                 .child(
+                                    outline_pill(("read-card-action", *index))
+                                        .w_full()
+                                        .icon(IconName::BookOpen)
+                                        .label("阅读笔记")
+                                        .on_click({
+                                            let course = course.clone();
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.open_course(course.clone(), cx)
+                                            })
+                                        }),
+                                )
+                                .child(
                                     h_flex()
                                         .w_full()
                                         .min_w_0()
@@ -1204,12 +1309,18 @@ impl Desktop {
                                             false,
                                             cx,
                                         ))
+                                        .child(div().flex_1())
                                         .child(self.course_actions(course.clone(), *index, cx)),
                                 ),
                         )
                     }))
                     .children((row.len()..layout.columns).map(|_| div().flex_1()))
-            }))
+            }));
+        v_flex().w_full().child(crate::motion::enter(
+            ("library-grid", collection_id),
+            cards,
+            cx,
+        ))
     }
 
     /// Workbench "最近笔记": attention tasks first, then recent readable notes.
@@ -1267,20 +1378,34 @@ impl Desktop {
                         })),
                 ),
         );
+        if self.reading {
+            section = section.child(crate::motion::enter(
+                "recent-note-opening",
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .py_2()
+                    .child(crate::motion::spinner("recent-note-spinner", cx))
+                    .child(accessible_text(
+                        "recent-note-opening-label",
+                        "正在打开笔记…",
+                    )),
+                cx,
+            ));
+        }
         for task in attention {
             let id = task.id.clone();
             let resend = task.state == crate::workspace::TaskState::Uncertain;
-            let partial_component: Option<String> = if task.state
-                == crate::workspace::TaskState::Partial
-            {
-                task.artifact.as_ref().and_then(|path| {
-                    crate::task_ui::task_component_outcomes(&task, path)
-                        .first()
-                        .map(|(component, _, _)| component.clone())
-                })
-            } else {
-                None
-            };
+            let partial_component: Option<String> =
+                if task.state == crate::workspace::TaskState::Partial {
+                    task.artifact.as_ref().and_then(|path| {
+                        crate::task_ui::task_component_outcomes(&task, path)
+                            .first()
+                            .map(|(component, _, _)| component.clone())
+                    })
+                } else {
+                    None
+                };
             section = section.child(
                 h_flex()
                     .w_full()
@@ -1326,6 +1451,7 @@ impl Desktop {
                     )
                     .child(
                         outline_pill(SharedString::from(format!("recent-resume-{id}")))
+                            .icon(icons::play_arrow())
                             .label("继续处理")
                             .flex_shrink_0()
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1339,7 +1465,11 @@ impl Desktop {
                                 } else if resend {
                                     this.resend_uncertain(id.clone(), cx);
                                 } else {
-                                    this.set_task_intent(id.clone(), crate::workspace::Intent::Run, cx);
+                                    this.set_task_intent(
+                                        id.clone(),
+                                        crate::workspace::Intent::Run,
+                                        cx,
+                                    );
                                 }
                             })),
                     ),
@@ -1352,18 +1482,9 @@ impl Desktop {
     }
 
     fn recent_note_row(&self, course: Course, index: usize, cx: &mut Context<Self>) -> Div {
-        let mut row = h_flex()
-            .w_full()
-            .min_w_0()
-            .p_3()
-            .gap_3()
-            .items_center()
-            .bg(color(SURFACE))
-            .border_1()
-            .border_color(color(CARD_LINE))
-            .rounded(RADIUS_CARD);
+        let mut content = h_flex().w_full().min_w_0().gap_3().items_center();
         if let Some(thumbnail) = &course.thumbnail {
-            row = row.child(
+            content = content.child(
                 img(thumbnail.clone())
                     .w(rems(6.857))
                     .h(rems(3.857))
@@ -1372,47 +1493,67 @@ impl Desktop {
                     .flex_shrink_0(),
             );
         }
-        let modified = course
-            .modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        row = row
+        content = content.child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .child(
+                    div()
+                        .w_full()
+                        .whitespace_normal()
+                        .text_ellipsis()
+                        .line_clamp(2)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(course.title.clone()),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(TEXT_AUX)
+                        .text_color(color(GRAY))
+                        .child(format!(
+                            "{} · {}",
+                            course.description(),
+                            Self::course_meta(&course)
+                        )),
+                ),
+        );
+        let open = course.clone();
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .p_4()
+            .gap_4()
+            .items_center()
+            .bg(color(SURFACE))
+            .border_1()
+            .border_color(color(CARD_LINE))
+            .rounded(RADIUS_CARD)
             .child(
-                v_flex()
+                control(("recent-note-content", index))
+                    .ghost()
                     .flex_1()
                     .min_w_0()
-                    .gap_1()
-                    .child(
-                        div()
-                            .w_full()
-                            .whitespace_normal()
-                            .text_ellipsis()
-                            .line_clamp(2)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(course.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_sm()
-                            .text_color(color(GRAY))
-                            .child(format!(
-                                "{} · {}",
-                                course.description(),
-                                crate::reader_navigation::timestamp_utc(modified * 1000)
-                            )),
+                    .h_auto()
+                    .p_0()
+                    .justify_start()
+                    .accessibility_label(format!("阅读 {}", course.title))
+                    .tooltip("阅读笔记")
+                    .child(content)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_course(open.clone(), cx)),
                     ),
             )
-            .child(badge(BadgeKind::Success).child("已完成"))
             .child(
-                quiet(("recent-read", index)).label("阅读笔记").on_click(cx.listener(
-                    move |this, _, _, cx| this.open_course(course.clone(), cx),
-                )),
-            );
-        row
+                outline_pill(("recent-read", index))
+                    .icon(IconName::BookOpen)
+                    .label("阅读笔记")
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_course(course.clone(), cx)),
+                    ),
+            )
     }
-
 }

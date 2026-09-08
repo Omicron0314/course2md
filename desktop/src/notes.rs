@@ -79,7 +79,7 @@ fn version_course(dir: &Path) -> Result<Course> {
     );
     let warning = course2md::artifact::validate_version(dir, &manifest)
         .err()
-        .map(|_| "已发布文件有外部修改或资源缺失；正在读取现有正文，原文件已保留。".into());
+        .map(|_| "部分笔记文件有变化或缺失，已显示当前可读内容。原文件已保留。".into());
     let thumbnail = manifest
         .frames
         .iter()
