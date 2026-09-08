@@ -439,6 +439,61 @@ pub fn list_models(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interrupted_and_unknown_size_downloads_only_publish_complete_files() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for response in [
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc",
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef",
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n12345",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    if stream.read(&mut byte).unwrap() == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let temporary = root.path().join("model.part");
+        let destination = root.path().join("model.bin");
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(3))
+            .build();
+        let url = format!("http://{address}/model");
+        assert!(download_once(&agent, &url, &temporary, &destination, "synthetic").is_err());
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&temporary).unwrap(), b"abc");
+        download_once(&agent, &url, &temporary, &destination, "synthetic").unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"abcdef");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(destination.with_extension("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["size"], 6);
+        assert!(!temporary.exists());
+        let known = root.path().join("known.bin");
+        download_once(&agent, &url, &temporary, &known, "synthetic").unwrap();
+        assert_eq!(fs::read(&known).unwrap(), b"12345");
+        server.join().unwrap();
+        let missing = root.path().join("offline.bin");
+        assert!(download_once(&agent, &url, &temporary, &missing, "synthetic").is_err());
+        assert!(!missing.exists());
+        assert_eq!(fs::read(destination).unwrap(), b"abcdef");
+    }
 
     #[test]
     fn identity_matches_dir_slug() {
