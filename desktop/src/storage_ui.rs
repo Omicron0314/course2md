@@ -1179,6 +1179,7 @@ mod tests {
             .state
             .reader_sources
             .insert("local:outside-video".into(), PathBuf::from(&outside_input));
+        workspace.transaction(|_| Ok(())).unwrap();
         let prepared = storage::prepare_move(
             library_id.clone(),
             &old,
@@ -1189,6 +1190,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(workspace.state.library(&library_id).unwrap().root, old);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(directory.path()).unwrap().permissions();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o555))
+                .unwrap();
+            let failed = workspace
+                .transaction(|state| publish_location(state, &prepared.journal, &prepared.path));
+            std::fs::set_permissions(directory.path(), permissions).unwrap();
+            assert!(failed.is_err());
+            assert_eq!(workspace.state.library(&library_id).unwrap().root, old);
+        }
+        let before_commit = workspace::Workspace::open_at(
+            record_path.clone(),
+            old.clone(),
+            ConversionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(before_commit.state.library(&library_id).unwrap().root, old);
+        assert_eq!(
+            before_commit.state.task(&task_id).unwrap().work_dir,
+            old_task_work
+        );
         workspace
             .transaction(|state| publish_location(state, &prepared.journal, &prepared.path))
             .unwrap();
@@ -1196,6 +1220,9 @@ mod tests {
             workspace::Workspace::open_at(record_path, old.clone(), ConversionOptions::default())
                 .unwrap();
         let state = &reopened.state;
+        let lagging: storage::Journal =
+            serde_json::from_slice(&std::fs::read(&prepared.path).unwrap()).unwrap();
+        assert_eq!(lagging.phase, storage::Phase::Verified);
         assert_eq!(state.library(&library_id).unwrap().root, new);
         assert_eq!(
             state.reader_sources["local:relocated-video"],
