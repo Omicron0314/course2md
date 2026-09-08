@@ -127,8 +127,8 @@ impl RenderOnce for RevealFocus {
             .id(self.id)
             .track_focus(&focus)
             .tab_stop(false)
+            .flex_shrink_0()
             .when(self.full_width, |view| view.w_full())
-            .when(!self.full_width, |view| view.flex_shrink_0())
             .min_w_0()
             .child(self.child)
     }

@@ -61,6 +61,7 @@ struct ReaderData {
     issues: Vec<String>,
 }
 struct ImageViewer {
+    scroll: ScrollHandle,
     frames: Vec<Frame>,
     index: usize,
     title: String,
@@ -1519,6 +1520,8 @@ impl Desktop {
                             .child("目录"),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
+                        this.reader_ui.pending_restore = this.capture_reading_position();
+                        this.reader_ui.restore_generation += 1;
                         this.reader_ui.toc_open = !this.reader_ui.toc_open;
                         cx.notify();
                     })))
@@ -2053,6 +2056,7 @@ impl Desktop {
                 article = article.child(
                     v_flex()
                         .id("reader-summary")
+                        .flex_shrink_0()
                         .w_full()
                         .gap_2()
                         .p_4()
@@ -2313,7 +2317,7 @@ impl Desktop {
                             .into_any_element()
                     }
                 };
-                article = article.child(view);
+                article = article.child(div().w_full().flex_shrink_0().child(view));
             }
         } else {
             if self.reader_ui.data_loading && self.reader_ui.frames.is_empty() {
@@ -2329,7 +2333,12 @@ impl Desktop {
             }
             // Shot grid follows the mock's flex-wrap recipe: 12rem minimum cards
             // wrap to two columns when the column narrows.
-            let mut grid = h_flex().w_full().min_w_0().flex_wrap().gap_4();
+            let mut grid = h_flex()
+                .w_full()
+                .min_w_0()
+                .flex_shrink_0()
+                .flex_wrap()
+                .gap_4();
             for (index, frame) in self.reader_ui.frames.iter().enumerate() {
                 let label = frame_label(&preview.course.title, frame, index);
                 let mut card = v_flex()
@@ -2537,6 +2546,7 @@ impl Desktop {
         };
         panel = panel.child(
             theme::accessible_text("toc-title", "目录")
+                .flex_shrink_0()
                 .text_size(TEXT_AUX)
                 .text_color(rgb(GRAY))
                 .font_weight(FontWeight::SEMIBOLD),
@@ -2608,6 +2618,7 @@ impl Desktop {
         }
         let focus = cx.focus_handle();
         self.reader_ui.viewer = Some(ImageViewer {
+            scroll: ScrollHandle::new(),
             frames: self.reader_ui.frames.clone(),
             index,
             title: preview.course.title.clone(),
@@ -2702,6 +2713,10 @@ impl Desktop {
             .and_then(|source| frame.seconds.and_then(|time| nav::seek_url(source, time)));
         let original_source = viewer.source.clone();
         let body_anchor = frame.body_anchor.clone();
+        let scroll = viewer.scroll.clone();
+        let reveal = |id: &'static str, child: AnyElement| {
+            crate::focus_scroll::RevealFocus::new(id, child, scroll.clone()).inline()
+        };
         let mut body = v_flex()
             .id("reader-image-dialog")
             .role(Role::Dialog)
@@ -2725,6 +2740,7 @@ impl Desktop {
             .gap_3()
             .max_h(px((f32::from(window.bounds().size.height) - 125.).max(160.)))
             .overflow_y_scroll()
+            .track_scroll(&scroll)
             .child(
                 theme::accessible_text("image-title", label.clone())
                     .role(Role::Heading)
@@ -2734,53 +2750,72 @@ impl Desktop {
                 h_flex()
                     .gap_2()
                     .flex_wrap()
-                    .child(
-                        control("image-previous")
+                    .child(reveal(
+                        "reveal-image-previous",
+                        (control("image-previous")
                             .label("上一张")
                             .disabled(index == 0)
-                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(-1, cx))),
-                    )
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.move_reader_image(-1, cx)),
+                            ))
+                        .into_any_element(),
+                    ))
                     .child(theme::accessible_text(
                         "image-number",
                         format!("{} / {count}", index + 1),
                     ))
-                    .child(
-                        control("image-next")
+                    .child(reveal(
+                        "reveal-image-next",
+                        (control("image-next")
                             .label("下一张")
                             .disabled(index + 1 >= count)
-                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(1, cx))),
-                    )
-                    .child(
-                        control("image-zoom-out")
+                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(1, cx))))
+                        .into_any_element(),
+                    ))
+                    .child(reveal(
+                        "reveal-image-zoom-out",
+                        (control("image-zoom-out")
                             .label("缩小")
                             .disabled(scale <= 0.1)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.zoom_reader_image(Some(0.8), window, cx)
-                            })),
-                    )
+                            })))
+                        .into_any_element(),
+                    ))
                     .child(theme::accessible_text(
                         "image-scale",
                         format!("{}%", (scale * 100.).round() as u32),
                     ))
-                    .child(
-                        control("image-zoom-in")
+                    .child(reveal(
+                        "reveal-image-zoom-in",
+                        (control("image-zoom-in")
                             .label("放大")
                             .disabled(scale >= 4.)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.zoom_reader_image(Some(1.25), window, cx)
-                            })),
-                    )
-                    .child(control("image-fit").label("适合窗口").on_click(
-                        cx.listener(|this, _, window, cx| this.zoom_reader_image(None, window, cx)),
+                            })))
+                        .into_any_element(),
                     ))
-                    .child(control("image-close").label("关闭截图").on_click(
-                        cx.listener(|this, _, window, cx| this.close_reader_image(window, cx)),
+                    .child(reveal(
+                        "reveal-image-fit",
+                        (control("image-fit").label("适合窗口").on_click(cx.listener(
+                            |this, _, window, cx| this.zoom_reader_image(None, window, cx),
+                        )))
+                        .into_any_element(),
+                    ))
+                    .child(reveal(
+                        "reveal-image-close",
+                        (control("image-close").label("关闭截图").on_click(
+                            cx.listener(|this, _, window, cx| this.close_reader_image(window, cx)),
+                        ))
+                        .into_any_element(),
                     )),
             );
         if let Some(path) = frame.path {
             body = body.child(
                 div()
                     .id("image-viewport")
+                    .flex_shrink_0()
                     .w_full()
                     .h(px((f32::from(window.bounds().size.height) - 260.).max(180.)))
                     .overflow_x_scroll()
@@ -2845,46 +2880,53 @@ impl Desktop {
         }
         let mut actions = h_flex().gap_2().flex_wrap();
         if let Some(anchor) = body_anchor {
-            actions = actions.child(control("image-to-body").label("在笔记中查看").on_click(
-                cx.listener(move |this, _, window, cx| {
-                    let index = this
-                        .preview
-                        .as_ref()
-                        .filter(|preview| preview.course.dir == version)
-                        .and_then(|preview| {
-                            preview
-                                .blocks
-                                .iter()
-                                .enumerate()
-                                .position(|(index, block)| block_anchor(block, index) == anchor)
-                        });
-                    this.close_reader_image(window, cx);
-                    if let Some(index) = index {
-                        this.jump_reader_block(index, 0., cx);
-                    }
-                }),
-            ));
+            actions =
+                actions.child(reveal(
+                    "reveal-image-to-body",
+                    (control("image-to-body")
+                        .label("在笔记中查看")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let index =
+                                this.preview
+                                    .as_ref()
+                                    .filter(|preview| preview.course.dir == version)
+                                    .and_then(|preview| {
+                                        preview.blocks.iter().enumerate().position(
+                                            |(index, block)| block_anchor(block, index) == anchor,
+                                        )
+                                    });
+                            this.close_reader_image(window, cx);
+                            if let Some(index) = index {
+                                this.jump_reader_block(index, 0., cx);
+                            }
+                        })))
+                    .into_any_element(),
+                ));
         }
         if let Some(url) = source_link {
-            actions = actions.child(
-                control("image-to-source")
+            actions = actions.child(reveal(
+                "reveal-image-to-source",
+                (control("image-to-source")
                     .ghost()
                     .label("从此处观看")
-                    .on_click(move |_, _, cx| cx.open_url(&url)),
-            );
+                    .on_click(move |_, _, cx| cx.open_url(&url)))
+                .into_any_element(),
+            ));
         } else if let Some(source) = original_source.filter(|source| match source {
             nav::SourceTarget::Web(_) => true,
             nav::SourceTarget::Local(path) => path.is_file(),
         }) {
-            actions = actions.child(
-                control("image-open-original")
+            actions = actions.child(reveal(
+                "reveal-image-open-original",
+                (control("image-open-original")
                     .ghost()
                     .label("打开原视频")
                     .on_click(move |_, _, cx| match &source {
                         nav::SourceTarget::Web(url) => cx.open_url(url),
                         nav::SourceTarget::Local(path) => cx.open_with_system(path),
-                    }),
-            );
+                    }))
+                .into_any_element(),
+            ));
         }
         body.child(actions).into_any_element()
     }
