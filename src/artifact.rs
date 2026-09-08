@@ -422,6 +422,117 @@ pub fn sync_dir(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::timeline::TranscriptEvent;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_pointer_commit_recovers_once_and_preserves_edited_old_exports() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let mut target = Target {
+            task_id: "task-1".into(),
+            course_id: "course".into(),
+            source_id: "source".into(),
+            version_id: "v1".into(),
+            course_dir: dir.path().join("course"),
+        };
+        let meta = VideoMeta {
+            title: "Existing note".into(),
+            uploader: String::new(),
+            duration: 1.,
+            webpage_url: "https://example.invalid/video".into(),
+            extractor: "example".into(),
+            id: "source".into(),
+        };
+        let sections = vec![Section {
+            t: 0.,
+            end: 1.,
+            image: String::new(),
+            speech: vec![TranscriptEvent {
+                start: 0.,
+                end: 1.,
+                text: "Preserved body".into(),
+                raw: None,
+            }],
+        }];
+        publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[crate::config::OutputFormat::Html],
+            Outcomes::default(),
+        )
+        .await
+        .unwrap();
+        let old_export = target.version_dir().join("exports/course.html");
+        let edited = b"<p>My manual corrections must survive.</p>";
+        std::fs::write(&old_export, edited).unwrap();
+        let pointer = target.course_dir.join("current.json");
+        let original_pointer = std::fs::read(&pointer).unwrap();
+        target.task_id = "task-2".into();
+        target.version_id = "v2".into();
+        // Version storage stays writable; only publishing the current pointer fails.
+        std::fs::set_permissions(&target.course_dir, std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        let interrupted = publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Outcomes::default(),
+        )
+        .await;
+        std::fs::set_permissions(&target.course_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert!(interrupted.is_err());
+        assert!(target.version_dir().join("manifest.json").is_file());
+        assert_eq!(std::fs::read(&pointer).unwrap(), original_pointer);
+        assert_eq!(std::fs::read(&old_export).unwrap(), edited);
+        let version_bytes = std::fs::read(target.version_dir().join("manifest.json")).unwrap();
+        for _ in 0..2 {
+            publish(
+                &target,
+                &work,
+                &meta,
+                &sections,
+                None,
+                &[],
+                Outcomes::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                std::fs::read(target.version_dir().join("manifest.json")).unwrap(),
+                version_bytes
+            );
+            assert_eq!(std::fs::read(&old_export).unwrap(), edited);
+        }
+        let current: CurrentVersion =
+            serde_json::from_slice(&std::fs::read(&pointer).unwrap()).unwrap();
+        assert_eq!(current.version_id, "v2");
+        // A delayed restart of the old task cannot roll back the newer pointer.
+        target.task_id = "task-1".into();
+        target.version_id = "v1".into();
+        publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Outcomes::default(),
+        )
+        .await
+        .unwrap();
+        let current: CurrentVersion =
+            serde_json::from_slice(&std::fs::read(pointer).unwrap()).unwrap();
+        assert_eq!(current.version_id, "v2");
+    }
+
     #[tokio::test]
     async fn empty_export_selection_still_publishes_body_and_failure_preserves_old_version() {
         let dir = tempfile::tempdir().unwrap();
