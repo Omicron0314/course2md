@@ -329,7 +329,14 @@ pub async fn publish(
         .into_iter()
         .map(|path| -> Result<Asset> {
             let full = staging.path().join(&path);
-            std::fs::File::open(&full)?.sync_all()?;
+            // Windows FlushFileBuffers requires a writable handle. These are
+            // newly staged assets; opening them must not truncate their contents.
+            std::fs::File::options()
+                .read(true)
+                .write(cfg!(windows))
+                .open(&full)?
+                .sync_all()
+                .with_context(|| format!("无法同步笔记文件 / Could not sync note asset: {path}"))?;
             Ok(Asset {
                 bytes: std::fs::metadata(&full)?.len(),
                 sha256: execution::file_digest(&full)?,
