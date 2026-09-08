@@ -4,7 +4,7 @@ use gpui::{prelude::*, *};
 use gpui_component::{Icon, Sizable};
 use std::time::Duration;
 
-pub const ENTER_MS: u64 = 240;
+pub const ENTER_MS: u64 = 160;
 pub const VALUE_MS: u64 = 200;
 
 pub fn ease_out(t: f32) -> f32 {
@@ -25,7 +25,7 @@ pub fn enter<E: IntoElement + Styled + 'static>(
         Animation::new(Duration::from_millis(ENTER_MS))
             .with_easing(ease_out)
             .with_max_fps(60.),
-        |view, t| view.relative().top(px(8. * (1. - t))).opacity(t),
+        |view, t| view.opacity(t),
     )
     .into_any_element()
 }
@@ -90,34 +90,138 @@ pub fn disclosure(
     id: impl Into<ElementId>,
     open: bool,
     content: Div,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    if cx.reduce_motion() {
-        return if open {
-            content.into_any_element()
-        } else {
-            div().hidden().into_any_element()
-        };
+    if open {
+        // Keep intrinsic measurement, padding and child layout in the normal
+        // tree. Measuring in prepaint and clipping to a previous frame's height
+        // cuts off controls when the content or available width changes.
+        enter(id, content, cx)
+    } else {
+        div().hidden().into_any_element()
     }
-    let id = id.into();
-    let amount = gpui_base::transition(
-        id.clone(),
-        if open { 1_f32 } else { 0_f32 },
-        gpui_base::Transition::new(Duration::from_millis(ENTER_MS)).ease(ease_out),
-        window,
-        cx,
-    );
-    if amount <= 0.001 && !open {
-        return div().hidden().into_any_element();
-    }
-    gpui_base::MotionReveal::new(id, amount, content.w_full().pb(px(4.)).into_any_element())
-        .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ease_out;
+    use super::{disclosure, ease_out};
+    use gpui::{
+        Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    };
+
+    struct RevealHarness {
+        open: bool,
+        width: Pixels,
+        content_height: Pixels,
+    }
+
+    impl Render for RevealHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let content = div()
+                .debug_selector(|| "motion-reveal-surface".into())
+                .flex()
+                .flex_col()
+                .p(px(16.))
+                .child(
+                    div()
+                        .debug_selector(|| "motion-reveal-content".into())
+                        .h(self.content_height),
+                );
+            let reveal = disclosure("geometry-reveal", self.open, content, window, cx);
+            div()
+                .debug_selector(|| "motion-layout-root".into())
+                .flex()
+                .flex_col()
+                .w(self.width)
+                .gap(px(8.))
+                .child(div().h(px(20.)))
+                .child(reveal)
+                .child(
+                    div()
+                        .debug_selector(|| "motion-layout-footer".into())
+                        .h(px(20.)),
+                )
+        }
+    }
+
+    fn draw_open_reveal(
+        view: &Entity<RevealHarness>,
+        cx: &mut VisualTestContext,
+        width: Pixels,
+        content_height: Pixels,
+    ) {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.open = true;
+                view.width = width;
+                view.content_height = content_height;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    fn assert_reveal_geometry(cx: &mut VisualTestContext, width: Pixels, height: Pixels) {
+        let root = cx.debug_bounds("motion-layout-root").unwrap();
+        let surface = cx.debug_bounds("motion-reveal-surface").unwrap();
+        let content = cx.debug_bounds("motion-reveal-content").unwrap();
+        let footer = cx.debug_bounds("motion-layout-footer").unwrap();
+        assert_eq!(surface.left(), root.left());
+        assert_eq!(surface.top(), root.top() + px(28.));
+        assert_eq!(surface.size, size(width, height + px(32.)));
+        assert_eq!(content.top() - surface.top(), px(16.));
+        assert_eq!(surface.bottom() - content.bottom(), px(16.));
+        assert_eq!(footer.top() - surface.bottom(), px(8.));
+        assert!(footer.bottom() <= root.bottom());
+    }
+
+    #[gpui::test]
+    fn disclosure_first_frame_preserves_natural_size_and_padding(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| RevealHarness {
+            open: false,
+            width: px(240.),
+            content_height: px(40.),
+        });
+        draw_open_reveal(&view, cx, px(240.), px(40.));
+        assert_reveal_geometry(cx, px(240.), px(40.));
+    }
+
+    #[gpui::test]
+    fn disclosure_content_resize_updates_following_rows_in_the_same_frame(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| RevealHarness {
+            open: false,
+            width: px(240.),
+            content_height: px(40.),
+        });
+        draw_open_reveal(&view, cx, px(240.), px(40.));
+        draw_open_reveal(&view, cx, px(180.), px(96.));
+        assert_reveal_geometry(cx, px(180.), px(96.));
+    }
+
+    #[gpui::test]
+    fn disclosure_closes_without_leaving_height_or_children(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| RevealHarness {
+            open: false,
+            width: px(240.),
+            content_height: px(40.),
+        });
+        draw_open_reveal(&view, cx, px(240.), px(40.));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.open = false;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        let root = cx.debug_bounds("motion-layout-root").unwrap();
+        let footer = cx.debug_bounds("motion-layout-footer").unwrap();
+        assert_eq!(footer.top(), root.top() + px(28.));
+        assert!(cx.debug_bounds("motion-reveal-surface").is_none());
+        assert!(cx.debug_bounds("motion-reveal-content").is_none());
+    }
+
     #[test]
     fn easing_finishes_exactly_and_preserves_forward_motion() {
         assert_eq!(ease_out(0.), 0.);
