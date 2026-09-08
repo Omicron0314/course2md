@@ -432,6 +432,9 @@ impl MockAi {
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 };
+                // BSD may inherit the listener's nonblocking mode. The request
+                // reader below uses blocking reads with a bounded timeout.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -488,7 +491,10 @@ impl Drop for MockAi {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(worker) = self.worker.take() {
-            worker.join().unwrap();
+            let result = worker.join();
+            if !std::thread::panicking() {
+                result.unwrap();
+            }
         }
     }
 }
