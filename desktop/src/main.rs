@@ -19,6 +19,8 @@ mod motion;
 mod notes;
 mod organize;
 mod palettes;
+#[cfg(feature = "performance")]
+mod performance;
 mod preferences;
 mod reader_navigation;
 mod reader_ui;
@@ -1089,6 +1091,8 @@ fn main() {
             },
             |window, cx| {
                 window.set_window_title("course2md");
+                #[cfg(feature = "performance")]
+                performance::start(window, cx);
                 window
                     .observe_window_appearance(|window, _| window.refresh())
                     .detach();
