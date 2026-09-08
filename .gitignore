@@ -2,6 +2,7 @@
 out/
 models/
 *.wav
+!desktop/assets/tests/service-speech.wav
 *.mp4
 .DS_Store
 .venv/
