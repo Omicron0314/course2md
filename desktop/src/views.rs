@@ -271,7 +271,7 @@ impl Render for Desktop {
         theme::apply_scale(self.preferences.application().font_scale, window, cx);
         let content = match self.page {
             Page::New => self.new_page(window, cx),
-            Page::Task => self.queue_page(cx),
+            Page::Task => self.queue_page(window, cx),
             Page::Library => self.library_page(window, cx),
             Page::Settings => self.settings_page(window, cx),
             Page::Result => self.reader_page(window, cx),

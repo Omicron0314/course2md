@@ -1962,7 +1962,7 @@ impl Desktop {
                 crate::workspace::TaskState::Queued
                 | crate::workspace::TaskState::Running
                 | crate::workspace::TaskState::Pausing => {
-                    bx.child(self.box_task_running(&task, cx))
+                    bx.child(self.box_task_running(&task, _window, cx))
                 }
                 _ => bx.child(self.box_task_attention(&task, cx)),
             };
