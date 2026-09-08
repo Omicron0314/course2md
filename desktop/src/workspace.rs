@@ -1640,6 +1640,91 @@ mod tests {
         assert!(draft.options.llm && draft.options.summarize);
     }
     #[test]
+    fn source_drafts_keep_separate_options_and_destinations_across_defaults_queue_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("workspace.json");
+        let mut ws = Workspace::open_at(
+            file.clone(),
+            dir.path().join("library-a"),
+            Default::default(),
+        )
+        .unwrap();
+        let a_library = ws.state.default_library.clone();
+        let online = ws
+            .state
+            .fresh_draft(true, Default::default(), Some((a_library.clone(), 42)));
+        let draft = ws.state.draft_mut().unwrap();
+        draft.change_source("online-A".into());
+        let stale = draft.revision;
+        draft.change_source("online-B".into());
+        assert!(draft.accept_source(draft.revision, source("online-B", "B")));
+        assert!(!draft.accept_source(stale, source("online-A", "A")));
+        draft.options.formats = [false, false, true];
+        draft.options.llm = false;
+        draft
+            .overrides
+            .extend([Override::Formats, Override::Proofread]);
+        let mut defaults = ConversionOptions::default();
+        defaults.llm = true;
+        defaults.summarize = true;
+        draft.inherit(&defaults);
+        assert!(!draft.options.llm && draft.options.summarize);
+        assert_eq!(draft.options.formats, [false, false, true]);
+        let mut queued = plan(&a_library);
+        queued.source = draft.source.clone().unwrap();
+        queued.source_id = "online-B".into();
+        queued.folder = draft.folder;
+        queued.options = draft.options.clone();
+        let id = ws.state.enqueue(queued.clone(), None).unwrap().0;
+        ws.state.switch_source_kind(false, defaults.clone());
+        let local = ws.state.current_draft.clone();
+        let draft = ws.state.draft_mut().unwrap();
+        draft.change_source("local-C.mp4".into());
+        draft.accept_source(draft.revision, source("local-C.mp4", "C"));
+        draft.folder = Some(7);
+        draft.options.formats = [false, true, false];
+        draft.options.summarize = false;
+        draft
+            .overrides
+            .extend([Override::Formats, Override::Summary]);
+        let c = draft.clone();
+        let b_library = "library-b".to_string();
+        ws.state.libraries.push(LibraryLocation {
+            id: b_library.clone(),
+            name: "B".into(),
+            root: dir.path().join("library-b"),
+            previous_roots: vec![],
+        });
+        ws.state.default_library = b_library.clone();
+        ws.state.switch_source_kind(true, defaults.clone());
+        assert_eq!(ws.state.current_draft, online);
+        assert_eq!(ws.state.draft().unwrap().folder, Some(42));
+        assert_eq!(ws.state.draft().unwrap().input, "online-B");
+        defaults.summarize = false;
+        for draft in &mut ws.state.drafts {
+            draft.inherit(&defaults);
+        }
+        assert!(ws.state.task(&id).unwrap().plan == queued);
+        ws.transaction(|_| Ok(())).unwrap();
+        drop(ws);
+        let mut restored =
+            Workspace::open_at(file, dir.path().join("fallback"), defaults.clone()).unwrap();
+        assert_eq!(restored.state.draft().unwrap().input, "online-B");
+        restored.state.switch_source_kind(false, defaults.clone());
+        assert_eq!(restored.state.current_draft, local);
+        assert_eq!(restored.state.draft().unwrap(), &c);
+        assert!(restored.state.task(&id).unwrap().plan == queued);
+        restored.state.fresh_draft(true, defaults.clone(), None);
+        assert_eq!(restored.state.draft().unwrap().library_id, b_library);
+        restored
+            .state
+            .fresh_draft(true, defaults, Some((a_library.clone(), 42)));
+        assert_eq!(restored.state.draft().unwrap().library_id, a_library);
+        assert_eq!(restored.state.draft().unwrap().folder, Some(42));
+        assert!(restored.state.task(&id).unwrap().plan == queued);
+    }
+
+    #[test]
     fn explicit_stop_survives_restart_while_duplicate_names_do_not_create_work() {
         let mut state = State::initial("/tmp/library".into(), Default::default());
         let mut task = plan(&state.default_library);
