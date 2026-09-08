@@ -1139,6 +1139,10 @@ fn main() {
         })
         .detach();
         cx.bind_keys([
+            // Focused controls activate on key-up. The dialog's generic Enter
+            // confirmation otherwise closes it on key-down before that action
+            // can run (including validation, cancellation, and image controls).
+            KeyBinding::new("enter", NoAction, Some("Dialog")),
             KeyBinding::new("secondary-q", Quit, None),
             KeyBinding::new("secondary-,", OpenSettings, None),
             KeyBinding::new("secondary-n", NewNote, None),
