@@ -498,6 +498,93 @@ fn summary_response() -> serde_json::Value {
 }
 
 #[test]
+fn proofreading_images_and_custom_rules_match_the_requested_outputs() {
+    if course2md::runtime::which("ffmpeg").is_none()
+        || course2md::runtime::which("ffprobe").is_none()
+    {
+        return;
+    }
+    let mock = MockAi::respond_with(|_, body| {
+        if body.to_string().contains("tldr") {
+            return Some((200, summary_response()));
+        }
+        let user = &body["messages"][1]["content"];
+        let text = user.as_str().map(str::to_owned).unwrap_or_else(|| {
+            user.as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        let segments: serde_json::Value = serde_json::from_str(&text).unwrap();
+        Some((
+            200,
+            serde_json::json!({"choices":[{"message":{"content":serde_json::json!({"segments":segments}).to_string()}}]}),
+        ))
+    });
+    let root = tempfile::tempdir().unwrap();
+    let video = root.path().join("slides.mp4");
+    let generated = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=320x240:r=1",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&video)
+        .output()
+        .unwrap();
+    assert!(generated.status.success());
+    let mut initial = request(root.path(), &video);
+    initial.config.llm.enabled = true;
+    initial.config.llm.summarize = true;
+    initial.config.llm.vision = true;
+    initial.config.llm.prompt = Some("UX-RULE-42: preserve terminology.".into());
+    initial.config.llm.base_url = mock.url.clone();
+    initial.config.llm.model = "proofread-vision".into();
+    initial.config.llm.api_key = "private-task-key".into();
+    initial.config.defaults.formats = Some(vec![course2md::config::OutputFormat::Json]);
+    initial
+        .service_versions
+        .insert("llm".into(), "service-v1".into());
+    let output = run(root.path(), &initial);
+    assert!(output.status.success(), "{:?}", events(&output));
+    let manifest = artifact::read_manifest(
+        &initial
+            .course_dir
+            .join("versions/version-one/manifest.json"),
+    )
+    .unwrap();
+    assert!(!manifest.partial, "{manifest:?}");
+    assert_eq!(
+        manifest.outcomes.proofreading.status,
+        artifact::Status::Succeeded
+    );
+    assert_eq!(
+        manifest.outcomes.summary.status,
+        artifact::Status::Succeeded
+    );
+    assert_eq!(manifest.outputs, vec!["exports/structured.json"]);
+    assert!(!manifest.frames.is_empty());
+    let bodies = mock.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[0].to_string().contains("UX-RULE-42"));
+    assert!(bodies[0].to_string().contains("image_url"));
+    assert!(!bodies[1].to_string().contains("image_url"));
+    assert!(bodies.iter().all(
+        |body| body["model"] == "proofread-vision" && !body.to_string().contains("input_audio")
+    ));
+}
+
+#[test]
 fn summary_only_reprocessing_retries_known_failure_once_without_repeating_source_work() {
     use std::sync::atomic::Ordering;
     if course2md::runtime::which("ffmpeg").is_none()
