@@ -1,0 +1,590 @@
+[
+  {
+    "cycle": 0,
+    "name": "settings",
+    "start": 1788873155289,
+    "end": 1788873156177,
+    "selected": [
+      "toggle button (settable, boolean) 设置, Value: on",
+      "toggle button (settable, boolean) 深色, Value: on",
+      "toggle button (settable, boolean) Tokyo Night，深色主题，已选择, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 0,
+    "name": "tasks",
+    "start": 1788873156177,
+    "end": 1788873157324,
+    "selected": [
+      "toggle button (settable, boolean) 任务, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 0,
+    "name": "workbench",
+    "start": 1788873157324,
+    "end": 1788873158461,
+    "selected": [
+      "toggle button (settable, boolean) 工作台, Value: on",
+      "toggle button (settable, boolean) 视频链接, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 0,
+    "name": "library",
+    "start": 1788873158461,
+    "end": 1788873159389,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 0,
+    "name": "collapse",
+    "start": 1788873159389,
+    "end": 1788873160568,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 展开 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 0,
+    "name": "expand",
+    "start": 1788873160568,
+    "end": 1788873161478,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 0,
+    "name": "down",
+    "start": 1788873161478,
+    "end": 1788873163377,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 0,
+    "name": "up",
+    "start": 1788873163378,
+    "end": 1788873164736,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 1,
+    "name": "settings",
+    "start": 1788873164736,
+    "end": 1788873165887,
+    "selected": [
+      "toggle button (settable, boolean) 设置, Value: on",
+      "toggle button (settable, boolean) 深色, Value: on",
+      "toggle button (settable, boolean) Tokyo Night，深色主题，已选择, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 1,
+    "name": "tasks",
+    "start": 1788873165887,
+    "end": 1788873167021,
+    "selected": [
+      "toggle button (settable, boolean) 任务, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 1,
+    "name": "workbench",
+    "start": 1788873167021,
+    "end": 1788873168154,
+    "selected": [
+      "toggle button (settable, boolean) 工作台, Value: on",
+      "toggle button (settable, boolean) 视频链接, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 1,
+    "name": "library",
+    "start": 1788873168154,
+    "end": 1788873169094,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 1,
+    "name": "collapse",
+    "start": 1788873169094,
+    "end": 1788873170274,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 展开 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 1,
+    "name": "expand",
+    "start": 1788873170274,
+    "end": 1788873171161,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 1,
+    "name": "down",
+    "start": 1788873171161,
+    "end": 1788873173062,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 1,
+    "name": "up",
+    "start": 1788873173062,
+    "end": 1788873174387,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 2,
+    "name": "settings",
+    "start": 1788873174387,
+    "end": 1788873175561,
+    "selected": [
+      "toggle button (settable, boolean) 设置, Value: on",
+      "toggle button (settable, boolean) 深色, Value: on",
+      "toggle button (settable, boolean) Tokyo Night，深色主题，已选择, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 2,
+    "name": "tasks",
+    "start": 1788873175561,
+    "end": 1788873176715,
+    "selected": [
+      "toggle button (settable, boolean) 任务, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 2,
+    "name": "workbench",
+    "start": 1788873176715,
+    "end": 1788873177842,
+    "selected": [
+      "toggle button (settable, boolean) 工作台, Value: on",
+      "toggle button (settable, boolean) 视频链接, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 2,
+    "name": "library",
+    "start": 1788873177842,
+    "end": 1788873178757,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 2,
+    "name": "collapse",
+    "start": 1788873178757,
+    "end": 1788873179934,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 展开 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 2,
+    "name": "expand",
+    "start": 1788873179934,
+    "end": 1788873180824,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 2,
+    "name": "down",
+    "start": 1788873180824,
+    "end": 1788873182717,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 2,
+    "name": "up",
+    "start": 1788873182717,
+    "end": 1788873184059,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 3,
+    "name": "settings",
+    "start": 1788873197645,
+    "end": 1788873198805,
+    "selected": [
+      "toggle button (settable, boolean) 设置, Value: on",
+      "toggle button (settable, boolean) 深色, Value: on",
+      "toggle button (settable, boolean) Tokyo Night，深色主题，已选择, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 3,
+    "name": "tasks",
+    "start": 1788873198805,
+    "end": 1788873199941,
+    "selected": [
+      "toggle button (settable, boolean) 任务, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 3,
+    "name": "workbench",
+    "start": 1788873199941,
+    "end": 1788873201076,
+    "selected": [
+      "toggle button (settable, boolean) 工作台, Value: on",
+      "toggle button (settable, boolean) 视频链接, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 3,
+    "name": "library",
+    "start": 1788873201076,
+    "end": 1788873201998,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 3,
+    "name": "collapse",
+    "start": 1788873201998,
+    "end": 1788873203157,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 展开 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 3,
+    "name": "expand",
+    "start": 1788873203157,
+    "end": 1788873204054,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 3,
+    "name": "down",
+    "start": 1788873204054,
+    "end": 1788873205945,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 3,
+    "name": "up",
+    "start": 1788873205945,
+    "end": 1788873207276,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 4,
+    "name": "settings",
+    "start": 1788873207276,
+    "end": 1788873208440,
+    "selected": [
+      "toggle button (settable, boolean) 设置, Value: on",
+      "toggle button (settable, boolean) 深色, Value: on",
+      "toggle button (settable, boolean) Tokyo Night，深色主题，已选择, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 4,
+    "name": "tasks",
+    "start": 1788873208440,
+    "end": 1788873209574,
+    "selected": [
+      "toggle button (settable, boolean) 任务, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 4,
+    "name": "workbench",
+    "start": 1788873209574,
+    "end": 1788873210703,
+    "selected": [
+      "toggle button (settable, boolean) 工作台, Value: on",
+      "toggle button (settable, boolean) 视频链接, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 4,
+    "name": "library",
+    "start": 1788873210703,
+    "end": 1788873211618,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 4,
+    "name": "collapse",
+    "start": 1788873211618,
+    "end": 1788873212787,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 展开 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 4,
+    "name": "expand",
+    "start": 1788873212787,
+    "end": 1788873213677,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 4,
+    "name": "down",
+    "start": 1788873213677,
+    "end": 1788873215570,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 4,
+    "name": "up",
+    "start": 1788873215570,
+    "end": 1788873216887,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 5,
+    "name": "settings",
+    "start": 1788873216887,
+    "end": 1788873218041,
+    "selected": [
+      "toggle button (settable, boolean) 设置, Value: on",
+      "toggle button (settable, boolean) 深色, Value: on",
+      "toggle button (settable, boolean) Tokyo Night，深色主题，已选择, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 5,
+    "name": "tasks",
+    "start": 1788873218041,
+    "end": 1788873219171,
+    "selected": [
+      "toggle button (settable, boolean) 任务, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 5,
+    "name": "workbench",
+    "start": 1788873219171,
+    "end": 1788873220289,
+    "selected": [
+      "toggle button (settable, boolean) 工作台, Value: on",
+      "toggle button (settable, boolean) 视频链接, Value: on"
+    ],
+    "group": null
+  },
+  {
+    "cycle": 5,
+    "name": "library",
+    "start": 1788873220289,
+    "end": 1788873221190,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 5,
+    "name": "collapse",
+    "start": 1788873221190,
+    "end": 1788873222341,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 展开 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 5,
+    "name": "expand",
+    "start": 1788873222341,
+    "end": 1788873223217,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 5,
+    "name": "down",
+    "start": 1788873223217,
+    "end": 1788873225103,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  },
+  {
+    "cycle": 5,
+    "name": "up",
+    "start": 1788873225103,
+    "end": 1788873226431,
+    "selected": [
+      "toggle button (settable, boolean) 我的笔记, Value: on",
+      "toggle button (settable, boolean) 卡片, Value: on"
+    ],
+    "group": [
+      "button 收起 未分类，5 篇"
+    ]
+  }
+]

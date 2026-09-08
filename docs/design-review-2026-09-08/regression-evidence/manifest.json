@@ -1,0 +1,98 @@
+{
+  "07-reader-chapter-jump.jpg": {
+    "bytes": 77165,
+    "sha256": "6dd53b21b9b1e19eddf70c2d704a11189b0a910a3369062db52c8c22928c99fe"
+  },
+  "09-image-dialog-after-window-shrink.jpg": {
+    "bytes": 93880,
+    "sha256": "af35b45530a86e81f093952314dd4fca3898cddb9a446bc0f5abde018643726e"
+  },
+  "10-image-caption-at-top.jpg": {
+    "bytes": 99363,
+    "sha256": "6f174e0eaea264dc990298f0aa731a674817b4d662e6d8e8860d375265650847"
+  },
+  "11-library-narrow.jpg": {
+    "bytes": 62261,
+    "sha256": "05919a8db41a70423056c2dd573e784adf72f26902d11be8737a554f7833fc8f"
+  },
+  "13-export-aligned-narrow.jpg": {
+    "bytes": 58304,
+    "sha256": "aa72ae75f535c2f3d1beb67e641150cd8da7d2e7d154a8e8b207a10430cfffc4"
+  },
+  "14-appearance-narrow.jpg": {
+    "bytes": 57562,
+    "sha256": "ad51968362b68dbea75b57b017965c0f995959b72afd84ab97a84143b1b473d4"
+  },
+  "15-appearance-light-narrow.jpg": {
+    "bytes": 53927,
+    "sha256": "e6f3afa93cea9daa2d3b4b43bf30e9ebe305d741b0f8bc571833953bdc58bbbd"
+  },
+  "16-storage-narrow.jpg": {
+    "bytes": 46064,
+    "sha256": "ed6fd9c1cd335b60d5396b00cee7456e84778a83c78c7478ffd389b2884e6349"
+  },
+  "17-tasks-narrow.jpg": {
+    "bytes": 67580,
+    "sha256": "bf13345044a5819f5be0e5ad224be5d6a2e37d7647be35e3c35fbfea3f48b677"
+  },
+  "18-library-four-columns.jpg": {
+    "bytes": 82218,
+    "sha256": "d04fc5fae946d8d76f4e3f187eb3859067768eda49c797a067fdd9edebbc1091"
+  },
+  "19-single-form-workbench.jpg": {
+    "bytes": 65711,
+    "sha256": "b660c0e45795bd0c6cf9bfd10fa2bca0e62a6f6d01b44b8169f20bfecf45af2f"
+  },
+  "20-new-note-empty.jpg": {
+    "bytes": 84883,
+    "sha256": "f51b1c4441ce65ea7c30ad71c5cf12107c68b1d896c1232836e0e9f791becb84"
+  },
+  "21-reading-before-new.jpg": {
+    "bytes": 85533,
+    "sha256": "0399594ec6505f4792f3c42bbf122f32cd65a292ac4bd1d67d9a412a084f81fb"
+  },
+  "22-services-list.jpg": {
+    "bytes": 55623,
+    "sha256": "87ad76a366c5b0d59a363a626724d0ad47491fc0dc0c3c6da0486cd6b60e73aa"
+  },
+  "23-service-edit-actions.jpg": {
+    "bytes": 70899,
+    "sha256": "7bea2942c03dcb103de7ac90e46eb7362ec9fb1814d52ed55644fd7ac9a9404e"
+  },
+  "24-service-saved.jpg": {
+    "bytes": 62042,
+    "sha256": "4dccaad58beca3d75de540070a6f7467ac8a983c5ade933172ddd90c49148c42"
+  },
+  "25-installed-corrected-about.jpg": {
+    "bytes": 61327,
+    "sha256": "41235949daf12105106bbc5bd541bb6d7f2962e166d5ba4d0cf9090369d1c825"
+  },
+  "26-installed-corrected-workbench.jpg": {
+    "bytes": 47326,
+    "sha256": "318b9b7a2f009c882f4164027ec8cd63d392e9d226e2771f89515f3bcdf7aec3"
+  },
+  "installed-preview.json": {
+    "bytes": 559,
+    "sha256": "6667c7e64952e323940771f70f7ccef7ccc35844401acd17f2a14927e42a873a"
+  },
+  "pairedafter-actions.json": {
+    "bytes": 14444,
+    "sha256": "0317405811efd8e9ebe9ce964fe64bc8f712a2f1420bb9430bc568c6babee910"
+  },
+  "pairedbefore-actions.json": {
+    "bytes": 14444,
+    "sha256": "044fc7945d5549de3afd70d265030177193c292310560580b2df2791fc8801b5"
+  },
+  "performance-final.json": {
+    "bytes": 169852,
+    "sha256": "66de90dfccc6630f1d5ff388d5bccef70155156bec4ba5b9736f436da2e65985"
+  },
+  "performance-paired.json": {
+    "bytes": 279242,
+    "sha256": "6f1bc777a5fcff7e30b5ff3cc50c45f65397e09ef6c6a616e2f9a45dc0f2d0b7"
+  },
+  "pre-pool-physical-hangs.xml": {
+    "bytes": 686,
+    "sha256": "e17323cc297e5120f1204adb7c2b6a1d9bd31fa11801f3996149db88209b61c6"
+  }
+}
