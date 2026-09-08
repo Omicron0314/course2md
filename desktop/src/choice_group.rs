@@ -35,6 +35,7 @@ pub struct SingleChoiceGroup {
     options: Vec<OptionItem>,
     disabled: bool,
     on_change: Option<Change>,
+    reveal_in: Option<ScrollHandle>,
 }
 impl SingleChoiceGroup {
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
@@ -45,6 +46,7 @@ impl SingleChoiceGroup {
             options: Vec::new(),
             disabled: false,
             on_change: None,
+            reveal_in: None,
         }
     }
     pub fn options<K: Into<SharedString>, V: Into<SharedString>>(
@@ -63,6 +65,10 @@ impl SingleChoiceGroup {
     }
     pub fn selected(mut self, value: impl Into<SharedString>) -> Self {
         self.value = Some(value.into());
+        self
+    }
+    pub fn reveal_in(mut self, scroll: ScrollHandle) -> Self {
+        self.reveal_in = Some(scroll);
         self
     }
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -180,60 +186,86 @@ impl RenderOnce for SingleChoiceGroup {
         let first = navigation.clone();
         let last = navigation;
         let count = self.options.len();
-        gpui_base::RadioGroup::new(self.id)
-            .aria_label(self.label)
-            .axis(Axis::Horizontal)
-            .key_context("SingleChoiceGroup")
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap_2()
-            .on_action(move |_: &NextChoice, window, cx| next.navigate(Direction::Next, window, cx))
-            .on_action(move |_: &PreviousChoice, window, cx| {
-                previous.navigate(Direction::Previous, window, cx)
-            })
-            .on_action(move |_: &FirstChoice, window, cx| {
-                first.navigate(Direction::First, window, cx)
-            })
-            .on_action(move |_: &LastChoice, window, cx| last.navigate(Direction::Last, window, cx))
-            .children(self.options.into_iter().enumerate().map(|(index, option)| {
-                let checked = selected == Some(index);
-                let on_change = self.on_change.clone();
-                let focus = handles[index].clone();
-                gpui_base::Radio::new(option.value.clone())
-                    .checked(checked)
-                    .disabled(option.disabled)
-                    .accessibility_label(if option.disabled {
-                        SharedString::from(format!("{}，当前不可用", option.label))
-                    } else {
-                        option.label.clone()
-                    })
-                    .set_position(index + 1, count)
-                    .track_focus(&handles[index])
-                    .tab_stop(entry == Some(index))
-                    .min_h(rems(2.6))
-                    .min_w_0()
-                    .max_w_full()
-                    .h_auto()
-                    .px_3()
-                    .py_2()
-                    .border_2()
-                    .rounded_md()
-                    .text_base()
-                    .bg(rgb(if checked { super::BLUE } else { super::SURFACE }))
-                    .text_color(rgb(if checked { super::SURFACE } else { super::INK }))
-                    .border_color(rgb(if checked { super::BLUE } else { super::CONTROL }))
-                    .when(checked, |radio| radio.font_weight(FontWeight::SEMIBOLD))
-                    .when(option.disabled, |radio| radio.opacity(0.55))
-                    .focus(|style| style.border_color(rgb(super::INK)).shadow_sm())
-                    .child(option.label)
-                    .on_change(move |_, _, window, cx| {
-                        focus.focus(window, cx);
-                        if let Some(on_change) = &on_change {
-                            on_change(&option.value, window, cx);
-                        }
-                    })
-            }))
+        // v_flex 列里子项默认横向拉伸；包一层 h_flex 让轨道按内容收宽。
+        let reveal_id = SharedString::from(format!("choice-reveal-{:?}", self.id));
+        let group = gpui_base::h_flex().w_full().min_w_0().child(
+            gpui_base::RadioGroup::new(self.id)
+                .aria_label(self.label)
+                .axis(Axis::Horizontal)
+                .key_context("SingleChoiceGroup")
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .self_start()
+                .gap(px(2.))
+                .p(px(2.))
+                .rounded_full()
+                .bg(rgb(super::SEGMENT_TRACK))
+                .max_w_full()
+                .on_action(move |_: &NextChoice, window, cx| {
+                    next.navigate(Direction::Next, window, cx)
+                })
+                .on_action(move |_: &PreviousChoice, window, cx| {
+                    previous.navigate(Direction::Previous, window, cx)
+                })
+                .on_action(move |_: &FirstChoice, window, cx| {
+                    first.navigate(Direction::First, window, cx)
+                })
+                .on_action(move |_: &LastChoice, window, cx| {
+                    last.navigate(Direction::Last, window, cx)
+                })
+                .children(self.options.into_iter().enumerate().map(|(index, option)| {
+                    let checked = selected == Some(index);
+                    let on_change = self.on_change.clone();
+                    let focus = handles[index].clone();
+                    gpui_base::Radio::new(option.value.clone())
+                        .checked(checked)
+                        .disabled(option.disabled)
+                        .accessibility_label(if option.disabled {
+                            SharedString::from(format!("{}，当前不可用", option.label))
+                        } else {
+                            option.label.clone()
+                        })
+                        .set_position(index + 1, count)
+                        .track_focus(&handles[index])
+                        .tab_stop(entry == Some(index))
+                        .min_h(rems(2.286))
+                        .min_w_0()
+                        .max_w_full()
+                        .h_auto()
+                        .px(px(14.))
+                        .py(px(2.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(gpui::transparent_black())
+                        .text_size(rems(1.))
+                        .bg(rgb(if checked {
+                            super::SURFACE
+                        } else {
+                            super::SEGMENT_TRACK
+                        }))
+                        .text_color(rgb(if checked { super::INK } else { super::GRAY }))
+                        .when(checked, |radio| {
+                            radio
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .shadow(super::shadow_segment_selected())
+                        })
+                        .when(option.disabled, |radio| radio.opacity(0.55))
+                        .focus(|style| style.border_color(rgb(super::INK)).shadow_sm())
+                        .child(option.label)
+                        .on_change(move |_, _, window, cx| {
+                            focus.focus(window, cx);
+                            if let Some(on_change) = &on_change {
+                                on_change(&option.value, window, cx);
+                            }
+                        })
+                })),
+        );
+        if let Some(scroll) = self.reveal_in {
+            crate::focus_scroll::RevealFocus::new(reveal_id, group, scroll).into_any_element()
+        } else {
+            group.into_any_element()
+        }
     }
 }
 

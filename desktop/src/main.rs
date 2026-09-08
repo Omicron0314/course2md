@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod a11y;
+mod focus_scroll;
 mod about;
 mod account_ui;
 mod activity;
