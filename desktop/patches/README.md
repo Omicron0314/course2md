@@ -31,6 +31,12 @@ Developer checkouts are never patched.
   finite pool; keeping it alive across successive display callbacks can delay
   reuse. The drawable, encoding and submission stay inside that scope. This
   does not change frame scheduling, transaction presentation or Metal timeouts.
+- `zed-metal-present-stages.patch` adds opt-in profiler spans for the window
+  lock, drawable acquisition, encoding, submission, transaction presentation
+  and autorelease drain. The fixed-size timing accumulator is attached to the
+  existing present event; JSON formatting and file output stay in the desktop
+  app's background collector. Non-profiler builds omit clock and storage work.
+  These spans locate stalls without changing native presentation order.
 
 When upgrading the locked revisions, review upstream changes before adjusting a
 patch. Do not edit `.deps` to fix an application build. The preparer deliberately
