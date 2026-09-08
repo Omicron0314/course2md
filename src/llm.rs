@@ -561,13 +561,9 @@ pub(crate) fn send_chat_described(
             }
             // 降级请求只试一次：原请求已按 MAX_ATTEMPTS 重试过，这里只验证
             // response_format 兼容性，再走完整重试循环会成倍放大等待时间。
-            match request_chat_once(s, &relaxed, purpose, description) {
-                Ok(r) => {
-                    tracing::debug!("端点不支持 response_format，降级重试成功");
-                    r
-                }
-                Err(second) => return Err(second),
-            }
+            let response = request_chat_once(s, &relaxed, purpose, description)?;
+            tracing::debug!("端点不支持 response_format，降级重试成功");
+            response
         }
     };
     let no_status = |err: anyhow::Error| ChatFailure {

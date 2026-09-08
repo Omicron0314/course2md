@@ -169,13 +169,12 @@ pub fn is_active() -> bool {
 pub struct Guard(Arc<Ledger>);
 impl Drop for Guard {
     fn drop(&mut self) {
-        if let Ok(mut current) = ACTIVE.get_or_init(|| Mutex::new(None)).lock() {
-            if current
+        if let Ok(mut current) = ACTIVE.get_or_init(|| Mutex::new(None)).lock()
+            && current
                 .as_ref()
                 .is_some_and(|value| Arc::ptr_eq(value, &self.0))
-            {
-                *current = None;
-            }
+        {
+            *current = None;
         }
     }
 }
@@ -328,6 +327,8 @@ impl Ledger {
             service, purpose, purpose, endpoint, identity, send, validate,
         )
     }
+    // Keep the transport, validation and persisted request identity explicit at the call site.
+    #[allow(clippy::too_many_arguments)]
     fn send_described(
         &self,
         service: &str,
@@ -361,16 +362,16 @@ impl Ledger {
         } else {
             None
         };
-        if let Some(old) = &old {
-            if old.state == State::Completed {
-                let response = old.response.clone().ok_or_else(|| {
-                    Failure::local(
-                        "已完成请求缺少保存结果；没有重新发送 / Saved request result is missing",
-                    )
-                })?;
-                validate(&response).map_err(Failure::local)?;
-                return Ok(response);
-            }
+        if let Some(old) = &old
+            && old.state == State::Completed
+        {
+            let response = old.response.clone().ok_or_else(|| {
+                Failure::local(
+                    "已完成请求缺少保存结果；没有重新发送 / Saved request result is missing",
+                )
+            })?;
+            validate(&response).map_err(Failure::local)?;
+            return Ok(response);
         }
         let control = self.check_intent(Some(&service_version))?;
         let authorized = old.as_ref().is_some_and(|receipt| {

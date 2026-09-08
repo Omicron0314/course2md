@@ -134,10 +134,12 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 fn text(bytes: &[u8]) -> Result<String> {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
-        anyhow::ensure!(bytes.len() % 2 == 0, "旧文件的 UTF-16 编码不完整");
+        anyhow::ensure!(bytes.len().is_multiple_of(2), "旧文件的 UTF-16 编码不完整");
         let little = bytes[0] == 0xff;
         let units = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|b| {
                 if little {
                     u16::from_le_bytes([b[0], b[1]])
@@ -366,11 +368,13 @@ fn parse_json(value: &str) -> Result<Parsed> {
         schema.is_none_or(|v| v == 1),
         "这份 JSON 的结构版本暂不受支持；原文件已保留"
     );
-    let mut parsed = Parsed::default();
-    parsed.meta = value.get("meta").and_then(known_meta);
-    parsed.summary = value
-        .get("summary")
-        .and_then(|s| serde_json::from_value(s.clone()).ok());
+    let mut parsed = Parsed {
+        meta: value.get("meta").and_then(known_meta),
+        summary: value
+            .get("summary")
+            .and_then(|s| serde_json::from_value(s.clone()).ok()),
+        ..Default::default()
+    };
     if let Some(summary) = &parsed.summary {
         parsed.blocks.push(Block::Heading {
             text: "摘要".into(),
@@ -706,15 +710,15 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
     }
     for name in ["meta.json", "run.json"] {
         let path = root.join(name);
-        if path.is_file() {
-            if let Ok(bytes) = read_bounded(&artifact::safe_asset_path(&root, name)?, TEXT_LIMIT) {
-                originals.push(Original {
-                    name: name.into(),
-                    path: format!("original/{name}"),
-                    sha256: execution::digest(&bytes),
-                });
-                files.insert(format!("original/{name}"), bytes);
-            }
+        if path.is_file()
+            && let Ok(bytes) = read_bounded(&artifact::safe_asset_path(&root, name)?, TEXT_LIMIT)
+        {
+            originals.push(Original {
+                name: name.into(),
+                path: format!("original/{name}"),
+                sha256: execution::digest(&bytes),
+            });
+            files.insert(format!("original/{name}"), bytes);
         }
     }
     let run = files
@@ -975,8 +979,10 @@ pub fn import_note(dir: &Path, note: Note) -> Result<Imported> {
                 image: s.image.clone(),
             })
             .collect::<Vec<_>>();
-        let mut outcomes = Outcomes::default();
-        outcomes.transcript = Outcome::succeeded();
+        let mut outcomes = Outcomes {
+            transcript: Outcome::succeeded(),
+            ..Default::default()
+        };
         if !frames.is_empty() {
             outcomes.screenshots = Outcome::succeeded();
         }

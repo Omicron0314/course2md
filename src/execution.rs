@@ -327,33 +327,6 @@ pub async fn run(request: Request) -> Result<()> {
     crate::pipeline::run_task(&request, &cfg).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn immutable_work_rejects_changed_inputs_without_destroying_progress() {
-        let dir = tempfile::tempdir().unwrap();
-        bind_work_dir(dir.path(), &serde_json::json!({"title":"A"})).unwrap();
-        std::fs::write(dir.path().join("asr.jsonl"), "saved result").unwrap();
-        bind_work_dir(dir.path(), &serde_json::json!({"title":"A"})).unwrap();
-        assert!(bind_work_dir(dir.path(), &serde_json::json!({"title":"B"})).is_err());
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("asr.jsonl")).unwrap(),
-            "saved result"
-        );
-    }
-
-    #[test]
-    fn malformed_request_does_not_echo_secret() {
-        let error = Request::read(br#"{"api_key":"private-test-key"}"#.as_slice())
-            .err()
-            .unwrap();
-        assert!(!format!("{error:#}").contains("private-test-key"));
-        assert!(!valid_id("../elsewhere"));
-    }
-}
-
 /// Call only while all writers are paused and the library copy has been verified.
 /// New bindings omit resolved output locations. This migrates older bindings by changing
 /// only owned work/output fields, and verifies each copied identity against the old one.
@@ -400,14 +373,11 @@ pub fn relocate_work_bindings(root_old: &Path, root_new: &Path) -> Result<usize>
             "/config/out_root",
             "/config/model_dir",
         ] {
-            if let Some(value) = relocated.pointer_mut(pointer) {
-                if let Some(location) = value.as_str().filter(|s| !s.is_empty()) {
-                    if let Ok(relative) = Path::new(location).strip_prefix(root_old) {
-                        *value = serde_json::Value::String(
-                            root_new.join(relative).display().to_string(),
-                        );
-                    }
-                }
+            if let Some(value) = relocated.pointer_mut(pointer)
+                && let Some(location) = value.as_str().filter(|s| !s.is_empty())
+                && let Ok(relative) = Path::new(location).strip_prefix(root_old)
+            {
+                *value = serde_json::Value::String(root_new.join(relative).display().to_string());
             }
         }
         anyhow::ensure!(
@@ -423,4 +393,31 @@ pub fn relocate_work_bindings(root_old: &Path, root_new: &Path) -> Result<usize>
         crate::checkpoint::atomic_write(&path, &serde_json::to_vec_pretty(&value)?)?;
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn immutable_work_rejects_changed_inputs_without_destroying_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        bind_work_dir(dir.path(), &serde_json::json!({"title":"A"})).unwrap();
+        std::fs::write(dir.path().join("asr.jsonl"), "saved result").unwrap();
+        bind_work_dir(dir.path(), &serde_json::json!({"title":"A"})).unwrap();
+        assert!(bind_work_dir(dir.path(), &serde_json::json!({"title":"B"})).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("asr.jsonl")).unwrap(),
+            "saved result"
+        );
+    }
+
+    #[test]
+    fn malformed_request_does_not_echo_secret() {
+        let error = Request::read(br#"{"api_key":"private-test-key"}"#.as_slice())
+            .err()
+            .unwrap();
+        assert!(!format!("{error:#}").contains("private-test-key"));
+        assert!(!valid_id("../elsewhere"));
+    }
 }

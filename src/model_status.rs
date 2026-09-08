@@ -50,7 +50,7 @@ pub fn inspect(provider: AsrProvider, model: &str, root: &Path) -> Result<LocalM
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| crate::config::cache_dir());
+        .unwrap_or_else(crate::config::cache_dir);
     let apple_base = ["QWEN3_CACHE_DIR", "QWEN3_ASR_CACHE_DIR"]
         .into_iter()
         .find_map(|key| {

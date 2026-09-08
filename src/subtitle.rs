@@ -282,7 +282,9 @@ pub fn read_subtitle_text(path: &Path) -> Result<String> {
         );
         let little = bytes[0] == 0xff;
         let words: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 if little {
                     u16::from_le_bytes([pair[0], pair[1]])

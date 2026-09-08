@@ -79,10 +79,11 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
     };
     let mut cfg = cfg.clone();
     cfg.out_dir = target.course_dir.join(".work").join(&task_id);
-    if cfg.provider == config::AsrProvider::Api && cfg.asr_api.api_key.is_empty() {
-        if let Some(key) = config::asr_api_key_from_env() {
-            cfg.asr_api.api_key = key;
-        }
+    if cfg.provider == config::AsrProvider::Api
+        && cfg.asr_api.api_key.is_empty()
+        && let Some(key) = config::asr_api_key_from_env()
+    {
+        cfg.asr_api.api_key = key;
     }
     cfg.resume = true;
     let _dispatch = crate::dispatch::install(&cfg.out_dir, None, &Default::default())?;
@@ -589,6 +590,8 @@ struct TranscriptCache {
     events: Vec<timeline::TranscriptEvent>,
 }
 
+// These arguments keep resolved inputs and credential policy separate from mutable config.
+#[allow(clippy::too_many_arguments)]
 async fn run_prepared(
     cfg: &PipelineConfig,
     meta: &VideoMeta,

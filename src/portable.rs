@@ -36,10 +36,10 @@ pub fn export(version_dir: &Path, format: OutputFormat, destination: &Path) -> R
         version_dir,
         &manifest.document,
     )?)?)?;
-    if let Some(provenance) = crate::legacy::provenance(version_dir)? {
-        if format != OutputFormat::Json {
-            return write_legacy(version_dir, &document, &provenance, format, destination);
-        }
+    if let Some(provenance) = crate::legacy::provenance(version_dir)?
+        && format != OutputFormat::Json
+    {
+        return write_legacy(version_dir, &document, &provenance, format, destination);
     }
     write_document(version_dir, &document, format, destination)
 }
