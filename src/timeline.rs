@@ -209,17 +209,19 @@ pub fn coalesce_sections(sections: &mut [Section]) {
     }
 }
 
-/// 拼接两段文本：双方都以字母/数字结尾/开头时补一个空格（英文词边界），
-/// 中文等直接相连。
+/// 保留拉丁文字的词间/句间空格；中文、日文和连字符内的片段直接相连。
 fn append_text(paragraph: &mut String, next: &str) {
+    let latin_word = |c: char| {
+        c.is_ascii_alphanumeric()
+            || (c.is_alphabetic()
+                && matches!(c, '\u{00c0}'..='\u{024f}' | '\u{1e00}'..='\u{1eff}'))
+    };
     let previous_is_word = paragraph
+        .trim_end_matches(['.', ',', '!', '?', ':', ';', ')', ']', '}', '»', '”', '"'])
         .chars()
         .next_back()
-        .is_some_and(|c| c.is_ascii_alphanumeric());
-    let next_is_word = next
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric());
+        .is_some_and(latin_word);
+    let next_is_word = next.chars().next().is_some_and(latin_word);
     if previous_is_word && next_is_word {
         paragraph.push(' ');
     }
@@ -504,6 +506,24 @@ mod tests {
         coalesce_sections(&mut sections);
         assert_eq!(sections[0].speech.len(), 1);
         assert_eq!(sections[0].speech[0].text, "hello world next sentence");
+    }
+
+    #[test]
+    fn subtitle_boundaries_preserve_latin_sentences_without_separating_cjk_or_apostrophes() {
+        for (left, right, expected) in [
+            ("Le risque est limité.", "La suite.", "Le risque est limité. La suite."),
+            ("café", "économique", "café économique"),
+            ("A risk?", "Yes.", "A risk? Yes."),
+            ("a word", ", next", "a word, next"),
+            ("l’", "investissement", "l’investissement"),
+            ("long-", "term", "long-term"),
+            ("风险。", "收益。", "风险。收益。"),
+            ("字幕は", "保持する。", "字幕は保持する。"),
+        ] {
+            let mut paragraph = left.to_owned();
+            append_text(&mut paragraph, right);
+            assert_eq!(paragraph, expected);
+        }
     }
 
     #[test]
