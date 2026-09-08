@@ -332,6 +332,7 @@ impl Desktop {
             SharedString::from(format!("preference-reveal-{label}")),
             preference(label, hint, control),
         )
+        .when(self.page == Page::Settings, |row| row.max_w(CONTROL_GROUP_MAX))
     }
     fn setting_field(&self, field: EditField, label: &'static str, _cx: &App) -> Div {
         let error = self
