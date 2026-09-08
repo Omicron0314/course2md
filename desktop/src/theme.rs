@@ -281,11 +281,28 @@ pub fn seg_track() -> gpui::Div {
         .bg(rgb(SEGMENT_TRACK))
 }
 
-/// One segment: selected renders as a white pill with a soft shadow.
-pub fn seg_item(
+/// Cream inset note for scope/policy lines (mock .scope-note).
+pub fn banner_note(
     id: impl Into<gpui::ElementId>,
-    selected: bool,
-) -> gpui_component::button::Button {
+    value: impl Into<gpui::SharedString>,
+) -> gpui::Stateful<gpui::Div> {
+    use gpui::*;
+    let value = value.into();
+    div()
+        .id(id)
+        .role(gpui::Role::Label)
+        .aria_label(value.clone())
+        .w_full()
+        .p(px(12.))
+        .rounded(RADIUS_CARD)
+        .bg(rgb(HOVER_WARM))
+        .text_size(TEXT_AUX)
+        .text_color(rgb(GRAY))
+        .child(value)
+}
+
+/// One segment: selected renders as a white pill with a soft shadow.
+pub fn seg_item(id: impl Into<gpui::ElementId>, selected: bool) -> gpui_component::button::Button {
     use gpui::{Styled, prelude::FluentBuilder};
     use gpui_component::{Selectable, button::ButtonVariants};
     control(id)

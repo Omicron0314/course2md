@@ -70,6 +70,9 @@ pub(crate) struct State {
     editor: Option<ServiceEditor>,
     initialized: bool,
     show_prompt: bool,
+    model_details_open: bool,
+    storage_details_open: bool,
+    diagnostics_details_open: bool,
     feedback: BTreeMap<PreferenceGroup, (String, bool, Instant)>,
     feedback_details: BTreeMap<PreferenceGroup, String>,
     expanded_feedback: std::collections::BTreeSet<PreferenceGroup>,
@@ -143,6 +146,9 @@ impl State {
             editor: None,
             initialized: false,
             show_prompt: false,
+            model_details_open: false,
+            storage_details_open: false,
+            diagnostics_details_open: false,
             feedback: BTreeMap::new(),
             feedback_details: BTreeMap::new(),
             expanded_feedback: Default::default(),
@@ -164,8 +170,9 @@ struct ServiceDialog {
 }
 impl Render for ServiceDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.desktop
-            .update(cx, |desktop, cx| desktop.service_editor_content(window, cx))
+        self.desktop.update(cx, |desktop, cx| {
+            desktop.service_editor_content(false, window, cx)
+        })
     }
 }
 
@@ -181,6 +188,7 @@ fn group(id: &'static str, title: &'static str) -> Div {
         .border_color(rgb(LINE))
         .child(
             text(id, title)
+                .role(Role::Heading)
                 .text_size(rems(16.0 / 14.0))
                 .font_weight(FontWeight::SEMIBOLD),
         )
@@ -208,7 +216,7 @@ pub(super) fn preference(label: &'static str, hint: &'static str, control: Switc
                     )
                 }),
         )
-        .child(control.accessibility_label(label).p_2())
+        .child(coral_switch(control).accessibility_label(label).p_2())
 }
 
 impl Desktop {
@@ -250,6 +258,36 @@ impl Desktop {
     fn setting_value(&self, field: EditField, cx: &App) -> String {
         self.settings_ui.inputs[&field].read(cx).value().to_string()
     }
+    fn reveal_setting(&self, id: impl Into<ElementId>, child: impl IntoElement) -> Div {
+        let child = child.into_any_element();
+        if self.page == Page::Settings {
+            div()
+                .w_full()
+                .min_w_0()
+                .child(crate::focus_scroll::RevealFocus::new(
+                    id,
+                    child,
+                    self.scrolls[Page::Settings as usize].clone(),
+                ))
+        } else {
+            div().w_full().min_w_0().child(child)
+        }
+    }
+    fn setting_choices(
+        &self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+    ) -> SingleChoiceGroup {
+        SingleChoiceGroup::new(id, label).when(self.page == Page::Settings, |group| {
+            group.reveal_in(self.scrolls[Page::Settings as usize].clone())
+        })
+    }
+    fn setting_preference(&self, label: &'static str, hint: &'static str, control: Switch) -> Div {
+        self.reveal_setting(
+            SharedString::from(format!("preference-reveal-{label}")),
+            preference(label, hint, control),
+        )
+    }
     fn setting_field(&self, field: EditField, label: &'static str, _cx: &App) -> Div {
         let error = self
             .settings_ui
@@ -267,40 +305,43 @@ impl Desktop {
                 })
             })
             .map(|error| error.message.clone());
-        v_flex()
-            .w_full()
-            .gap_2()
-            .child(
-                text(("setting-field-label", field as usize), label)
-                    .font_weight(FontWeight::MEDIUM),
-            )
-            .child(
-                Input::new(&self.settings_ui.inputs[&field])
-                    .w_full()
-                    .when(field == EditField::Key, |input| {
-                        input.content_type(InputContentType::Password)
-                    })
-                    .aria_label(
-                        error
-                            .as_ref()
-                            .map(|error| format!("{label}，{error}"))
-                            .unwrap_or_else(|| label.to_owned()),
-                    )
-                    .readonly(
-                        self.settings_ui
-                            .editor
-                            .as_ref()
-                            .is_some_and(|editor| editor.pending_binding.is_some()),
-                    )
-                    .when(error.is_some(), |input| input.border_color(rgb(0xa32626))),
-            )
-            .when_some(error, |view, error| {
-                view.child(
-                    text(("setting-error", field as usize), error)
-                        .text_sm()
-                        .text_color(rgb(0xa32626)),
+        self.reveal_setting(
+            ("setting-field-reveal", field as usize),
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    text(("setting-field-label", field as usize), label)
+                        .font_weight(FontWeight::MEDIUM),
                 )
-            })
+                .child(
+                    Input::new(&self.settings_ui.inputs[&field])
+                        .w_full()
+                        .when(field == EditField::Key, |input| {
+                            input.content_type(InputContentType::Password)
+                        })
+                        .aria_label(
+                            error
+                                .as_ref()
+                                .map(|error| format!("{label}，{error}"))
+                                .unwrap_or_else(|| label.to_owned()),
+                        )
+                        .readonly(
+                            self.settings_ui
+                                .editor
+                                .as_ref()
+                                .is_some_and(|editor| editor.pending_binding.is_some()),
+                        )
+                        .when(error.is_some(), |input| input.border_color(rgb(0xa32626))),
+                )
+                .when_some(error, |view, error| {
+                    view.child(
+                        text(("setting-error", field as usize), error)
+                            .text_sm()
+                            .text_color(rgb(0xa32626)),
+                    )
+                }),
+        )
     }
     fn hydrate_settings_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_ui.initialized {
@@ -370,6 +411,15 @@ impl Desktop {
                 .is_some_and(|editor| editor.save_failed)
     }
 
+    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != Page::Settings {
+            self.settings_origin = Some(self.page);
+            self.settings_return_focus = window.focused(cx);
+        }
+        self.navigate(Page::Settings, cx);
+        self.settings_ui.tab_focus[self.settings_tab.min(3)].focus(window, cx);
+    }
+
     fn select_settings_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_tab = index;
         self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
@@ -386,55 +436,117 @@ impl Desktop {
         if self.settings_tab > 3 {
             self.settings_tab = 3;
         }
-        let mut view = v_flex().w_full().max_w(px(900.)).gap_6().child(
-            gpui_base::Tabs::new("settings-tabs")
-                .tab_group()
-                .key_context("SettingsTabs")
-                .on_action(cx.listener(|this, _: &NextSettingsTab, window, cx| {
-                    this.select_settings_tab((this.settings_tab + 1) % 4, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &PreviousSettingsTab, window, cx| {
-                    this.select_settings_tab((this.settings_tab + 3) % 4, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &FirstSettingsTab, window, cx| {
-                    this.select_settings_tab(0, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &LastSettingsTab, window, cx| {
-                    this.select_settings_tab(3, window, cx)
-                }))
-                .flex()
-                .gap_2()
-                .flex_wrap()
-                .children(
-                    ["生成笔记", "服务与账号", "存储", "应用"]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, label)| {
-                            let selected = self.settings_tab == index;
-                            gpui_base::Tab::new(("settings-group", index))
-                                .accessibility_label(label)
-                                .set_position(index + 1, 4)
-                                .selected(selected)
-                                .track_focus(&self.settings_ui.tab_focus[index])
-                                .tab_stop(selected)
-                                .min_h(rems(2.6))
-                                .h_auto()
-                                .px_3()
-                                .py_2()
-                                .text_size(rems(1.))
-                                .rounded_md()
-                                .border_2()
-                                .border_color(rgb(if selected { BLUE } else { LINE }))
-                                .bg(rgb(if selected { TINT } else { SURFACE }))
-                                .text_color(rgb(INK))
-                                .focus(|style| style.border_color(rgb(INK)).shadow_sm())
-                                .child(label)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.select_settings_tab(index, window, cx)
-                                }))
-                        }),
+        for (index, focus) in self.settings_ui.tab_focus.iter_mut().enumerate() {
+            *focus = focus.clone().tab_stop(index == self.settings_tab);
+        }
+        let origin = self.settings_origin.unwrap_or(Page::New);
+        let mut view = v_flex()
+            .w_full()
+            .min_w_0()
+            .pt_4()
+            .gap_6()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .flex_wrap()
+                    .child(
+                        quiet("settings-back")
+                            .icon(IconName::ArrowLeft)
+                            .label(match origin {
+                                Page::Library => "返回我的笔记",
+                                Page::Result => "返回阅读",
+                                Page::Task => "返回任务",
+                                _ => "返回工作台",
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if !this.close_service_editor(window, cx) {
+                                    return;
+                                }
+                                this.settings_origin = None;
+                                this.navigate(origin, cx);
+                                if let Some(focus) = this.settings_return_focus.take() {
+                                    focus.focus(window, cx);
+                                }
+                            })),
+                    )
+                    .when(self.settings_origin == Some(Page::New), |row| {
+                        row.child(
+                            text("settings-back-hint", "当前草稿与填写位置已保留")
+                                .text_size(TEXT_AUX)
+                                .text_color(rgb(FAINT)),
+                        )
+                    }),
+            )
+            .child(
+                text("settings-page-title", "设置")
+                    .role(Role::Heading)
+                    .text_size(TEXT_TITLE)
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
+            .child(
+                self.reveal_setting(
+                    "settings-tabs-reveal",
+                    h_flex().w_full().min_w_0().child(
+                        gpui_base::Tabs::new("settings-tabs")
+                            .key_context("SettingsTabs")
+                            .on_action(cx.listener(|this, _: &NextSettingsTab, window, cx| {
+                                this.select_settings_tab((this.settings_tab + 1) % 4, window, cx)
+                            }))
+                            .on_action(cx.listener(|this, _: &PreviousSettingsTab, window, cx| {
+                                this.select_settings_tab((this.settings_tab + 3) % 4, window, cx)
+                            }))
+                            .on_action(cx.listener(|this, _: &FirstSettingsTab, window, cx| {
+                                this.select_settings_tab(0, window, cx)
+                            }))
+                            .on_action(cx.listener(|this, _: &LastSettingsTab, window, cx| {
+                                this.select_settings_tab(3, window, cx)
+                            }))
+                            .flex()
+                            .flex_wrap()
+                            .flex_shrink_0()
+                            .gap(px(2.))
+                            .p(px(2.))
+                            .rounded_full()
+                            .bg(rgb(SEGMENT_TRACK))
+                            .max_w_full()
+                            .children(
+                                ["生成笔记", "服务与账号", "存储", "应用"]
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, label)| {
+                                        let selected = self.settings_tab == index;
+                                        gpui_base::Tab::new(("settings-group", index))
+                                            .accessibility_label(label)
+                                            .set_position(index + 1, 4)
+                                            .selected(selected)
+                                            .track_focus(&self.settings_ui.tab_focus[index])
+                                            .min_h(rems(2.286))
+                                            .min_w_0()
+                                            .max_w_full()
+                                            .h_auto()
+                                            .px(px(14.))
+                                            .py(px(2.))
+                                            .text_size(TEXT_BODY)
+                                            .rounded(RADIUS_PILL)
+                                            .border_2()
+                                            .border_color(gpui::transparent_black())
+                                            .text_color(rgb(if selected { INK } else { GRAY }))
+                                            .when(selected, |tab| {
+                                                tab.bg(rgb(SURFACE))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .shadow(shadow_segment_selected())
+                                            })
+                                            .focus(|style| style.border_color(rgb(INK)).shadow_sm())
+                                            .child(label)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.select_settings_tab(index, window, cx)
+                                            }))
+                                    }),
+                            ),
+                    ),
                 ),
-        );
+            );
         for group in [
             PreferenceGroup::Generation,
             PreferenceGroup::Services,
@@ -482,7 +594,7 @@ impl Desktop {
                 .aria_label(["生成笔记", "服务与账号", "存储", "应用"][self.settings_tab])
                 .child(match self.settings_tab {
                     0 => self.generation_settings_page(cx),
-                    1 => self.services_settings_page(cx),
+                    1 => self.services_settings_page(window, cx),
                     2 => self.storage_settings_page(cx),
                     _ => self.application_settings_page(window, cx),
                 }),
@@ -494,15 +606,15 @@ impl Desktop {
         let value = self.preferences.generation().clone();
         let provider = value.options.provider.map(|p| p.as_str()).unwrap_or("");
         let mut view = v_flex().gap_5()
-            .child(text("generation-default-scope", "这里的默认选项会同步到准备中笔记尚未单独修改的选项。已排队或开始生成的笔记保持原设置。").text_sm().text_color(rgb(MUTED)))
+            .child(banner_note("generation-default-scope", "这里的默认选项会同步到准备中笔记尚未单独修改的选项。已排队或开始生成的笔记保持原设置。"))
             .child(self.group_feedback(PreferenceGroup::Generation, cx))
             .child(group("language-settings", "文字来源")
                 .child(text("subtitle-policy", "优先使用可读取的字幕；需要识别时使用下面的方式。字幕读取失败不会被当成没有字幕。").text_sm().text_color(rgb(MUTED)))
-                .child(self.setting_field(EditField::Languages, "字幕优先语言", cx))
+                .child(self.setting_field(EditField::Languages, "字幕优先语言", cx).max_w(rems(24.)))
                 .child(text("subtitle-language-help", "使用语言代码，以逗号分隔，例如 zh-Hans, en；留空按界面语言和来源语言选择。所有已发现的语言仍可选择。").text_sm().text_color(rgb(MUTED)))
-                .child(control("apply-languages").label("应用语言偏好").self_start().on_click(cx.listener(|this,_,_,cx|this.apply_language_preferences(cx)))))
+                .child(outline_pill("apply-languages").label("应用语言偏好").self_start().on_click(cx.listener(|this,_,_,cx|this.apply_language_preferences(cx)))))
             .child(group("asr-default-settings", "需要识别视频声音时")
-                .child(SingleChoiceGroup::new("default-asr-device", "默认语音识别方式").options([
+                .child(self.setting_choices("default-asr-device", "默认语音识别方式").options([
                     ("","自动选择本机方式"),("coreml","Apple 原生"),("gpu","GPU"),("cpu","CPU"),("npu","Intel NPU"),("api","使用语音服务")
                 ].into_iter().filter(|(id,_)| *id!="coreml" || cfg!(target_os="macos") || provider=="coreml")
                     .filter(|(id,_)| *id!="npu" || !cfg!(target_os="macos") || provider=="npu"))
@@ -513,28 +625,42 @@ impl Desktop {
                             this.commit_generation(next,cx);
                         })))
                 .child(text("asr-fixed-choice-help","固定选择不可用时会保留原因。自动方式只在本机调度，不会改用网络服务。").text_sm().text_color(rgb(MUTED)))
-                .when(provider!="api",|view|view.child(self.local_model_picker(cx)).child(self.default_model_readiness_panel(cx)))
+                .when(provider!="api",|view|{
+                    let (settled, conclusion) = self.default_model_conclusion();
+                    view.child(self.local_model_picker(cx))
+                        .child(text("model-readiness-conclusion", conclusion).text_sm()
+                            .text_color(rgb(if settled { MUTED } else { 0xa32626 })))
+                        .child(quiet("toggle-model-details").self_start()
+                            .label(if self.settings_ui.model_details_open { "收起技术详情" } else { "技术详情 · 模型路径与缓存清单" })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_ui.model_details_open = !this.settings_ui.model_details_open;
+                                cx.notify();
+                            })))
+                        .when(self.settings_ui.model_details_open, |view| {
+                            view.child(self.default_model_readiness_panel(cx))
+                        })
+                })
                 .when(provider=="api",|view|view.child(self.service_picker(ServicePurpose::Speech,false,cx))));
         view=view.child(group("ai-default-settings","AI 校对与摘要")
-            .child(preference("AI 校对","修正识别错误和标点，保留原意与原语言。",Switch::new("default-ai-proofread").checked(value.ai_proofread)
+            .child(self.setting_preference("AI 校对","修正识别错误和标点，保留原意与原语言。",Switch::new("default-ai-proofread").checked(value.ai_proofread)
                 .on_click(cx.listener(|this,enabled,_,cx|{let mut next=this.generation_edit_base();next.ai_proofread=*enabled;this.commit_generation(next,cx);}))))
-            .child(preference("生成摘要","提炼课程要点并放在笔记开头，原正文继续保留。",Switch::new("default-ai-summary").checked(value.ai_summary)
+            .child(self.setting_preference("生成摘要","提炼课程要点并放在笔记开头，原正文继续保留。",Switch::new("default-ai-summary").checked(value.ai_summary)
                 .on_click(cx.listener(|this,enabled,_,cx|{let mut next=this.generation_edit_base();next.ai_summary=*enabled;this.commit_generation(next,cx);}))))
             .when(value.needs_ai(),|view|view.child(self.service_picker(ServicePurpose::Ai,false,cx)))
-            .when(value.ai_proofread,|view|view.child(preference("发送截图辅助校对","文字及对应截图会发送到所选 AI 服务。",Switch::new("default-ai-vision").checked(value.vision)
+            .when(value.ai_proofread,|view|view.child(self.setting_preference("发送截图辅助校对","文字及对应截图会发送到所选 AI 服务。",Switch::new("default-ai-vision").checked(value.vision)
                 .on_click(cx.listener(|this,enabled,_,cx|{let mut next=this.generation_edit_base();next.vision=*enabled;this.commit_generation(next,cx);})))))
-            .child(control("show-proofread-rules").ghost().label(if value.prompt.is_some(){"查看自定义校对规则"}else{"查看校对规则"}).self_start()
+            .child(quiet("show-proofread-rules").label(if value.prompt.is_some(){"查看自定义校对规则"}else{"查看校对规则"}).self_start()
                 .on_click(cx.listener(|this,_,_,cx|{this.settings_ui.show_prompt=!this.settings_ui.show_prompt;cx.notify();})))
             .when(self.settings_ui.show_prompt,|view|view
                 .child(text("standard-proofread-rule",course2md::llm::DEFAULT_PROMPT).text_sm().text_color(rgb(MUTED)))
                 .child(text("prompt-contract","自定义规则影响校对内容；段落 ID 对应和返回结构由软件固定，不会被这些规则覆盖。").text_sm().text_color(rgb(MUTED)))
                 .child(Textarea::new(&self.settings_ui.prompt).h(px(160.)).w_full().aria_label("自定义校对规则"))
                 .child(h_flex().gap_2().flex_wrap()
-                    .child(control("apply-proofread-rules").label("应用校对规则").on_click(cx.listener(|this,_,_,cx|{
+                    .child(outline_pill("apply-proofread-rules").label("应用校对规则").on_click(cx.listener(|this,_,_,cx|{
                         let prompt=this.settings_ui.prompt.read(cx).value().trim().to_owned();let mut next=this.generation_edit_base();
                         next.prompt=(!prompt.is_empty()).then_some(prompt);next.prompt_draft=None;this.commit_generation(next,cx);
                     })))
-                    .child(control("restore-proofread-rules").ghost().label("恢复标准规则").on_click(cx.listener(|this,_,window,cx|{
+                    .child(quiet("restore-proofread-rules").label("恢复标准规则").on_click(cx.listener(|this,_,window,cx|{
                         let mut next=this.generation_edit_base();next.prompt=None;next.prompt_draft=None;
                         if this.commit_generation(next,cx){this.settings_ui.prompt.update(cx,|input,cx|input.set_value("",window,cx));}
                     }))))));
@@ -548,7 +674,7 @@ impl Desktop {
                     if !enabled{formats.retain(|value|*value!=format);}else if !formats.contains(&format){formats.push(format);}this.commit_generation(next,cx);
                 })))))
             .child(text("export-format-purpose","Markdown 包包含图片资源；网页文件内嵌图片；JSON 数据供程序使用。全部不选也会生成内部笔记。").text_sm().text_color(rgb(MUTED)))
-            .child(preference("保留视频供离线播放","仅用于在线来源；生成后保留下载的视频，会占用额外空间。",Switch::new("default-keep-video").checked(value.options.keep_video.unwrap_or(false))
+            .child(self.setting_preference("保留视频供离线播放","仅用于在线来源；生成后保留下载的视频，会占用额外空间。",Switch::new("default-keep-video").checked(value.options.keep_video.unwrap_or(false))
                 .on_click(cx.listener(|this,enabled,_,cx|{let mut next=this.generation_edit_base();next.options.keep_video=Some(*enabled);this.commit_generation(next,cx);}))))).into_any_element()
     }
 
@@ -580,7 +706,7 @@ impl Desktop {
             .gap_2()
             .child(text("local-model-heading", "识别模型"))
             .child(
-                SingleChoiceGroup::new("default-local-model", "默认识别模型")
+                self.setting_choices("default-local-model", "默认识别模型")
                     .options(models)
                     .selected(selected.to_owned())
                     .on_change(cx.listener(move |this, id: &SharedString, window, cx| {
@@ -642,12 +768,18 @@ impl Desktop {
         view
     }
 
-    fn services_settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut view=v_flex().gap_5().child(self.group_feedback(PreferenceGroup::Services,cx))
-            .child(text("service-purpose-help","服务配置保存后才会使用。测试是单独的主动操作，不会在保存或生成前暗中发送测试内容。").text_sm().text_color(rgb(MUTED)))
-            .child(h_flex().gap_2().flex_wrap()
-                .child(control("add-speech-service").label("添加语音服务").on_click(cx.listener(|this,_,window,cx|this.open_settings_service_editor(ServicePurpose::Speech,None,window,cx))))
-                .child(control("add-ai-service").label("添加 AI 服务").on_click(cx.listener(|this,_,window,cx|this.open_settings_service_editor(ServicePurpose::Ai,None,window,cx)))));
+    fn services_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let mut view=v_flex().w_full().min_w_0().gap_5().child(self.group_feedback(PreferenceGroup::Services,cx))
+            .child(text("service-purpose-help","服务配置保存后才会使用。测试是单独的主动操作，不会在保存或生成前暗中发送测试内容。").text_sm().text_color(rgb(MUTED)));
+        // Keep the active form near the start of the page, including in a long service list.
+        let inline_editor = self
+            .settings_ui
+            .editor
+            .as_ref()
+            .filter(|editor| editor.target.is_none());
+        if inline_editor.is_some() {
+            view = view.child(self.service_editor_card(window, cx));
+        }
         let mut latest = BTreeMap::<String, ServiceVersion>::new();
         for version in self.preferences.versions() {
             if latest
@@ -657,122 +789,35 @@ impl Desktop {
                 latest.insert(version.service_id.clone(), version.clone());
             }
         }
-        for (index, version) in latest.values().enumerate() {
-            let stopped = self.preferences.is_service_stopped(&version.service_id);
-            let id = version.id.clone();
-            let service_id = version.service_id.clone();
-            let purpose = version.config.protocol.purpose();
-            let defaults = self.preferences.default_refs();
-            let default_version = match purpose {
-                ServicePurpose::Speech => defaults.asr.as_deref(),
-                ServicePurpose::Ai => defaults.llm.as_deref(),
-            }
-            .and_then(|id| self.preferences.version(id))
-            .filter(|default| default.service_id == version.service_id);
-            let default_description = default_version
-                .map(|default| {
-                    if default.id == version.id {
-                        " · 默认服务".to_owned()
-                    } else {
-                        format!(" · 默认仍使用版本 {}", default.number)
-                    }
-                })
-                .unwrap_or_default();
-            let kinds: &[TestKind] = if purpose == ServicePurpose::Speech {
-                &[TestKind::Speech]
-            } else {
-                &[TestKind::Proofread, TestKind::Summary, TestKind::Vision]
-            };
-            let tests: Vec<String> = kinds
-                .iter()
-                .filter_map(|kind| {
-                    self.preferences
-                        .test_evidence(&version.config, kind.contract())
-                        .map(|evidence| format!("上次{}测试：{}", kind.label(), evidence.message))
-                })
-                .collect();
-            view = view.child(
-                v_flex()
-                    .gap_2()
-                    .py_4()
-                    .border_t_1()
-                    .border_color(rgb(LINE))
-                    .child(
-                        text(
-                            ("saved-service-title", index),
-                            format!(
-                                "{}{}{}",
-                                version.config.name,
-                                default_description,
-                                if stopped { " · 已停用" } else { "" }
-                            ),
-                        )
-                        .font_weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(
-                        text(
-                            ("saved-service-description", index),
-                            format!(
-                                "{} · {} · {} · 版本 {}",
-                                if purpose == ServicePurpose::Speech {
-                                    "语音识别"
-                                } else {
-                                    "AI 校对与摘要"
-                                },
-                                version.config.host(),
-                                version.config.model,
-                                version.number
-                            ),
-                        )
-                        .text_sm()
-                        .text_color(rgb(MUTED)),
-                    )
-                    .child(
-                        text(
-                            ("saved-service-test-status", index),
-                            if tests.is_empty() {
-                                "尚未测试。可以直接用于生成，不会自动发送测试请求。".to_owned()
-                            } else {
-                                tests.join("\n")
-                            },
-                        )
-                        .text_sm()
-                        .text_color(rgb(MUTED)),
-                    )
-                    .when(!stopped, |view| {
-                        view.child(
-                            h_flex()
-                                .gap_2()
-                                .flex_wrap()
-                                .child(
-                                    control(("edit-saved-service", index))
-                                        .label("编辑服务")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.open_settings_service_editor(
-                                                purpose,
-                                                Some(id.clone()),
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                                .child(
-                                    control(("stop-saved-service", index))
-                                        .ghost()
-                                        .label("停止使用此服务")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.confirm_stop_service(
-                                                service_id.clone(),
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                ),
-                        )
-                    }),
+        for (purpose, heading, add_label) in [
+            (ServicePurpose::Speech, "语音服务", "添加语音服务"),
+            (ServicePurpose::Ai, "AI 服务", "添加 AI 服务"),
+        ] {
+            let mut section = v_flex().gap_2().w_full().child(
+                text(("services-heading", purpose as usize), heading)
+                    .text_size(TEXT_AUX)
+                    .text_color(rgb(GRAY)),
             );
+            for version in latest
+                .values()
+                .filter(|version| version.config.protocol.purpose() == purpose)
+            {
+                section = section.child(self.service_card(version, cx));
+            }
+            section = section.child(
+                outline_pill(("add-service", purpose as usize))
+                    .label(add_label)
+                    .self_start()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_settings_service_editor(purpose, None, window, cx);
+                    })),
+            );
+            view = view.child(section);
         }
         for (index, draft) in self.preferences.service_drafts().cloned().enumerate() {
+            if inline_editor.is_some_and(|editor| editor.draft.id == draft.id) {
+                continue;
+            }
             let id = draft.id.clone();
             let label = if draft.name.is_empty() {
                 format!(
@@ -790,9 +835,19 @@ impl Desktop {
                 h_flex()
                     .gap_3()
                     .items_center()
-                    .child(text(("saved-service-draft", index), label).flex_1())
+                    .w_full()
+                    .p_3()
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(CARD_LINE))
+                    .rounded(RADIUS_CARD)
                     .child(
-                        control(("continue-service-draft", index))
+                        text(("saved-service-draft", index), label)
+                            .flex_1()
+                            .min_w_0(),
+                    )
+                    .child(
+                        quiet(("continue-service-draft", index))
                             .label("继续填写")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_existing_service_draft(&id, None, window, cx)
@@ -801,9 +856,197 @@ impl Desktop {
             );
         }
         view.child(
-            group("account-settings-heading", "来源账号").child(self.account_settings_page(cx)),
+            group("account-settings-heading", "来源账号").child(
+                v_flex()
+                    .w_full()
+                    .gap_3()
+                    .p_4()
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(CARD_LINE))
+                    .rounded(RADIUS_CARD)
+                    .child(
+                        text("account-card-title", "Bilibili 账号")
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(self.account_settings_page(cx)),
+            ),
         )
         .into_any_element()
+    }
+
+    /// One saved service as a mock 服务行卡: name + status badge + meta + quiet actions.
+    fn service_card(&self, version: &ServiceVersion, cx: &mut Context<Self>) -> Div {
+        let stopped = self.preferences.is_service_stopped(&version.service_id);
+        let id = version.id.clone();
+        let service_id = version.service_id.clone();
+        let purpose = version.config.protocol.purpose();
+        let defaults = self.preferences.default_refs();
+        let default_version = match purpose {
+            ServicePurpose::Speech => defaults.asr.as_deref(),
+            ServicePurpose::Ai => defaults.llm.as_deref(),
+        }
+        .and_then(|id| self.preferences.version(id))
+        .filter(|default| default.service_id == version.service_id);
+        let default_description = default_version
+            .map(|default| {
+                if default.id == version.id {
+                    " · 默认服务".to_owned()
+                } else {
+                    format!(" · 默认仍使用版本 {}", default.number)
+                }
+            })
+            .unwrap_or_default();
+        let kinds: &[TestKind] = if purpose == ServicePurpose::Speech {
+            &[TestKind::Speech]
+        } else {
+            &[TestKind::Proofread, TestKind::Summary, TestKind::Vision]
+        };
+        let tests: Vec<String> = kinds
+            .iter()
+            .filter_map(|kind| {
+                self.preferences
+                    .test_evidence(&version.config, kind.contract())
+                    .map(|evidence| format!("上次{}测试：{}", kind.label(), evidence.message))
+            })
+            .collect();
+        let passed = self
+            .preferences
+            .test_evidence(&version.config, kinds[0].contract())
+            .filter(|evidence| evidence.outcome == preferences::TestOutcome::Passed);
+        let (status_kind, status_label) = if stopped {
+            (BadgeKind::Neutral, "已停用".to_owned())
+        } else if let Some(evidence) = passed {
+            let stamp = crate::reader_navigation::timestamp_utc(evidence.tested_at * 1000);
+            let date = stamp.get(..10).unwrap_or(&stamp).to_owned();
+            (BadgeKind::Success, format!("测试通过 · {date}"))
+        } else {
+            (BadgeKind::Neutral, "配置已保存".to_owned())
+        };
+        let status_badge = badge(status_kind).child(text(
+            SharedString::from(format!("saved-service-badge-{id}")),
+            status_label,
+        ));
+        let edit_id = id.clone();
+        let test_id = id.clone();
+        v_flex()
+            .w_full()
+            .gap_2()
+            .p_4()
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(CARD_LINE))
+            .rounded(RADIUS_CARD)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .flex_wrap()
+                    .child(
+                        text(
+                            SharedString::from(format!("saved-service-title-{id}")),
+                            version.config.name.clone(),
+                        )
+                        .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(status_badge)
+                    .child(div().flex_1())
+                    .when(!stopped, |row| {
+                        row.child(
+                            quiet(SharedString::from(format!("test-saved-service-{id}")))
+                                .label("测试服务")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if this.open_settings_service_editor(
+                                        purpose,
+                                        Some(test_id.clone()),
+                                        window,
+                                        cx,
+                                    ) {
+                                        this.start_service_test(window, cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            quiet(SharedString::from(format!("edit-saved-service-{id}")))
+                                .label("编辑")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_settings_service_editor(
+                                        purpose,
+                                        Some(edit_id.clone()),
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        )
+                    }),
+            )
+            .child(
+                text(
+                    SharedString::from(format!("saved-service-description-{id}")),
+                    format!(
+                        "{} · {} · 模型 {}{}",
+                        version.config.host(),
+                        version.config.protocol.label(),
+                        version.config.model,
+                        default_description,
+                    ),
+                )
+                .text_size(TEXT_AUX)
+                .text_color(rgb(GRAY)),
+            )
+            .child(
+                text(
+                    SharedString::from(format!("saved-service-test-status-{id}")),
+                    if tests.is_empty() {
+                        "尚未测试。可以直接用于生成，不会自动发送测试请求。".to_owned()
+                    } else {
+                        tests.join("\n")
+                    },
+                )
+                .text_size(TEXT_AUX)
+                .text_color(rgb(GRAY)),
+            )
+            .when(!stopped, |card| {
+                card.child(
+                    quiet(SharedString::from(format!(
+                        "stop-saved-service-{service_id}"
+                    )))
+                    .label("停止使用此服务")
+                    .self_start()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_stop_service(service_id.clone(), window, cx)
+                    })),
+                )
+            })
+    }
+
+    /// Inline editor card on the settings page (mock 编辑卡): warning banner when a
+    /// saved version stays in effect, existing fields and validation unchanged.
+    fn service_editor_card(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let Some(editor) = &self.settings_ui.editor else {
+            return v_flex();
+        };
+        let purpose = editor.draft.protocol.purpose();
+        let kind = if purpose == ServicePurpose::Speech {
+            "语音服务"
+        } else {
+            "AI 服务"
+        };
+        let title = if editor.draft.based_on.is_some() {
+            format!("编辑 {kind} · {}", editor.draft.name)
+        } else {
+            format!("添加 {kind}")
+        };
+        v_flex()
+            .w_full()
+            .gap_3()
+            .p_4()
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(CONTROL))
+            .rounded(RADIUS_CARD)
+            .child(text("service-editor-inline-title", title).font_weight(FontWeight::SEMIBOLD))
+            .child(self.service_editor_content(true, window, cx))
     }
     pub fn task_service_picker(&self, purpose: ServicePurpose, cx: &mut Context<Self>) -> Div {
         self.service_picker(purpose, true, cx)
@@ -887,36 +1130,37 @@ impl Desktop {
             choices.push(current.clone());
         }
         if !choices.is_empty() {
-            let mut picker = SingleChoiceGroup::new(
-                (
-                    "service-choice",
-                    purpose as usize * 2 + current_task as usize,
-                ),
-                if purpose == ServicePurpose::Speech {
-                    "使用的语音服务"
-                } else {
-                    "使用的 AI 服务"
-                },
-            )
-            .options(choices.iter().map(|version| {
-                (
-                    version.id.clone(),
-                    format!(
-                        "{} · 版本 {}{}",
-                        version.config.name,
-                        version.number,
-                        if self.preferences.is_service_stopped(&version.service_id) {
-                            " · 已停用"
-                        } else {
-                            ""
-                        }
+            let mut picker = self
+                .setting_choices(
+                    (
+                        "service-choice",
+                        purpose as usize * 2 + current_task as usize,
                     ),
+                    if purpose == ServicePurpose::Speech {
+                        "使用的语音服务"
+                    } else {
+                        "使用的 AI 服务"
+                    },
                 )
-            }))
-            .when_some(current, |picker, current| picker.selected(current))
-            .on_change(cx.listener(move |this, id: &SharedString, _, cx| {
-                this.bind_service(purpose, Some(id.to_string()), current_task, cx);
-            }));
+                .options(choices.iter().map(|version| {
+                    (
+                        version.id.clone(),
+                        format!(
+                            "{} · 版本 {}{}",
+                            version.config.name,
+                            version.number,
+                            if self.preferences.is_service_stopped(&version.service_id) {
+                                " · 已停用"
+                            } else {
+                                ""
+                            }
+                        ),
+                    )
+                }))
+                .when_some(current, |picker, current| picker.selected(current))
+                .on_change(cx.listener(move |this, id: &SharedString, _, cx| {
+                    this.bind_service(purpose, Some(id.to_string()), current_task, cx);
+                }));
             for version in &choices {
                 if self.preferences.is_service_stopped(&version.service_id) {
                     picker = picker.disable_option(&version.id);
@@ -940,7 +1184,7 @@ impl Desktop {
                 if current_task {
                     this.open_task_service_editor(purpose, window, cx)
                 } else {
-                    this.open_settings_service_editor(purpose, None, window, cx)
+                    this.open_settings_service_editor(purpose, None, window, cx);
                 }
             })),
         );
@@ -1057,13 +1301,13 @@ impl Desktop {
         version: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let draft = version
             .as_deref()
             .and_then(|id| self.preferences.version(id))
             .map(ServiceDraft::from_version)
             .unwrap_or_else(|| ServiceDraft::new(purpose));
-        self.open_service_draft(draft, None, window, cx);
+        self.open_service_draft(draft, None, window, cx)
     }
     fn open_existing_service_draft(
         &mut self,
@@ -1082,9 +1326,27 @@ impl Desktop {
         target: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if self.settings_ui.editor.is_some() {
-            return;
+    ) -> bool {
+        if let Some(editor) = &self.settings_ui.editor {
+            if editor.target.is_some() {
+                return false;
+            }
+            if editor.draft.id == draft.id && editor.target == target {
+                self.settings_tab = 1;
+                self.navigate(Page::Settings, cx);
+                self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
+                self.settings_ui.inputs[&EditField::Name]
+                    .update(cx, |input, cx| input.focus(window, cx));
+                return true;
+            }
+            // A second action must not reuse the previous editor's endpoint or scope.
+            // Preserve that draft before replacing its fields, including an unsaved key.
+            if !self.close_service_editor(window, cx) {
+                self.settings_tab = 1;
+                self.navigate(Page::Settings, cx);
+                self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
+                return false;
+            }
         }
         let title = match (draft.protocol.purpose(), target.is_some()) {
             (ServicePurpose::Speech, true) => "为这次笔记设置语音服务",
@@ -1113,6 +1375,7 @@ impl Desktop {
                 .test_evidence(&config, kind.contract())
                 .cloned()
         });
+        let inline = target.is_none();
         self.settings_ui.editor = Some(ServiceEditor {
             draft,
             target,
@@ -1128,6 +1391,15 @@ impl Desktop {
             save_failed: false,
         });
         self.save_open_service_draft(false, window, cx);
+        if inline {
+            self.settings_tab = 1;
+            self.navigate(Page::Settings, cx);
+            self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
+            self.settings_ui.inputs[&EditField::Name]
+                .update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
+            return true;
+        }
         let desktop = cx.entity();
         let content = cx.new(|cx| ServiceDialog {
             _observation: cx.observe(&desktop, |_, _, cx| cx.notify()),
@@ -1161,8 +1433,14 @@ impl Desktop {
         self.settings_ui.inputs[&EditField::Address]
             .update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
+        true
     }
-    fn service_editor_content(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn service_editor_content(
+        &self,
+        inline: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(editor) = &self.settings_ui.editor else {
             return div().into_any_element();
         };
@@ -1174,50 +1452,59 @@ impl Desktop {
             || !self.setting_value(EditField::Key, cx).is_empty();
         let mut view = v_flex()
             .id("service-editor-body")
-            .role(Role::Dialog)
+            .role(if inline { Role::Group } else { Role::Dialog })
             .aria_label(if protocol.purpose() == ServicePurpose::Speech {
                 "设置语音服务"
             } else {
                 "设置 AI 服务"
             })
             .gap_4()
-            .max_h((window.bounds().size.height - px(150.)).max(px(180.)))
-            .overflow_y_scroll()
-            .px_1()
-            .child(
-                text(
-                    "service-editor-scope",
-                    if editor.target.is_some() {
-                        "保存后仅用于这份准备中的笔记，已提交任务保持原版本。"
-                    } else {
-                        "保存后设为默认服务；已排队和开始生成的笔记保持原版本。"
-                    },
-                )
-                .text_sm()
-                .text_color(rgb(MUTED)),
-            );
+            .px_1();
+        if !inline {
+            view = view
+                .max_h((window.bounds().size.height - px(150.)).max(px(180.)))
+                .overflow_y_scroll();
+        }
+        view = view.child(
+            text(
+                "service-editor-scope",
+                if editor.target.is_some() {
+                    "保存后仅用于这份准备中的笔记，已提交任务保持原版本。"
+                } else {
+                    "保存后设为默认服务；已排队和开始生成的笔记保持原版本。"
+                },
+            )
+            .text_sm()
+            .text_color(rgb(MUTED)),
+        );
         if let Some(old) = editor
             .draft
             .based_on
             .as_deref()
             .and_then(|id| self.preferences.version(id))
         {
+            let current = format!(
+                "{}{} · {} · 版本 {}",
+                if changed {
+                    "修改尚未启用；当前仍使用 "
+                } else {
+                    "当前使用 "
+                },
+                old.config.host(),
+                old.config.model,
+                old.number,
+            );
             view = view.child(
-                text(
-                    "service-previous-version",
-                    format!(
-                        "{}{} · {} · 版本 {}",
-                        if changed {
-                            "修改尚未启用；当前仍使用 "
-                        } else {
-                            "当前使用 "
-                        },
-                        old.config.host(),
-                        old.config.model,
-                        old.number
-                    ),
-                )
-                .text_sm(),
+                div()
+                    .id("service-previous-version")
+                    .role(Role::Label)
+                    .aria_label(current.clone())
+                    .w_full()
+                    .p_3()
+                    .rounded(RADIUS_CARD)
+                    .bg(rgb(WARNING_BG))
+                    .text_sm()
+                    .child(current),
             );
         }
         view = view
@@ -1227,7 +1514,7 @@ impl Desktop {
                     .gap_2()
                     .child(text("service-protocol-heading", "接口类型"))
                     .child(
-                        SingleChoiceGroup::new("service-protocol", "服务接口类型")
+                        self.setting_choices("service-protocol", "服务接口类型")
                             .options(
                                 [
                                     ServiceProtocol::SpeechTranscriptions,
@@ -1278,7 +1565,7 @@ impl Desktop {
                     .gap_2()
                     .child(text("service-auth-heading", "认证方式"))
                     .child(
-                        SingleChoiceGroup::new("service-auth-mode", "服务认证方式")
+                        self.setting_choices("service-auth-mode", "服务认证方式")
                             .options([("api_key", "API Key"), ("none", "无需认证")])
                             .selected(if auth == Authentication::ApiKey {
                                 "api_key"
@@ -1387,19 +1674,21 @@ impl Desktop {
             );
         }
         if editor.target.is_some() {
-            view = view.child(preference(
-                "同时设为默认服务",
-                "准备中笔记未单独选择的服务会采用这个版本。",
-                Switch::new("service-also-default")
-                    .checked(editor.also_default)
-                    .disabled(awaiting_binding)
-                    .on_click(cx.listener(|this, value, _, cx| {
-                        if let Some(editor) = &mut this.settings_ui.editor {
-                            editor.also_default = *value;
-                        }
-                        cx.notify();
-                    })),
-            ));
+            view = view.child(
+                self.setting_preference(
+                    "同时设为默认服务",
+                    "准备中笔记未单独选择的服务会采用这个版本。",
+                    Switch::new("service-also-default")
+                        .checked(editor.also_default)
+                        .disabled(awaiting_binding)
+                        .on_click(cx.listener(|this, value, _, cx| {
+                            if let Some(editor) = &mut this.settings_ui.editor {
+                                editor.also_default = *value;
+                            }
+                            cx.notify();
+                        })),
+                ),
+            );
         }
         view = view.child(
             text("service-test-notice", service_test::TEST_NOTICE)
@@ -1408,7 +1697,7 @@ impl Desktop {
         );
         if protocol == ServiceProtocol::AiChat {
             view = view.child(
-                SingleChoiceGroup::new("service-test-purpose", "要测试的服务能力")
+                self.setting_choices("service-test-purpose", "要测试的服务能力")
                     .options(
                         [TestKind::Proofread, TestKind::Summary, TestKind::Vision]
                             .into_iter()
@@ -1475,7 +1764,7 @@ impl Desktop {
                 .gap_2()
                 .flex_wrap()
                 .child(
-                    control("run-service-test")
+                    outline_pill("run-service-test")
                         .label("测试服务")
                         .loading(busy)
                         .disabled(busy || awaiting_binding)
@@ -1484,8 +1773,7 @@ impl Desktop {
                         ),
                 )
                 .child(
-                    control("save-service")
-                        .primary()
+                    primary_pill("save-service")
                         .label(if awaiting_binding {
                             "重试保存本次选择"
                         } else {
@@ -1498,25 +1786,25 @@ impl Desktop {
                         ),
                 )
                 .child(
-                    control("close-service-editor")
-                        .ghost()
-                        .label("返回")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.close_service_editor(window, cx) {
+                    quiet("close-service-editor")
+                        .label("取消")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if this.close_service_editor(window, cx) && !inline {
                                 window.close_dialog(cx);
                             }
                         })),
                 )
                 .when(editor.save_failed, |view| {
                     view.child(
-                        control("discard-unsaved-service-changes")
-                            .ghost()
+                        quiet("discard-unsaved-service-changes")
                             .label("放弃未保存的修改并返回")
-                            .on_click(cx.listener(|this, _, window, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.settings_ui.inputs[&EditField::Key]
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                                 this.restore_service_focus(window, cx);
-                                window.close_dialog(cx);
+                                if !inline {
+                                    window.close_dialog(cx);
+                                }
                             })),
                     )
                 }),
@@ -1770,6 +2058,7 @@ impl Desktop {
             return;
         };
         let target = editor.target.clone();
+        let inline = target.is_none();
         let scope = if target.is_none() || editor.also_default {
             BindingScope::Defaults
         } else {
@@ -1821,7 +2110,9 @@ impl Desktop {
         self.refresh_dispatch_controls(cx);
         self.set_settings_feedback(PreferenceGroup::Services, "服务已保存".into(), false);
         self.restore_service_focus(window, cx);
-        window.close_dialog(cx);
+        if !inline {
+            window.close_dialog(cx);
+        }
         cx.notify();
     }
     fn close_service_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -2145,24 +2436,70 @@ impl Desktop {
                 let move_id = id.clone();
                 let default = workspace.state.default_library == id;
                 let offline = !root.is_dir();
-                view=view.child(v_flex().gap_2().py_3().border_t_1().border_color(rgb(LINE))
-                .child(text(("storage-location-name",index),format!("{}{}{}",library.name,if default{" · 新笔记默认位置"}else{""},if offline{" · 位置暂时不可访问"}else{""})).font_weight(FontWeight::MEDIUM))
-                .child(text(("storage-location-path",index),root.display().to_string()).text_sm().text_color(rgb(MUTED)))
-                .child(h_flex().gap_2().flex_wrap()
-                    .child(control(("open-storage-location",index)).label("打开位置").disabled(offline).on_click(move|_,_,cx|cx.open_with_system(&root)))
-                    .when(!default,|row|row.child(control(("default-storage-location",index)).label("设为新笔记默认位置").on_click(cx.listener(move|this,_,_,cx|{
+                view=view.child(v_flex().gap_2().w_full().p_4().bg(rgb(SURFACE)).border_1().border_color(rgb(CARD_LINE)).rounded(RADIUS_CARD)
+                .child(h_flex().gap_2().items_center().flex_wrap()
+                    .child(text(("storage-location-name",index),library.name.clone()).font_weight(FontWeight::SEMIBOLD))
+                    .when(default,|row|row.child(badge(BadgeKind::Neutral).child("默认保存位置")))
+                    .when(offline,|row|row.child(badge(BadgeKind::Warning).child("暂时不可访问")))
+                    .child(div().flex_1())
+                    .child(outline_pill(("default-storage-location",index)).label("设为默认保存位置")
+                        .when(default,|button|button.disabled(true))
+                        .on_click(cx.listener(move|this,_,_,cx|{
                         if let Some(workspace)=&mut this.workspace{
                             let result=workspace.state.library(&id).ok_or_else(||anyhow!("此位置已不在课程库中")).and_then(|library|tempfile::NamedTempFile::new_in(&library.root).map(drop).context("此位置暂时不能写入，请重新连接磁盘或恢复文件夹访问权限"))
                                 .and_then(|_|workspace.transaction(|state|{state.default_library=id.clone();Ok(())}));
                             if let Err(error)=result{this.workspace_error=Some(format!("默认位置尚未更改：{error:#}"));}else{this.message=Some("新建笔记将使用此位置，已有笔记和任务保持原位置".into());}
                         }cx.notify();
-                    }))))
-                    .child(control(("move-storage-location",index)).label("移动课程库…").on_click(cx.listener(move|this,_,window,cx|this.begin_library_move(move_id.clone(),window,cx))))));
+                    })))
+                    .child(outline_pill(("move-storage-location",index)).label("移动课程库…").on_click(cx.listener(move|this,_,window,cx|this.begin_library_move(move_id.clone(),window,cx)))))
+                .child(text(("storage-location-path",index),root.display().to_string()).text_size(TEXT_AUX).text_color(rgb(GRAY)))
+                .child(h_flex().gap_2().flex_wrap()
+                    .child(quiet(("open-storage-location",index)).label("打开位置").disabled(offline).on_click(move|_,_,cx|cx.open_with_system(&root)))));
             }
         }
-        view.child(control("register-storage-location").label("添加存储位置").self_start().on_click(cx.listener(|this,_,window,cx|this.register_storage_location(window,cx))))
-            .child(text("storage-managed-files","模型和恢复所需的临时素材由软件管理。普通生成不要求手动清缓存，也不会自动删除原视频。").text_sm().text_color(rgb(MUTED)))
-            .into_any_element()
+        view = view.child(outline_pill("register-storage-location").label("添加课程库位置").self_start().on_click(cx.listener(|this,_,window,cx|this.register_storage_location(window,cx))))
+            .child(text("storage-managed-files","模型和恢复所需的临时素材由软件管理。普通生成不要求手动清缓存，也不会自动删除原视频。").text_sm().text_color(rgb(MUTED)));
+        if let Some(workspace) = &self.workspace {
+            let details: Vec<String> = workspace
+                .state
+                .libraries
+                .iter()
+                .map(|library| {
+                    format!(
+                        "{} · 库 ID {} · {}",
+                        library.name,
+                        library.id,
+                        library.root.display()
+                    )
+                })
+                .collect();
+            if !details.is_empty() {
+                let open = self.settings_ui.storage_details_open;
+                view = view
+                    .child(
+                        quiet("toggle-storage-details")
+                            .self_start()
+                            .label(if open {
+                                "收起技术详情"
+                            } else {
+                                "技术详情 · 库 ID 与完整路径"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_ui.storage_details_open =
+                                    !this.settings_ui.storage_details_open;
+                                cx.notify();
+                            })),
+                    )
+                    .when(open, |view| {
+                        view.children(details.into_iter().enumerate().map(|(index, line)| {
+                            text(("storage-detail", index), line)
+                                .text_size(TEXT_AUX)
+                                .text_color(rgb(GRAY))
+                        }))
+                    });
+            }
+        }
+        view.into_any_element()
     }
     fn register_storage_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
@@ -2230,48 +2567,56 @@ impl Desktop {
             .gap_5()
             .child(self.group_feedback(PreferenceGroup::Application, cx))
             .child(
-                group("application-text-size", "文字大小").child(
-                    SingleChoiceGroup::new("app-font-scale", "应用文字大小")
-                        .options([1.0_f32, 1.25, 1.5, 2.0].into_iter().map(|scale| {
-                            (
-                                (scale * 100.).round().to_string(),
-                                format!("{}%", (scale * 100.) as u32),
-                            )
-                        }))
-                        .selected(
-                            (self.preferences.application().font_scale * 100.)
-                                .round()
-                                .to_string(),
-                        )
-                        .on_change(cx.listener(
-                            move |this, selected: &SharedString, window, cx| {
-                                let Ok(percent) = selected.parse::<f32>() else {
-                                    return;
-                                };
-                                let scale = percent / 100.;
-                                let mut next = this.application_edit_base();
-                                next.font_scale = scale;
-                                if this.commit_application(next, cx) {
-                                    theme::apply_scale(scale, window, cx);
-                                }
-                            },
-                        )),
-                ),
+                group("appearance-motion", "外观与动效")
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(text("app-font-scale-label", "界面文字大小").text_sm())
+                            .child(
+                                self.setting_choices("app-font-scale", "应用文字大小")
+                                    .options([1.0_f32, 1.25, 1.5, 2.0].into_iter().map(|scale| {
+                                        (
+                                            (scale * 100.).round().to_string(),
+                                            format!("{}%", (scale * 100.) as u32),
+                                        )
+                                    }))
+                                    .selected(
+                                        (self.preferences.application().font_scale * 100.)
+                                            .round()
+                                            .to_string(),
+                                    )
+                                    .on_change(cx.listener(
+                                        move |this, selected: &SharedString, window, cx| {
+                                            let Ok(percent) = selected.parse::<f32>() else {
+                                                return;
+                                            };
+                                            let scale = percent / 100.;
+                                            let mut next = this.application_edit_base();
+                                            next.font_scale = scale;
+                                            if this.commit_application(next, cx) {
+                                                theme::apply_scale(scale, window, cx);
+                                            }
+                                        },
+                                    )),
+                            ),
+                    )
+                    .child(
+                        self.setting_preference(
+                            "减少动态效果",
+                            "遵循系统偏好；开启后立即减少界面动效。",
+                            Switch::new("app-reduce-motion")
+                                .checked(self.preferences.application().desktop.reduce_motion)
+                                .on_click(cx.listener(|this, enabled, _, cx| {
+                                    let mut next = this.application_edit_base();
+                                    next.desktop.reduce_motion = *enabled;
+                                    this.commit_application(next, cx);
+                                })),
+                        ),
+                    ),
             )
-            .child(preference(
-                "减少动态效果",
-                "保留完整内容和操作反馈，减少界面移动。",
-                Switch::new("app-reduce-motion")
-                    .checked(self.preferences.application().desktop.reduce_motion)
-                    .on_click(cx.listener(|this, enabled, _, cx| {
-                        let mut next = this.application_edit_base();
-                        next.desktop.reduce_motion = *enabled;
-                        this.commit_application(next, cx);
-                    })),
-            ))
+            .child(group("about-heading", "关于").child(self.about_page(cx)))
             .child(self.legacy_migration_panel(cx))
             .child(self.environment_page(window, cx))
-            .child(self.about_page(cx))
             .into_any_element()
     }
     fn commit_application(&mut self, next: ApplicationPreferences, cx: &mut Context<Self>) -> bool {
@@ -2312,22 +2657,22 @@ impl Desktop {
         view
     }
     fn environment_page(&self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let mut view = group("diagnostics-heading", "诊断详情")
+        // 诊断卡（mock set-app）：结论就地 ✓/○，原始清单收进技术详情。
+        let mut card = v_flex()
+            .w_full()
+            .gap_2()
+            .p_4()
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(CARD_LINE))
+            .rounded(RADIUS_CARD)
             .child(
                 text(
                     "diagnostics-demand-policy",
-                    "生成时只检查本次需要的能力。这里的检查不会开始下载、识别或发送课程内容。",
+                    "检查读取、识别与导出所需的工具和权限；结论就地显示，原始日志收在技术详情。",
                 )
-                .text_sm()
-                .text_color(rgb(MUTED)),
-            )
-            .child(
-                control("refresh-environment")
-                    .label("重新检查本机能力")
-                    .loading(self.environment.is_none())
-                    .disabled(self.environment.is_none())
-                    .self_start()
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_environment(cx))),
+                .text_size(TEXT_AUX)
+                .text_color(rgb(GRAY)),
             );
         if let Some(e) = &self.environment {
             for (index, (name, purpose, found)) in [
@@ -2340,23 +2685,32 @@ impl Desktop {
             .into_iter()
             .enumerate()
             {
-                view = view.child(
-                    text(
-                        ("diagnostic-capability", index),
-                        format!(
-                            "{name} · {purpose} · {}",
-                            if found {
-                                "已检测到"
-                            } else {
-                                "未检测到"
-                            }
+                card = card.child(
+                    h_flex()
+                        .gap_2()
+                        .items_baseline()
+                        .flex_wrap()
+                        .child(
+                            div()
+                                .w(px(16.))
+                                .flex_shrink_0()
+                                .text_color(rgb(if found { SUCCESS } else { GRAY }))
+                                .child(if found { "✓" } else { "○" }),
+                        )
+                        .child(
+                            text(
+                                ("diagnostic-capability", index),
+                                format!(
+                                    "{name} · {purpose} · {}",
+                                    if found { "已就绪" } else { "未检测到" }
+                                ),
+                            )
+                            .text_sm(),
                         ),
-                    )
-                    .text_sm(),
                 );
             }
             if !e.engine {
-                view=view.child(text("repair-bundled-engine","应用内的转换程序无法运行。重新安装完整应用可恢复该组件，已有笔记保留。").text_sm()).child(control("download-repair-app").label("下载安装包").self_start().on_click(|_,_,cx|cx.open_url("https://github.com/mizorewww/course2md/releases")));
+                card = card.child(text("repair-bundled-engine","应用内的转换程序无法运行。重新安装完整应用可恢复该组件，已有笔记保留。").text_sm()).child(outline_pill("download-repair-app").label("下载安装包").self_start().on_click(|_,_,cx|cx.open_url("https://github.com/mizorewww/course2md/releases")));
             }
             if !e.ffmpeg || !e.ffprobe || !e.ytdlp {
                 let (help, command) = if cfg!(target_os = "macos") {
@@ -2375,22 +2729,64 @@ impl Desktop {
                         "pipx install yt-dlp",
                     )
                 };
-                view = view
-                    .child(text("install-media-tools-help", help).text_sm())
-                    .child(text("install-media-tools-command", command).text_sm())
+                card = card
                     .child(
-                        control("copy-media-install-command")
-                            .label("复制视频工具安装命令")
-                            .self_start()
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(command.into()))
-                            }),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_wrap()
+                            .child(
+                                text("install-media-tools-help", help)
+                                    .text_size(TEXT_AUX)
+                                    .text_color(rgb(GRAY))
+                                    .flex_1()
+                                    .min_w_0(),
+                            )
+                            .child(
+                                quiet("copy-media-install-command")
+                                    .label("复制安装命令")
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            command.into(),
+                                        ))
+                                    }),
+                            ),
+                    )
+                    .child(
+                        text("install-media-tools-command", command)
+                            .text_size(TEXT_AUX)
+                            .text_color(rgb(GRAY)),
                     );
             }
         } else {
-            view = view.child(text("diagnostic-checking", "正在检查本机能力…").text_sm());
+            card = card.child(text("diagnostic-checking", "正在检查本机能力…").text_sm());
         }
-        view.child(self.model_diagnostics_panel(cx))
+        let open = self.settings_ui.diagnostics_details_open;
+        card = card.child(
+            outline_pill("refresh-environment")
+                .label("重新诊断")
+                .loading(self.environment.is_none())
+                .disabled(self.environment.is_none())
+                .self_start()
+                .on_click(cx.listener(|this, _, _, cx| this.refresh_environment(cx))),
+        );
+        card = card
+            .child(
+                quiet("toggle-diagnostics-details")
+                    .self_start()
+                    .label(if open {
+                        "收起技术详情"
+                    } else {
+                        "技术详情 · 模型文件路径与缺失清单"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_ui.diagnostics_details_open =
+                            !this.settings_ui.diagnostics_details_open;
+                        cx.notify();
+                    })),
+            )
+            .when(open, |card| card.child(self.model_diagnostics_panel(cx)));
+        group("diagnostics-heading", "诊断").child(card)
     }
     // Wrappers only while the other interface modules are being integrated.
     /// Service editor drafts are deliberately excluded: an existing published service

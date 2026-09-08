@@ -746,4 +746,56 @@ impl Desktop {
         let request = self.default_model_request();
         self.model_readiness_panel(request.provider, Some(&request.model), &request.root, cx)
     }
+
+    /// One-line readiness conclusion for the generation group main flow; the full
+    /// panel stays behind 技术详情.
+    pub(super) fn default_model_conclusion(&self) -> (bool, String) {
+        let request = self.default_model_request();
+        if request.provider == AsrProvider::Api {
+            return (true, "当前使用语音服务识别，本机模型不参与。".into());
+        }
+        if let Some(issue) = self.model_device_issue(request.provider) {
+            return (false, issue);
+        }
+        let entry = self
+            .settings_ui
+            .model_diagnostics
+            .entries
+            .get(&request.key());
+        if entry.is_none_or(|entry| entry.checking) {
+            return (true, format!("正在检查 {} 的本机缓存…", request.model));
+        }
+        if entry
+            .and_then(|entry| entry.result.as_ref())
+            .is_some_and(Result::is_err)
+        {
+            return (
+                false,
+                "模型缓存检查未完成，可在技术详情中查看原因并重新检查。".into(),
+            );
+        }
+        match entry
+            .and_then(|entry| entry.result.as_ref())
+            .and_then(|result| result.as_ref().ok())
+            .map(|status| &status.state)
+        {
+            Some(CacheState::Loaded) => (true, format!("✓ 识别模型 {} 已验证加载", request.model)),
+            Some(CacheState::Cached) => (
+                true,
+                format!("识别模型 {} 的缓存完整，尚未验证能否加载。", request.model),
+            ),
+            Some(CacheState::Missing | CacheState::Partial) => (
+                true,
+                format!(
+                    "○ 识别模型 {} 尚未在本机准备好，需要识别时会自动准备",
+                    request.model
+                ),
+            ),
+            Some(CacheState::Unsupported) => (
+                false,
+                format!("○ 当前识别方式不支持 {}，请改选可用模型", request.model),
+            ),
+            None => (true, format!("○ 尚未检查 {} 的本机缓存", request.model)),
+        }
+    }
 }

@@ -5,12 +5,24 @@ use gpui_component::button::*;
 
 /// Every chrome row and page body sits in this one centered column.
 fn shell_column() -> Div {
-    div()
-        .w_full()
-        .min_w_0()
-        .max_w(COLUMN)
-        .mx_auto()
-        .px(px(24.))
+    shell_column_at(COLUMN)
+}
+
+fn shell_column_for(page: Page) -> Div {
+    if page == Page::Settings {
+        shell_column_settings()
+    } else {
+        shell_column()
+    }
+}
+
+/// Settings groups run on the narrower column from the mock (COLUMN_SETTINGS).
+fn shell_column_settings() -> Div {
+    shell_column_at(COLUMN_SETTINGS)
+}
+
+fn shell_column_at(width: Rems) -> Div {
+    div().w_full().min_w_0().max_w(width).mx_auto().px(px(24.))
 }
 
 impl Desktop {
@@ -43,8 +55,8 @@ impl Desktop {
                     .enumerate()
                     .map(|(index, (page, label))| {
                         // 阅读页归入我的笔记 tab（mock v2 同样归位）。
-                        let active =
-                            self.page == page || (page == Page::Library && self.page == Page::Result);
+                        let active = self.page == page
+                            || (page == Page::Library && self.page == Page::Result);
                         control(("shell-tab", index))
                             .ghost()
                             .h_auto()
@@ -65,13 +77,11 @@ impl Desktop {
                                             })
                                             .child(label),
                                     )
-                                    .child(div().h(px(2.)).w_full().rounded_full().bg(
-                                        if active {
-                                            rgb(ACCENT)
-                                        } else {
-                                            rgba(0x00000000)
-                                        },
-                                    )),
+                                    .child(div().h(px(2.)).w_full().rounded_full().bg(if active {
+                                        rgb(ACCENT)
+                                    } else {
+                                        rgba(0x00000000)
+                                    })),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if page == Page::Library {
@@ -98,8 +108,10 @@ impl Desktop {
             .when(self.page == Page::Settings, |button| {
                 button.bg(rgb(BADGE_PROGRESS_BG))
             })
-            .when(settings_problem, |button| button.text_color(rgb(ACCENT_STRONG)))
-            .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Settings, cx)));
+            .when(settings_problem, |button| {
+                button.text_color(rgb(ACCENT_STRONG))
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
         div()
             .w_full()
             .flex_shrink_0()
@@ -185,19 +197,22 @@ impl Render for Desktop {
             .min_w_0()
             .min_h_0()
             .w_full()
-            .when(!matches!(self.page, Page::New | Page::Result), |v| {
-                v.child(
-                    shell_column()
-                        .flex_shrink_0()
-                        .child(self.page_header(window)),
-                )
-            })
+            .when(
+                !matches!(self.page, Page::New | Page::Result | Page::Settings),
+                |v| {
+                    v.child(
+                        shell_column_for(self.page)
+                            .flex_shrink_0()
+                            .child(self.page_header(window)),
+                    )
+                },
+            )
             .when(self.page == Page::Library, |v| {
-                v.child(shell_column().child(self.library_toolbar(cx)))
+                v.child(shell_column_for(self.page).child(self.library_toolbar(cx)))
             })
             .when_some(self.workspace_error.clone(), |v, message| {
                 v.child(
-                    shell_column()
+                    shell_column_for(self.page)
                         .pb_3()
                         .text_color(rgb(0xa32626))
                         .child(accessible_text("workspace-error", message).role(Role::Alert))
@@ -229,7 +244,7 @@ impl Render for Desktop {
             })
             .when_some(self.message.clone(), |v, message| {
                 v.child(
-                    shell_column().pb_3().child(
+                    shell_column_for(self.page).pb_3().child(
                         h_flex()
                             .min_w_0()
                             .gap_3()
@@ -268,7 +283,7 @@ impl Render for Desktop {
                             .track_scroll(&self.scrolls[self.page as usize])
                     })
                     .child(
-                        shell_column()
+                        shell_column_for(self.page)
                             .when(self.page == Page::Result, |v| v.h_full().min_h_0())
                             .pb_6()
                             .child(content),
@@ -316,13 +331,13 @@ impl Render for Desktop {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 if !window.has_active_dialog(cx) {
-                    this.navigate(Page::Settings, cx);
+                    this.open_settings(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenAbout, window, cx| {
                 if !window.has_active_dialog(cx) {
                     this.settings_tab = 3;
-                    this.navigate(Page::Settings, cx);
+                    this.open_settings(window, cx);
                 }
             }))
             .child(a11y::ModalBackground::new(

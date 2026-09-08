@@ -1,12 +1,12 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod a11y;
-mod focus_scroll;
 mod about;
 mod account_ui;
 mod activity;
 mod backend;
 mod course_library;
 mod credentials;
+mod focus_scroll;
 // Icon helpers ship ahead of the pages that reference them (M3+); same staged
 // token allowance as the theme module.
 #[allow(dead_code)]
@@ -194,6 +194,8 @@ struct Desktop {
     delete_folder: Option<u64>,
     page: Page,
     result_origin: Page,
+    settings_origin: Option<Page>,
+    settings_return_focus: Option<FocusHandle>,
     result_tab: usize,
     settings_tab: usize,
     show_options: bool,
@@ -305,18 +307,10 @@ impl Desktop {
             ),
             (Field::Search, "搜索笔记标题", String::new()),
             (Field::FolderName, "文件夹名称", String::new()),
-            (
-                Field::AsrUrl,
-                "",
-                config.asr_api.base_url.clone(),
-            ),
+            (Field::AsrUrl, "", config.asr_api.base_url.clone()),
             (Field::AsrKey, "API Key", config.asr_api.api_key.clone()),
             (Field::AsrModel, "转写模型", config.asr_api.model.clone()),
-            (
-                Field::LlmUrl,
-                "",
-                config.llm.base_url.clone(),
-            ),
+            (Field::LlmUrl, "", config.llm.base_url.clone()),
             (Field::LlmKey, "API Key", config.llm.api_key.clone()),
             (Field::LlmModel, "模型名称", config.llm.model.clone()),
         ];
@@ -465,6 +459,8 @@ impl Desktop {
             folder_error: None,
             delete_folder: None,
             result_origin: Page::Library,
+            settings_origin: None,
+            settings_return_focus: None,
             result_tab: 0,
             settings_tab: 0,
             show_options: false,
@@ -1085,14 +1081,14 @@ fn main() {
                 let new_view = weak.clone();
                 let search_view = weak.clone();
                 cx.on_action(move |_: &OpenAbout, cx| {
-                    dispatch_desktop_action(&about_view, cx, |this, _, cx| {
+                    dispatch_desktop_action(&about_view, cx, |this, window, cx| {
                         this.settings_tab = 3;
-                        this.navigate(Page::Settings, cx);
+                        this.open_settings(window, cx);
                     });
                 });
                 cx.on_action(move |_: &OpenSettings, cx| {
-                    dispatch_desktop_action(&settings_view, cx, |this, _, cx| {
-                        this.navigate(Page::Settings, cx);
+                    dispatch_desktop_action(&settings_view, cx, |this, window, cx| {
+                        this.open_settings(window, cx);
                     });
                 });
                 cx.on_action(move |_: &NewNote, cx| {
