@@ -171,7 +171,7 @@ def main():
             result = apply_patch(dest, patch)
             if result.returncode:
                 raise SystemExit(f"Could not apply reviewed patch {patch.name}:\n{result.stderr}")
-    print("Prepared GPUI and GPUI Component sources with reviewed accessibility patches")
+    print("Prepared GPUI and GPUI Component sources with reviewed patches")
 
 
 if __name__ == "__main__":

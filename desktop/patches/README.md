@@ -16,7 +16,12 @@ Developer checkouts are never patched.
 - `zed-macos-window.patch` forwards native window focus to AccessKit, initializes
   the adapter from the window's existing key state, and requests an AppKit draw
   when GPUI is invalidated. This lets initial drawing proceed when a display-link
-  callback has not started; the callback still drives continuous frame updates.
+  callback has not started. During a frame callback it leaves animation demand
+  to the display link, avoiding an AppKit redraw loop that starves input and
+  asynchronous results while a spinner is visible.
+- `component-tooltip-lifecycle.patch` dismisses a window's managed tooltip
+  before mouse or keyboard navigation can remove its trigger. It also cancels
+  delayed tooltips, while preserving normal hovering and other windows.
 
 When upgrading the locked revisions, review upstream changes before adjusting a
 patch. Do not edit `.deps` to fix an application build. The preparer deliberately
