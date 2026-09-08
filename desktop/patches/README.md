@@ -15,10 +15,14 @@ Developer checkouts are never patched.
   disabled inputs in Tab navigation. Masked/password values remain excluded.
 - `zed-macos-window.patch` forwards native window focus to AccessKit, initializes
   the adapter from the window's existing key state, and requests an AppKit draw
-  when GPUI is invalidated. This lets initial drawing proceed when a display-link
-  callback has not started. During a frame callback it leaves animation demand
-  to the display link, avoiding an AppKit redraw loop that starves input and
-  asynchronous results while a spinner is visible.
+  when GPUI is invalidated. Per-window requests are coalesced and delayed by
+  16 ms on the main thread, so initial draws, asynchronous results and animation
+  frames do not depend on a visible window's display link. Requests made during
+  a frame callback are retained until that callback is restored. Deferring the
+  AppKit invalidation avoids a synchronous CA redraw loop that starves input
+  while a spinner is visible; closing the window safely cancels pending demand.
+  Regression tests cover delayed coalescing, unavailable callbacks and requests
+  made reentrantly during wake delivery.
 - `component-tooltip-lifecycle.patch` dismisses a window's managed tooltip
   before mouse or keyboard navigation can remove its trigger. It also cancels
   delayed tooltips, while preserving normal hovering and other windows.

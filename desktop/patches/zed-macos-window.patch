@@ -12,52 +12,108 @@
          VIEW_CLASS = {
              let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
              decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
-@@ -1813,6 +1818,32 @@
-         }
+@@ -1336,6 +1341,41 @@
      }
- 
-+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
-+        let state = Arc::downgrade(&self.0);
-+        Some(Rc::new(move || {
-+            let Some(state) = state.upgrade() else {
-+                return;
-+            };
-+            let view = {
-+                let state = state.lock();
-+                // display_layer and the display-link step take this callback
-+                // while drawing. Invalidating AppKit inside that callback can
-+                // redraw in the same CA transaction forever (e.g. a spinner).
-+                // The frame source resumes after the callback and consumes
-+                // animation demand at the display cadence instead.
-+                if state.request_frame_callback.is_none() {
-+                    return;
+ }
+
++/// Coalesce demand onto a later main-thread turn. Returning false from
++/// `try_wake` retains demand when a frame callback is temporarily unavailable.
++fn deferred_frame_waker(
++    foreground_executor: ForegroundExecutor,
++    background_executor: BackgroundExecutor,
++    try_wake: impl Fn() -> bool + 'static,
++) -> Rc<dyn Fn()> {
++    let pending = Rc::new(Cell::new(false));
++    let try_wake = Rc::new(try_wake);
++    Rc::new(move || {
++        if pending.replace(true) {
++            return;
++        }
++        let pending = pending.clone();
++        let try_wake = try_wake.clone();
++        let background_executor = background_executor.clone();
++        foreground_executor
++            .spawn(async move {
++                loop {
++                    background_executor.timer(Duration::from_millis(16)).await;
++                    // Clear before AppKit is called so a reentrant request can
++                    // enqueue the next turn instead of being lost to coalescing.
++                    pending.set(false);
++                    if try_wake() || pending.replace(true) {
++                        // A successful wake served this request. If a failed
++                        // attempt enqueued another wake reentrantly, that new
++                        // task owns the retry; otherwise retain this task.
++                        break;
++                    }
 +                }
-+                state.native_view.clone()
-+            };
-+            // Wake initial/occluded windows and asynchronous results only
-+            // outside a frame callback. This never borrows or draws the App.
-+            unsafe {
-+                let _: () = msg_send![view.as_ptr(), setNeedsDisplay: YES];
-+            }
-+        }))
++            })
++            .detach();
++    })
++}
++
+ impl PlatformWindow for MacWindow {
+     fn bounds(&self) -> Bounds<Pixels> {
+         self.0.as_ref().lock().bounds()
+@@ -1811,6 +1851,46 @@
+                 .styleMask()
+                 .contains(NSWindowStyleMask::NSFullScreenWindowMask)
+         }
 +    }
 +
-     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
-         self.0.as_ref().lock().request_frame_callback = Some(callback);
++    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
++        let state = Arc::downgrade(&self.0);
++        let (foreground_executor, background_executor) = {
++            let state = self.0.lock();
++            (
++                state.foreground_executor.clone(),
++                state.background_executor.clone(),
++            )
++        };
++        Some(deferred_frame_waker(
++            foreground_executor,
++            background_executor,
++            move || {
++                let Some(state) = state.upgrade() else {
++                    return true;
++                };
++                let view = {
++                    let state = state.lock();
++                    if state.closed.load(Ordering::Acquire) {
++                        return true;
++                    }
++                    // A nested AppKit run loop can temporarily keep a frame
++                    // callback on the stack. Retain demand until it is restored.
++                    if state.request_frame_callback.is_none() {
++                        return false;
++                    }
++                    state.native_view
++                };
++                // Never invalidate in the drawing CA transaction: a spinner
++                // would otherwise draw synchronously without yielding to input.
++                // This delayed fallback also works when occlusion or a missing
++                // display prevents start_display_link from providing a tick.
++                unsafe {
++                    let _: () = msg_send![view.as_ptr(), setNeedsDisplay: YES];
++                }
++                true
++            },
++        ))
      }
-@@ -2156,7 +2187,7 @@
+
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
+@@ -2156,7 +2236,7 @@
          };
          let action_handler = A11yActionHandler(callbacks.action);
- 
+
 -        let adapter = unsafe {
 +        let mut adapter = unsafe {
              accesskit_macos::SubclassingAdapter::for_window(
                  lock.native_window as *mut c_void,
                  activation_handler,
-@@ -2164,7 +2195,16 @@
+@@ -2164,7 +2244,16 @@
              )
          };
- 
+
 +        // open_window can make the window key before the adapter exists.
 +        // Its initial host-focus state must match AppKit immediately, without
 +        // requiring the user to activate another window and come back.
@@ -69,5 +125,119 @@
 +            events.raise();
 +        }
      }
- 
+
      fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
+@@ -3581,6 +3670,113 @@
+ mod tests {
+     use super::*;
+
++    #[gpui::test]
++    fn deferred_frame_wake_coalesces_and_yields(cx: &mut gpui::TestAppContext) {
++        let calls = Rc::new(Cell::new(0));
++        let executor = cx.executor();
++        let started = executor.now();
++        let wake = deferred_frame_waker(cx.foreground_executor().clone(), executor.clone(), {
++            let calls = calls.clone();
++            move || {
++                assert!(executor.now().duration_since(started) >= Duration::from_millis(16));
++                calls.set(calls.get() + 1);
++                true
++            }
++        });
++        wake();
++        wake();
++        wake();
++        assert_eq!(calls.get(), 0, "a wake must never draw synchronously");
++        cx.run_until_parked();
++        assert_eq!(
++            calls.get(),
++            0,
++            "starting the task must still wait for the timer"
++        );
++        cx.executor().advance_clock(Duration::from_millis(15));
++        cx.run_until_parked();
++        assert_eq!(
++            calls.get(),
++            0,
++            "the delay must not collapse into the current frame"
++        );
++        cx.executor().advance_clock(Duration::from_millis(1));
++        cx.run_until_parked();
++        assert_eq!(calls.get(), 1, "pending requests share one delayed wake");
++        wake();
++        cx.run_until_parked();
++        cx.executor().advance_clock(Duration::from_millis(16));
++        cx.run_until_parked();
++        assert_eq!(calls.get(), 2, "the next frame must be able to rearm");
++    }
++
++    #[gpui::test]
++    fn deferred_frame_wake_retries_unavailable_callback(cx: &mut gpui::TestAppContext) {
++        let attempts = Rc::new(Cell::new(0));
++        let executor = cx.executor();
++        let started = executor.now();
++        let wake = deferred_frame_waker(cx.foreground_executor().clone(), executor.clone(), {
++            let attempts = attempts.clone();
++            move || {
++                attempts.set(attempts.get() + 1);
++                attempts.get() >= 3
++            }
++        });
++        wake();
++        cx.run_until_parked();
++        for expected in 1..=3 {
++            executor.advance_clock(Duration::from_millis(16));
++            cx.run_until_parked();
++            assert_eq!(
++                attempts.get(),
++                expected,
++                "unavailable callbacks must retain exactly one delayed retry"
++            );
++        }
++        assert!(executor.now().duration_since(started) >= Duration::from_millis(48));
++    }
++
++    #[gpui::test]
++    fn deferred_frame_wake_preserves_reentrant_demand(cx: &mut gpui::TestAppContext) {
++        // Exercise both a delivered wake and a temporarily unavailable callback.
++        for first_wake_succeeds in [true, false] {
++            let calls = Rc::new(Cell::new(0));
++            let holder = Rc::new(std::cell::RefCell::<Option<Rc<dyn Fn()>>>::new(None));
++            let wake = deferred_frame_waker(cx.foreground_executor().clone(), cx.executor(), {
++                let calls = calls.clone();
++                let holder = Rc::downgrade(&holder);
++                move || {
++                    calls.set(calls.get() + 1);
++                    if calls.get() == 1 {
++                        holder.upgrade().unwrap().borrow().as_ref().unwrap()();
++                        first_wake_succeeds
++                    } else {
++                        true
++                    }
++                }
++            });
++            *holder.borrow_mut() = Some(wake.clone());
++            wake();
++            cx.run_until_parked();
++            for expected in 1..=2 {
++                cx.executor().advance_clock(Duration::from_millis(16));
++                cx.run_until_parked();
++                assert_eq!(
++                    calls.get(),
++                    expected,
++                    "new demand must survive wake delivery"
++                );
++            }
++            cx.executor().advance_clock(Duration::from_millis(16));
++            cx.run_until_parked();
++            assert_eq!(
++                calls.get(),
++                2,
++                "reentrant demand must not duplicate retry tasks"
++            );
++        }
++    }
++
+     #[test]
+     fn display_id_for_screen_returns_none_for_null_screen() {
+         assert_eq!(display_id_for_screen(nil), None);
