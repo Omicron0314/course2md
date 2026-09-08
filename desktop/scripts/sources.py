@@ -18,8 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOS = {"zed": "zed-industries/zed", "component": "longbridge/gpui-component"}
 
 
-def git(path, *args, capture=False):
-    result = subprocess.run(["git", "-C", str(path), *args], check=True,
+def git(path, *args, capture=False, lf=False):
+    options = ["-c", "core.autocrlf=false"] if lf else []
+    result = subprocess.run(["git", *options, "-C", str(path), *args], check=True,
                             text=True, stdout=subprocess.PIPE if capture else None)
     return result.stdout.strip() if capture else None
 
@@ -63,7 +64,7 @@ def component_overlay(path, content):
 
 
 def apply_patch(directory, patch, *, reverse=False, check=False):
-    args = ["git", "apply"]
+    args = ["git", "-c", "core.autocrlf=false", "apply"]
     if reverse:
         args.append("--reverse")
     if check:
@@ -106,7 +107,7 @@ def verify_and_restore_overlay(directory, name, patches):
                 expected = component_overlay(path, expected)
             if (staged / path).read_bytes() != expected:
                 raise SystemExit(f"Unexpected source edit in {directory}: {path}; original file preserved")
-    git(directory, "restore", "--source=HEAD", "--staged", "--worktree", *changed)
+    git(directory, "restore", "--source=HEAD", "--staged", "--worktree", *changed, lf=True)
 
 
 def verify_patch_revision(directory, revision, patches):
@@ -158,10 +159,10 @@ def main():
         patches = source_patches(name)
         verify_patch_revision(source, revision, patches)
         if not dest.exists():
-            git(source, "worktree", "add", "--detach", str(dest), revision)
+            git(source, "worktree", "add", "--detach", str(dest), revision, lf=True)
         else:
             verify_and_restore_overlay(dest, name, patches)
-            git(dest, "checkout", "--detach", revision)
+            git(dest, "checkout", "--detach", revision, lf=True)
         if name == "component":
             for path in ["Cargo.toml", "crates/component-macros/src/crate_path.rs"]:
                 file = dest / path

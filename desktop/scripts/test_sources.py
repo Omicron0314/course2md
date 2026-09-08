@@ -46,6 +46,16 @@ class SourcePatchTests(unittest.TestCase):
             self.assertEqual((self.repo / "input.rs").read_bytes(), expected)
         self.assertEqual(self.run_git("rev-parse", "HEAD"), revision)
 
+    def test_isolated_worktree_ignores_developer_autocrlf_preference(self):
+        self.run_git("config", "core.autocrlf", "true")
+        worktree = self.root / "worktree"
+        sources.git(self.repo, "worktree", "add", "--detach", str(worktree), "HEAD", lf=True)
+        self.assertNotIn(b'\r\n', (worktree / "input.rs").read_bytes())
+        self.assertEqual(sources.apply_patch(worktree, self.patch).returncode, 0)
+        sources.verify_and_restore_overlay(worktree, "zed", [self.patch])
+        self.assertNotIn(b'\r\n', (worktree / "input.rs").read_bytes())
+        self.assertEqual(self.run_git("config", "core.autocrlf").strip(), "true")
+
     def test_edit_outside_patch_is_preserved_and_rejected(self):
         self.apply()
         file = self.repo / "input.rs"
