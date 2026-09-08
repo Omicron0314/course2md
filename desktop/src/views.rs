@@ -26,9 +26,31 @@ fn shell_column_at(width: Rems) -> Div {
 }
 
 impl Desktop {
-    /// App top bar under the title bar: wordmark, workspace/notes tabs, settings gear.
+    /// Keep task results reachable while the user is on another page.
     fn shell_topbar(&self, cx: &mut Context<Self>) -> Div {
         let settings_problem = self.settings_have_problem();
+        let task_count = self.workspace.as_ref().map_or(0, |workspace| {
+            workspace
+                .state
+                .tasks
+                .iter()
+                .filter(|task| {
+                    task.handled_by.is_none()
+                        && (task.unread
+                            || matches!(
+                                task.state,
+                                workspace::TaskState::NeedsAttention
+                                    | workspace::TaskState::Uncertain
+                                    | workspace::TaskState::Partial
+                            ))
+                })
+                .count()
+        });
+        let task_label = if task_count == 0 {
+            "任务".to_owned()
+        } else {
+            format!("任务（{task_count}）")
+        };
         let wordmark = h_flex().flex_shrink_0().items_baseline().children([
             div()
                 .text_size(TEXT_BODY)
@@ -50,46 +72,48 @@ impl Desktop {
             .justify_center()
             .gap_6()
             .children(
-                [(Page::New, "工作台"), (Page::Library, "我的笔记")]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (page, label))| {
-                        // 阅读页归入我的笔记 tab（mock v2 同样归位）。
-                        let active = self.page == page
-                            || (page == Page::Library && self.page == Page::Result);
-                        control(("shell-tab", index))
-                            .ghost()
-                            .h_auto()
-                            .px(px(2.))
-                            .py(px(6.))
-                            .selected(active)
-                            .toggled(active)
-                            .accessibility_label(label)
-                            .child(
-                                v_flex()
-                                    .gap(px(4.))
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(if active { INK } else { GRAY }))
-                                            .when(active, |text| {
-                                                text.font_weight(FontWeight::SEMIBOLD)
-                                            })
-                                            .child(label),
-                                    )
-                                    .child(div().h(px(2.)).w_full().rounded_full().bg(if active {
-                                        rgb(ACCENT)
-                                    } else {
-                                        rgba(0x00000000)
-                                    })),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if page == Page::Library {
-                                    this.folder_filter = None;
-                                }
-                                this.navigate(page, cx);
-                            }))
-                    }),
+                [
+                    (Page::New, "工作台"),
+                    (Page::Library, "我的笔记"),
+                    (Page::Task, task_label.as_str()),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (page, label))| {
+                    // 阅读页归入我的笔记 tab（mock v2 同样归位）。
+                    let active =
+                        self.page == page || (page == Page::Library && self.page == Page::Result);
+                    control(("shell-tab", index))
+                        .ghost()
+                        .h_auto()
+                        .px(px(2.))
+                        .py(px(6.))
+                        .selected(active)
+                        .toggled(active)
+                        .accessibility_label(label.to_owned())
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_color(rgb(if active { INK } else { GRAY }))
+                                        .when(active, |text| text.font_weight(FontWeight::SEMIBOLD))
+                                        .child(label.to_owned()),
+                                )
+                                .child(div().h(px(2.)).w_full().rounded_full().bg(if active {
+                                    rgb(ACCENT)
+                                } else {
+                                    rgba(0x00000000)
+                                })),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if page == Page::Library {
+                                this.folder_filter = None;
+                            }
+                            this.navigate(page, cx);
+                        }))
+                }),
             );
         let gear = control("shell-settings")
             .ghost()
@@ -130,6 +154,77 @@ impl Desktop {
                     .child(tabs)
                     .child(gear),
             )
+    }
+
+    fn task_result_notice(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let task = self
+            .workspace
+            .as_ref()?
+            .state
+            .tasks
+            .iter()
+            .filter(|task| task.unread && task.handled_by.is_none())
+            .max_by_key(|task| task.updated)?;
+        let id = task.id.clone();
+        let dismiss_id = id.clone();
+        let action = match task.state {
+            workspace::TaskState::Complete => "查看生成结果",
+            workspace::TaskState::Partial => "查看未完成部分",
+            workspace::TaskState::Uncertain => "确认请求结果",
+            _ => "查看任务",
+        };
+        Some(
+            shell_column_for(self.page).py_2().flex_shrink_0().child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(TINT))
+                    .child(
+                        accessible_text(
+                            "background-task-result",
+                            format!("《{}》：{}", task.plan.title, task.state.label(),),
+                        )
+                        .flex_1()
+                        .min_w_0()
+                        .line_clamp(2)
+                        .text_ellipsis(),
+                    )
+                    .child(
+                        control("open-task-result")
+                            .label(action)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.navigate(Page::Task, cx);
+                                if this.page == Page::Task {
+                                    this.select_task(&id, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        control("dismiss-task-result")
+                            .ghost()
+                            .icon(IconName::Close)
+                            .accessibility_label("关闭这条任务提示")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(workspace) = &mut this.workspace {
+                                    if let Err(error) = workspace.transaction(|state| {
+                                        if let Some(task) = state.task_mut(&dismiss_id) {
+                                            task.unread = false;
+                                        }
+                                        Ok(())
+                                    }) {
+                                        this.workspace_error =
+                                            Some(format!("任务提示状态尚未保存：{error:#}"));
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            ),
+        )
     }
     fn page_title(&self) -> String {
         match self.page {
@@ -192,11 +287,13 @@ impl Render for Desktop {
             })
             .child(content);
         let topbar = self.shell_topbar(cx);
+        let task_notice = self.task_result_notice(cx);
         let body = v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .w_full()
+            .when_some(task_notice, |body, notice| body.child(notice))
             .when(
                 !matches!(self.page, Page::New | Page::Result | Page::Settings),
                 |v| {
