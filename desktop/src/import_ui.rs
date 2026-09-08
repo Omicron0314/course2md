@@ -1,6 +1,6 @@
 //! A continuous source → content → destination → generation form.
 use super::*;
-use crate::{preferences::ServicePurpose, theme::*};
+use crate::{motion, preferences::ServicePurpose, theme::*};
 use course2md::subtitle::{SubtitleEvidence, SubtitleReadError, SubtitleTrack};
 use gpui_component::{
     button::*,
@@ -24,7 +24,7 @@ fn issue(message: impl Into<SharedString>) -> Div {
     let message = message.into();
     div()
         .text_sm()
-        .text_color(rgb(0xa32626))
+        .text_color(color(DANGER))
         .whitespace_normal()
         .child(accessible_text(text_id("issue", &message), message))
 }
@@ -34,13 +34,13 @@ fn text_id(kind: &str, value: &str) -> SharedString {
     value.hash(&mut hash);
     format!("import-{kind}-{:x}", hash.finish()).into()
 }
-/// Decorative platform capability marker (brand dot + label); not interactive.
-fn platform_badge(name: &'static str, brand_color: u32) -> Div {
+/// Platform marks are brand assets; they do not belong inside the editable field.
+fn platform_mark(name: &'static str, icon: Icon) -> Div {
     h_flex()
-        .gap(px(5.))
+        .gap_2()
         .items_center()
         .flex_shrink_0()
-        .child(div().size(px(8.)).rounded_full().bg(rgb(brand_color)))
+        .child(icon.size(px(20.)).flex_shrink_0())
         .child(
             div()
                 .text_size(TEXT_AUX)
@@ -48,21 +48,27 @@ fn platform_badge(name: &'static str, brand_color: u32) -> Div {
                 .child(name),
         )
 }
-/// One labeled region inside the workbench box, separated by the card hairline.
+/// A consistent heading and spacing for one part of the import plan.
 pub(crate) fn box_section(label: &'static str) -> Div {
-    v_flex()
-        .w_full()
-        .min_w_0()
-        .gap_2()
-        .pt_4()
-        .border_t_1()
-        .border_color(color(CARD_LINE))
-        .child(
-            accessible_text(text_id("box-section", label), label)
-                .text_size(TEXT_AUX)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(color(GRAY)),
-        )
+    let icon = match label {
+        "所选视频" => icons::movie(),
+        "笔记内容" => icons::subtitles(),
+        "名称与保存" => Icon::new(IconName::Folder),
+        "导出与视频" => icons::download(),
+        "本次任务" => icons::task(),
+        _ => Icon::new(IconName::Info),
+    };
+    v_flex().w_full().min_w_0().gap_3().child(
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(icon.size(px(20.)).text_color(color(ACCENT_STRONG)))
+            .child(
+                accessible_text(text_id("box-section", label), label)
+                    .text_size(TEXT_TITLE)
+                    .font_weight(FontWeight::SEMIBOLD),
+            ),
+    )
 }
 /// One fact row inside the plan confirmation inset.
 pub(crate) fn plan_row(value: impl Into<SharedString>, warning: bool) -> Stateful<Div> {
@@ -95,7 +101,7 @@ struct PlanDialog {
 
 impl Render for PlanDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let lines = self.desktop.read(cx).generation_plan();
+        let sections = self.desktop.read(cx).generation_plan();
         let available =
             (window.bounds().size.height - window.rem_size() * 8. - px(64.)).max(px(120.));
         v_flex()
@@ -110,21 +116,32 @@ impl Render for PlanDialog {
                     .max_h(available)
                     .overflow_y_scroll()
                     .min_w_0()
-                    .gap_3()
-                    .children(lines.into_iter().enumerate().map(|(index, line)| {
-                        accessible_text(("import-full-plan-line", index), line).whitespace_normal()
+                    .gap_6()
+                    .children(sections.into_iter().map(|(title, lines)| {
+                        box_section(title).children(lines.into_iter().map(|line| {
+                            accessible_text(text_id("full-plan-line", &line), line)
+                                .whitespace_normal()
+                                .text_size(TEXT_BODY)
+                        }))
                     })),
             )
             .child(
-                control("close-import-full-plan")
-                    .label("返回生成页")
+                outline_pill("close-import-full-plan")
+                    .icon(IconName::ArrowLeft)
+                    .label("返回")
                     .on_click(|_, window, cx| window.close_dialog(cx)),
             )
     }
 }
 
 impl Desktop {
-    fn subtitle_issue(&self, kind: &str, message: &str, cx: &mut Context<Self>) -> Div {
+    fn subtitle_issue(
+        &self,
+        kind: &str,
+        message: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let (summary, details) = message.split_once('\n').unwrap_or((message, ""));
         let id = text_id(kind, message);
         let expanded = self.expanded_subtitle_issue.as_ref() == Some(&id);
@@ -135,6 +152,11 @@ impl Desktop {
             .when(!details.trim().is_empty(), |view| {
                 view.child(
                     quiet(id.clone())
+                        .icon(if expanded {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
                         .self_start()
                         .label(if expanded {
                             "收起技术详情"
@@ -147,7 +169,13 @@ impl Desktop {
                             cx.notify();
                         })),
                 )
-                .when(expanded, |view| view.child(help(details.to_owned())))
+                .child(motion::disclosure(
+                    text_id("subtitle-technical", message),
+                    expanded,
+                    v_flex().child(help(details.to_owned())),
+                    window,
+                    cx,
+                ))
             })
     }
 
@@ -500,89 +528,116 @@ impl Desktop {
         }
     }
 
-    /// Box top: source-kind segments, the link input or local drop zone, reading
-    /// state, collection candidates and source errors.
-    pub fn box_source_input(&self, cx: &mut Context<Self>) -> Div {
-        let mut view = v_flex().w_full().min_w_0().gap_4();
-        view = view.child(
-            h_flex().w_full().justify_center().child(
-                seg_track().children([
-                    seg_item("source-kind-online", self.online)
-                        .icon(icons::link())
-                        .label("视频链接")
-                        .accessibility_label("视频链接")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.switch_draft_kind(true, window, cx)
-                        })),
-                    seg_item("source-kind-local", !self.online)
-                        .icon(icons::movie())
-                        .label("本地文件")
-                        .accessibility_label("本地文件")
-                        .on_click(cx.listener(|this, _, window, cx| {
+    /// Source navigation is separate from the editable surface.
+    fn source_kind_tabs(&self, cx: &mut Context<Self>) -> Div {
+        h_flex().w_full().child(
+            seg_track().children([
+                seg_item("source-kind-online", self.online)
+                    .icon(icons::link())
+                    .label("视频链接")
+                    .accessibility_label("视频链接")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.switch_draft_kind(true, window, cx)),
+                    ),
+                seg_item("source-kind-local", !self.online)
+                    .icon(icons::movie())
+                    .label("本地文件")
+                    .accessibility_label("本地文件")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| {
                             this.switch_draft_kind(false, window, cx)
-                        })),
-                ]),
-            ),
-        );
+                        }),
+                    ),
+            ]),
+        )
+    }
+
+    /// Visible field, local file target, and status belonging to this source.
+    pub fn box_source_input(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let mut view = v_flex().w_full().min_w_0().gap_4();
         if self.online {
-            let validation = if self.source_preview.is_none() {
-                self.source_validation.clone()
-            } else {
-                None
-            };
+            let validation = self
+                .source_preview
+                .is_none()
+                .then(|| self.source_validation.clone())
+                .flatten();
             view = view.child(
                 v_flex()
                     .gap_2()
                     .child(
+                        accessible_text("import-url-label", "视频链接")
+                            .font_weight(FontWeight::MEDIUM),
+                    )
+                    .child(
                         Input::new(&self.inputs[&Field::Source])
                             .aria_label("视频链接")
-                            .appearance(false)
-                            .min_h(rems(2.571))
+                            .min_h(px(40.))
                             .h_auto()
                             .text_size(TEXT_BODY)
-                            .prefix(
-                                icons::link()
-                                    .size(px(16.))
-                                    .text_color(color(FAINT)),
-                            )
-                            .suffix(
-                                h_flex()
-                                    .gap_3()
-                                    .flex_shrink_0()
-                                    .child(platform_badge("YouTube", 0xe23d28))
-                                    .child(platform_badge("Bilibili", 0xf0699a)),
-                            ),
+                            .prefix(icons::link().size(px(20.)).text_color(color(GRAY)))
+                            .when(validation.is_some(), |input| {
+                                input.border_color(color(DANGER))
+                            }),
                     )
                     .when_some(validation, |view, message| view.child(issue(message))),
             );
+            view = view.child(
+                h_flex()
+                    .gap_4()
+                    .flex_wrap()
+                    .items_center()
+                    .child(help("支持"))
+                    .child(platform_mark(
+                        "YouTube",
+                        icons::youtube().text_color(rgb(0xff0033)),
+                    ))
+                    .child(platform_mark(
+                        "Bilibili",
+                        icons::bilibili().text_color(rgb(0x00a1d6)),
+                    )),
+            );
         } else if self.source_preview.is_none() {
+            let input = self.value(Field::Source, cx);
+            let filename = PathBuf::from(&input)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
             view = view.child(
                 v_flex()
                     .id("video-drop-zone")
-                    .gap_3()
-                    .p_5()
+                    .gap_4()
+                    .p_6()
+                    .items_center()
                     .rounded(RADIUS_CARD)
+                    .bg(color(INSET))
                     .border_1()
                     .border_color(color(CONTROL))
+                    .child(
+                        icons::file_upload()
+                            .size(px(32.))
+                            .text_color(color(ACCENT_STRONG)),
+                    )
                     .child(accessible_text(
                         "import-drop-instruction",
-                        "把视频拖到这里，或选择文件。",
+                        "拖入视频，开始整理笔记",
                     ))
                     .child(
-                        outline_pill("choose-video")
-                            .self_start()
-                            .label(if self.value(Field::Source, cx).is_empty() {
-                                "选择视频"
-                            } else {
-                                "更换视频"
-                            })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.pick(false, window, cx)),
-                            ),
+                        (if input.is_empty() {
+                            primary_pill("choose-video")
+                        } else {
+                            outline_pill("choose-video")
+                        })
+                        .icon(IconName::FolderOpen)
+                        .label(if input.is_empty() {
+                            "选择视频"
+                        } else {
+                            "更换视频"
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| this.pick(false, window, cx))),
                     )
-                    .when(!self.value(Field::Source, cx).is_empty(), |view| {
-                        view.child(help(self.value(Field::Source, cx)))
-                    })
+                    .when_some(
+                        filename.filter(|name| !name.is_empty()),
+                        |view, filename| view.child(help(filename)),
+                    )
                     .on_drop(
                         cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
                             this.drop_source_files(paths.paths(), window, cx)
@@ -591,36 +646,43 @@ impl Desktop {
             );
         }
         if self.preview_cancel.is_some() {
-            view = view.child(
+            view = view.child(motion::enter(
+                text_id("reading", &self.preview_generation.to_string()),
                 h_flex()
+                    .w_full()
                     .gap_3()
+                    .p_3()
                     .items_center()
+                    .rounded(RADIUS_SMALL)
+                    .bg(color(INSET))
+                    .child(motion::spinner("source-reading-spinner", cx))
                     .child(
-                        gpui_component::Icon::default()
-                            .path("icons/loader-circle.svg")
-                            .size(px(16.))
-                            .text_color(color(GRAY)),
+                        accessible_text("import-reading-state", "正在读取视频信息与字幕…")
+                            .flex_1()
+                            .min_w_0(),
                     )
-                    .child(help("正在读取视频信息与字幕…"))
                     .child(
                         quiet("cancel-source-read")
-                            .label("取消读取")
+                            .icon(IconName::Close)
+                            .label("取消")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.invalidate_source();
                                 cx.notify();
                             })),
                     ),
-            );
+                cx,
+            ));
         }
         if let Some(title) = &self.source_collection_title {
-            view = view.child(
+            view = view.child(motion::enter(
+                text_id("source-candidates", title),
                 v_flex()
-                    .gap_2()
+                    .gap_3()
                     .child(
                         accessible_text("import-collection-title", title.clone())
-                            .font_weight(FontWeight::MEDIUM),
+                            .font_weight(FontWeight::SEMIBOLD),
                     )
-                    .child(help("本次处理 1 个视频，选择后会读取它的完整信息。"))
+                    .child(help("选择本次要整理的视频"))
                     .child(
                         v_flex()
                             .id("source-candidates")
@@ -636,83 +698,126 @@ impl Desktop {
                                         .w_full()
                                         .h_auto()
                                         .py_3()
-                                        .rounded(RADIUS_CARD)
+                                        .rounded(RADIUS_SMALL)
                                         .justify_start()
+                                        .icon(icons::movie())
+                                        .tooltip(candidate.input.clone())
                                         .accessibility_label(format!("读取 {}", candidate.title))
                                         .child(
-                                            v_flex()
+                                            div()
+                                                .flex_1()
                                                 .min_w_0()
-                                                .gap_1()
-                                                .child(candidate.title.clone())
-                                                .when(candidate.title != candidate.input, |view| {
-                                                    view.child(help(candidate.input.clone()))
-                                                }),
+                                                .whitespace_normal()
+                                                .text_ellipsis()
+                                                .line_clamp(2)
+                                                .child(candidate.title.clone()),
                                         )
+                                        .child(icons::arrow_forward().size(px(18.)).flex_shrink_0())
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.select_source_input(input.clone(), window, cx)
                                         }))
                                 },
                             )),
                     ),
-            );
+                cx,
+            ));
         }
         if let Some(error) = &self.preview_error {
-            view =
-                view.child(
-                    v_flex()
-                        .gap_2()
-                        .child(issue(error.lines().next().unwrap_or(error).to_owned()))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(outline_pill("retry-source").label("重新读取").on_click(
-                                    cx.listener(|this, _, _, cx| this.inspect_source(cx)),
-                                ))
-                                .when(
-                                    self.online
-                                        && source::is_login_failure(error)
-                                        && course2md::auth::is_bilibili_url(
-                                            &self.value(Field::Source, cx),
-                                        ),
-                                    |row| {
-                                        row.child(
-                                            outline_pill("source-login-repair")
-                                                .label("登录 Bilibili")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_account_dialog(window, cx)
-                                                })),
-                                        )
-                                    },
-                                )
-                                .child(
-                                    quiet("source-error-details")
-                                        .label("详细原因")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_preview_details = !this.show_preview_details;
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .when(self.show_preview_details, |view| {
-                            view.child(help(error.clone()))
-                        }),
-                );
+            let details = motion::disclosure(
+                "source-error-disclosure",
+                self.show_preview_details,
+                v_flex().child(help(error.clone())),
+                window,
+                cx,
+            );
+            view = view.child(motion::enter(
+                text_id("source-error", error),
+                v_flex()
+                    .gap_3()
+                    .p_4()
+                    .rounded(RADIUS_CARD)
+                    .bg(color(DANGER_BG))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_start()
+                            .child(
+                                Icon::new(IconName::CircleX)
+                                    .size(px(20.))
+                                    .text_color(color(DANGER))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                issue(error.lines().next().unwrap_or(error).to_owned())
+                                    .flex_1()
+                                    .min_w_0(),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                outline_pill("retry-source")
+                                    .icon(icons::refresh())
+                                    .label("重新读取")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.inspect_source(cx)),
+                                    ),
+                            )
+                            .when(
+                                self.online
+                                    && source::is_login_failure(error)
+                                    && course2md::auth::is_bilibili_url(
+                                        &self.value(Field::Source, cx),
+                                    ),
+                                |row| {
+                                    row.child(
+                                        outline_pill("source-login-repair")
+                                            .icon(icons::bilibili())
+                                            .label("登录 Bilibili")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_account_dialog(window, cx)
+                                            })),
+                                    )
+                                },
+                            )
+                            .child(
+                                quiet("source-error-details")
+                                    .icon(if self.show_preview_details {
+                                        IconName::ChevronUp
+                                    } else {
+                                        IconName::ChevronDown
+                                    })
+                                    .label(if self.show_preview_details {
+                                        "收起详情"
+                                    } else {
+                                        "技术详情"
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_preview_details = !this.show_preview_details;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(details),
+                cx,
+            ));
         }
         view
     }
 
-    /// Confirmed single video: cover only with real data, identity facts and the
-    /// source-details disclosure.
-    fn box_selected_video(&self, cx: &mut Context<Self>) -> Div {
+    /// The video identity remains compact; paths and account tools are details.
+    fn box_selected_video(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let Some(source) = &self.source_preview else {
             return v_flex();
         };
-        let mut selected = h_flex().gap_3().items_start();
+        let mut selected = h_flex().gap_4().items_start();
         if let Some(cover) = &source.cover {
             selected = selected.child(
                 img(cover.clone())
-                    .w(rems(6.857))
-                    .h(rems(3.857))
+                    .w(rems(8.))
+                    .h(rems(4.5))
                     .object_fit(ObjectFit::Cover)
                     .rounded(RADIUS_SMALL)
                     .flex_shrink_0(),
@@ -722,7 +827,7 @@ impl Desktop {
             v_flex()
                 .min_w_0()
                 .flex_1()
-                .gap_1()
+                .gap_2()
                 .child(
                     accessible_text("import-selected-title", source.title.clone())
                         .font_weight(FontWeight::SEMIBOLD)
@@ -732,70 +837,72 @@ impl Desktop {
                 )
                 .when(!source.detail().is_empty(), |view| {
                     view.child(help(source.detail()))
-                })
-                .child(
-                    div().child(
-                        badge(BadgeKind::Neutral).child("本次处理 1 个视频"),
-                    ),
-                ),
+                }),
         );
-        box_section("所选视频")
-            .child(
-                v_flex()
-                    .id("import-selected-source")
-                    .gap_2()
-                    .on_drop(
-                        cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
-                            this.drop_source_files(paths.paths(), window, cx)
-                        }),
-                    )
-                    .child(selected)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(
-                                quiet("source-details")
-                                    .self_start()
-                                    .label(if self.show_preview_details {
-                                        "收起来源详情"
-                                    } else {
-                                        "来源详情"
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_preview_details = !this.show_preview_details;
-                                        cx.notify();
+        let details = v_flex().gap_3().child(help(source.input.clone())).when(
+            source.online && course2md::auth::is_bilibili_url(&source.input),
+            |view| view.child(self.source_account_row(cx)),
+        );
+        box_section("所选视频").child(
+            v_flex()
+                .id("import-selected-source")
+                .gap_3()
+                .on_drop(
+                    cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                        this.drop_source_files(paths.paths(), window, cx)
+                    }),
+                )
+                .child(selected)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(
+                            quiet("source-details")
+                                .icon(if self.show_preview_details {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .label(if self.show_preview_details {
+                                    "收起详情"
+                                } else {
+                                    "来源详情"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_preview_details = !this.show_preview_details;
+                                    cx.notify();
+                                })),
+                        )
+                        .when(self.online, |row| {
+                            row.child(
+                                quiet("reread-source")
+                                    .icon(icons::refresh())
+                                    .label("重新读取")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.inspect_source(cx)),
+                                    ),
+                            )
+                        })
+                        .when(!self.online, |row| {
+                            row.child(
+                                quiet("change-selected-video")
+                                    .icon(IconName::FolderOpen)
+                                    .label("更换视频")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pick(false, window, cx)
                                     })),
                             )
-                            .when(self.online, |row| {
-                                row.child(
-                                    quiet("reread-source")
-                                        .label("重新读取视频信息")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.inspect_source(cx)
-                                        })),
-                                )
-                            })
-                            .when(!self.online, |row| {
-                                row.child(
-                                    quiet("change-selected-video")
-                                        .label("更换视频")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.pick(false, window, cx)
-                                        })),
-                                )
-                            }),
-                    )
-                    .when(self.show_preview_details, |view| {
-                        view.when(!source.online, |view| {
-                            view.child(help(source.input.clone()))
-                        })
-                        .when(
-                            source.online && course2md::auth::is_bilibili_url(&source.input),
-                            |view| view.child(self.source_account_row(cx)),
-                        )
-                    }),
-            )
+                        }),
+                )
+                .child(motion::disclosure(
+                    "source-details-disclosure",
+                    self.show_preview_details,
+                    details,
+                    window,
+                    cx,
+                )),
+        )
     }
 
     fn text_source_view(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -803,13 +910,22 @@ impl Desktop {
             return v_flex();
         };
         let speech = self.import_uses_speech();
+        let failure = self.subtitle_error.as_deref().or_else(|| {
+            if let SubtitleEvidence::Failed { message } = &source.subtitles {
+                Some(message.as_str())
+            } else {
+                None
+            }
+        });
+        let needs_text_choice =
+            (!speech && source.selected_subtitle.is_none()) || failure.is_some();
         let description = if self.subtitle_loading {
-            "正在确认字幕正文…".to_owned()
+            "正在读取字幕…".to_owned()
         } else if !speech
             && (source.subtitle_request.is_some() || source.subtitle_read_error.is_some())
         {
             match &source.selected_subtitle {
-                Some(subtitle) => format!("字幕尚未重新确认；已读的{}仍保留", subtitle.label),
+                Some(_) => "字幕尚未确认，已读内容仍保留".into(),
                 None => "所选字幕尚未确认".into(),
             }
         } else if speech {
@@ -820,43 +936,59 @@ impl Desktop {
             match &source.subtitles {
                 SubtitleEvidence::Unchecked => "尚未检查可读取的字幕".into(),
                 SubtitleEvidence::Found { .. } => "找到字幕，请确认要使用的文字".into(),
-                SubtitleEvidence::NoneFound => "未找到可直接读取的字幕".into(),
-                SubtitleEvidence::Failed { .. } => "字幕未读取成功，尚不能确认是否可用".into(),
-                SubtitleEvidence::Unsupported { message } => message.clone(),
+                SubtitleEvidence::NoneFound | SubtitleEvidence::Unsupported { .. } => {
+                    "尚未选择文字来源".into()
+                }
+                SubtitleEvidence::Failed { .. } => "字幕尚未确认".into(),
             }
         };
         let mut view = box_section("笔记内容").child(
             h_flex()
                 .gap_3()
-                .items_baseline()
+                .items_center()
+                .child(if self.subtitle_loading {
+                    motion::spinner("subtitle-reading-spinner", cx)
+                } else {
+                    (if speech {
+                        icons::mic()
+                    } else {
+                        icons::subtitles()
+                    })
+                    .size(px(20.))
+                    .text_color(color(GRAY))
+                    .into_any_element()
+                })
                 .child(
-                    div()
-                        .text_color(color(GRAY))
-                        .flex_shrink_0()
-                        .child("文字来源"),
-                )
-                .child(
-                    accessible_text("import-text-source-state", description.clone())
-                        .font_weight(FontWeight::SEMIBOLD)
+                    accessible_text("import-text-source-state", description)
+                        .font_weight(FontWeight::MEDIUM)
                         .flex_1()
-                        .min_w_0(),
+                        .min_w_0()
+                        .whitespace_normal(),
                 )
-                .child(
-                    quiet("change-text-source")
-                        .label(if self.show_options {
-                            "收起"
-                        } else {
-                            "更换"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_options = !this.show_options;
-                            cx.notify();
-                        })),
-                ),
+                .when(!needs_text_choice, |row| {
+                    row.child(
+                        quiet("change-text-source")
+                            .icon(if self.show_options {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .label(if self.show_options {
+                                "收起"
+                            } else {
+                                "更换"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_options = !this.show_options;
+                                cx.notify();
+                            })),
+                    )
+                }),
         );
         if self.subtitle_loading {
             view = view.child(
                 quiet("cancel-subtitle-read")
+                    .icon(IconName::Close)
                     .self_start()
                     .label("取消读取字幕")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -874,34 +1006,55 @@ impl Desktop {
                     })),
             );
         }
-        if let Some(error) = &self.subtitle_error {
-            view = view.child(
+        if let Some(error) = failure {
+            let failure_details = self.subtitle_issue("subtitle-read", error, window, cx);
+            view = view.child(motion::enter(
+                text_id("subtitle-failure", error),
                 v_flex()
-                    .gap_2()
-                    .p_3()
+                    .gap_3()
+                    .p_4()
                     .rounded(RADIUS_CARD)
                     .bg(color(WARNING_BG))
                     .child(
-                        accessible_text("subtitle-failed", "字幕未读取成功，尚不能确认是否可用。")
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(color(WARNING)),
+                        h_flex()
+                            .gap_2()
+                            .items_start()
+                            .child(
+                                Icon::new(IconName::TriangleAlert)
+                                    .size(px(20.))
+                                    .text_color(color(WARNING))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                accessible_text("subtitle-failed", "字幕未读取成功")
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(color(WARNING)),
+                            ),
                     )
-                    .child(self.subtitle_issue("subtitle-read", error, cx)),
-            );
+                    .child(failure_details),
+                cx,
+            ));
             if let Some(old) = &source.selected_subtitle {
                 view = view.child(
                     outline_pill("use-previous-subtitle")
                         .self_start()
-                        .label(format!("继续使用已确认的{}", old.label))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.use_confirmed_subtitle(cx);
-                        })),
+                        .icon(icons::subtitles())
+                        .label("使用已读字幕")
+                        .tooltip(old.label.clone())
+                        .on_click(cx.listener(|this, _, _, cx| this.use_confirmed_subtitle(cx))),
                 );
             }
         }
-        if self.show_options
-            || (!speech && source.selected_subtitle.is_none())
-            || self.subtitle_error.is_some()
+        let show_text_choices = self.show_options || needs_text_choice;
+        if speech && !show_text_choices {
+            match &source.subtitles {
+                SubtitleEvidence::NoneFound => view = view.child(help("未找到可直接读取的字幕")),
+                SubtitleEvidence::Unsupported { message } => {
+                    view = view.child(help(message.clone()))
+                }
+                _ => {}
+            }
+        }
         {
             let mut tracks = source.subtitles.tracks().to_vec();
             if let Some(pending) = &source.subtitle_request
@@ -977,11 +1130,6 @@ impl Desktop {
                     ),
             );
             if self.subtitle_error.is_none()
-                && let SubtitleEvidence::Failed { message } = &source.subtitles
-            {
-                options = options.child(self.subtitle_issue("subtitle-discovery", message, cx));
-            }
-            if self.subtitle_error.is_none()
                 && let SubtitleEvidence::Found {
                     warning: Some(message),
                     ..
@@ -990,6 +1138,7 @@ impl Desktop {
                 options = options.child(self.subtitle_issue(
                     "subtitle-warning",
                     &format!("部分字幕尚未确认：{message}"),
+                    window,
                     cx,
                 ));
             }
@@ -1005,31 +1154,36 @@ impl Desktop {
                     .flex_wrap()
                     .child(
                         outline_pill("retry-subtitles")
+                            .icon(icons::refresh())
                             .label("重新读取字幕")
                             .disabled(self.subtitle_loading)
                             .on_click(cx.listener(|this, _, _, cx| this.retry_subtitles(cx))),
                     )
                     .when(!source.online, |view| {
                         view.child(
-                            outline_pill("attach-subtitles").label("选择字幕文件").on_click(
-                                cx.listener(|this, _, window, cx| {
+                            outline_pill("attach-subtitles")
+                                .icon(icons::file_upload())
+                                .label("选择字幕文件")
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     this.choose_attached_subtitle(window, cx)
-                                }),
-                            ),
+                                })),
                         )
                     })
                     .when(
                         source.online
                             && course2md::auth::is_bilibili_url(&source.input)
-                            && self.subtitle_error.as_deref().or_else(|| {
-                                match &source.subtitles {
+                            && self
+                                .subtitle_error
+                                .as_deref()
+                                .or_else(|| match &source.subtitles {
                                     SubtitleEvidence::Failed { message } => Some(message.as_str()),
                                     _ => None,
-                                }
-                            }).is_some_and(source::is_login_failure),
+                                })
+                                .is_some_and(source::is_login_failure),
                         |view| {
                             view.child(
                                 outline_pill("login-for-subtitles")
+                                    .icon(icons::bilibili())
                                     .label("登录 Bilibili")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_account_dialog(window, cx)
@@ -1038,90 +1192,127 @@ impl Desktop {
                         },
                     ),
             );
-            view = view.child(options);
+            view = view.child(motion::disclosure(
+                "text-source-choices",
+                show_text_choices,
+                options,
+                window,
+                cx,
+            ));
         }
-        if speech {
-            view = view.child(self.import_speech_options(window, cx));
-        }
+        let speech_options = self.import_speech_options(window, cx);
+        view = view.child(motion::disclosure(
+            "speech-options",
+            speech,
+            speech_options,
+            window,
+            cx,
+        ));
+        let vision_options = h_flex()
+            .gap_3()
+            .items_start()
+            .child(icons::image().size(px(20.)).mt_2().text_color(color(GRAY)))
+            .child(
+                crate::settings_ui::preference(
+                    "发送截图辅助校对",
+                    "文字及对应截图会发送到所选服务",
+                    coral_switch(
+                        Switch::new("import-vision")
+                            .checked(self.task_options.vision)
+                            .on_click(cx.listener(|this, value, _, cx| {
+                                this.task_options.vision = *value;
+                                this.save_current_draft(cx);
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .flex_1()
+                .min_w_0(),
+            );
+        let vision_disclosure = motion::disclosure(
+            "ai-vision-options",
+            self.task_options.llm,
+            vision_options,
+            window,
+            cx,
+        );
         let ai_overridden = {
             let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
-            (self.task_options.llm, self.task_options.summarize, self.task_options.vision)
-                != (defaults.llm, defaults.summarize, defaults.vision)
+            (
+                self.task_options.llm,
+                self.task_options.summarize,
+                self.task_options.vision,
+            ) != (defaults.llm, defaults.summarize, defaults.vision)
         };
         view = view.child(
             v_flex()
                 .gap_3()
                 .pt_2()
-                .child(crate::settings_ui::preference(
-                    "AI 校对",
-                    "修正识别错误和标点，保留原意",
-                    coral_switch(
-                        Switch::new("import-proofread")
-                            .checked(self.task_options.llm)
-                            .on_click(cx.listener(|this, value, _, cx| {
-                                this.task_options.llm = *value;
-                                this.save_current_draft(cx);
-                                cx.notify();
-                            })),
-                    ),
-                ))
-                .child(if self.task_options.llm {
-                    crate::settings_ui::preference(
-                        "发送截图辅助校对",
-                        "文字及对应截图会发送到所选服务",
-                        coral_switch(
-                            Switch::new("import-vision")
-                                .checked(self.task_options.vision)
-                                .on_click(cx.listener(|this, value, _, cx| {
-                                    this.task_options.vision = *value;
-                                    this.save_current_draft(cx);
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                } else {
+                .child(
                     h_flex()
-                        .w_full()
-                        .min_h(rems(44.0 / 14.0))
-                        .gap_4()
-                        .items_center()
+                        .gap_3()
+                        .items_start()
                         .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_color(color(FAINT))
-                                        .child("发送截图辅助校对"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(color(FAINT))
-                                        .child("开启 AI 校对后可用；开启后文字及对应截图会发送到所选服务。"),
-                                ),
+                            icons::auto_fix()
+                                .size(px(20.))
+                                .mt_2()
+                                .text_color(color(GRAY)),
                         )
-                })
-                .child(crate::settings_ui::preference(
-                    "生成摘要",
-                    "提炼课程要点，正文继续保留",
-                    coral_switch(
-                        Switch::new("import-summary")
-                            .checked(self.task_options.summarize)
-                            .on_click(cx.listener(|this, value, _, cx| {
-                                this.task_options.summarize = *value;
-                                this.save_current_draft(cx);
-                                cx.notify();
-                            })),
-                    ),
-                )),
+                        .child(
+                            crate::settings_ui::preference(
+                                "AI 校对",
+                                "修正识别错误和标点，保留原意",
+                                coral_switch(
+                                    Switch::new("import-proofread")
+                                        .checked(self.task_options.llm)
+                                        .on_click(cx.listener(|this, value, _, cx| {
+                                            this.task_options.llm = *value;
+                                            this.save_current_draft(cx);
+                                            cx.notify();
+                                        })),
+                                ),
+                            )
+                            .flex_1()
+                            .min_w_0(),
+                        ),
+                )
+                .child(vision_disclosure)
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .items_start()
+                        .child(
+                            icons::summarize()
+                                .size(px(20.))
+                                .mt_2()
+                                .text_color(color(GRAY)),
+                        )
+                        .child(
+                            crate::settings_ui::preference(
+                                "生成摘要",
+                                "提炼课程要点，正文继续保留",
+                                coral_switch(
+                                    Switch::new("import-summary")
+                                        .checked(self.task_options.summarize)
+                                        .on_click(cx.listener(|this, value, _, cx| {
+                                            this.task_options.summarize = *value;
+                                            this.save_current_draft(cx);
+                                            cx.notify();
+                                        })),
+                                ),
+                            )
+                            .flex_1()
+                            .min_w_0(),
+                        ),
+                ),
         );
-        if self.task_options.llm || self.task_options.summarize {
+        let ai_enabled = self.task_options.llm || self.task_options.summarize;
+        let mut ai_options = v_flex().gap_3();
+        {
             match self.selected_task_service(ServicePurpose::Ai) {
                 Some(service) => {
                     if self.task_options.llm {
-                        view = view.child(help(format!(
+                        ai_options = ai_options.child(help(format!(
                             "校对文字将发送到「{}」（{}）。",
                             service.config.name,
                             service.config.host()
@@ -1129,7 +1320,7 @@ impl Desktop {
                     }
                 }
                 None => {
-                    view = view.child(
+                    ai_options = ai_options.child(
                         v_flex()
                             .gap_2()
                             .p_3()
@@ -1140,32 +1331,42 @@ impl Desktop {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(color(WARNING)),
                             )
-                            .child(help("使用 AI 校对或生成摘要需要先把文字发送到一个 AI 服务。"))
+                            .child(help("选择用于校对和摘要的服务"))
                             .child(
                                 outline_pill("configure-ai-service")
+                                    .icon(IconName::Settings)
                                     .self_start()
                                     .label("设置 AI 服务")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_task_service_editor(ServicePurpose::Ai, window, cx)
+                                        this.open_task_service_editor(
+                                            ServicePurpose::Ai,
+                                            window,
+                                            cx,
+                                        )
                                     })),
                             ),
                     );
                 }
             }
-            view = view.child(self.task_service_picker(ServicePurpose::Ai, cx));
+            ai_options = ai_options.child(self.task_service_picker(ServicePurpose::Ai, cx));
             if self.task_options.llm {
                 let prompt = self.import_base_config().llm.prompt;
                 if prompt
                     .as_ref()
                     .is_some_and(|prompt| !prompt.trim().is_empty())
                 {
-                    view = view.child(help("本次校对会使用自定义规则。"));
-                    if self.show_options {
-                        view = view.child(help(prompt.unwrap_or_default()));
-                    }
+                    ai_options =
+                        ai_options.child(help("本次校对使用自定义规则，可在计划详情中查看。"));
                 }
             }
         }
+        view = view.child(motion::disclosure(
+            "ai-service-options",
+            ai_enabled,
+            ai_options,
+            window,
+            cx,
+        ));
         if ai_overridden {
             view = view.child(
                 h_flex()
@@ -1174,10 +1375,11 @@ impl Desktop {
                     .child(badge(BadgeKind::Neutral).child("仅用于这次笔记"))
                     .child(
                         quiet("reset-task-overrides")
+                            .icon(icons::refresh())
                             .label("恢复默认")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.reset_task_ai_overrides(cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.reset_task_ai_overrides(cx)),
+                            ),
                     ),
             );
         }
@@ -1195,36 +1397,68 @@ impl Desktop {
 
     fn import_speech_options(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let cloud = self.task_options.provider == 5;
-        let mut view = v_flex().gap_3().child(
-            SingleChoiceGroup::new("import-speech-location", "在哪里识别视频声音")
-                .options([("local", "在这台电脑上识别"), ("cloud", "使用识别服务")])
-                .selected(if cloud { "cloud" } else { "local" })
-                .on_change(cx.listener(|this, value: &SharedString, _, cx| {
-                    this.task_options.provider = if value.as_ref() == "cloud" { 5 } else { 0 };
-                    this.save_current_draft(cx);
-                    cx.notify();
-                })),
-        );
+        let mut view = v_flex()
+            .gap_3()
+            .p_4()
+            .rounded(RADIUS_CARD)
+            .bg(color(INSET))
+            .child(
+                SingleChoiceGroup::new("import-speech-location", "在哪里识别视频声音")
+                    .options([("local", "本机识别"), ("cloud", "识别服务")])
+                    .selected(if cloud { "cloud" } else { "local" })
+                    .on_change(cx.listener(|this, value: &SharedString, _, cx| {
+                        this.task_options.provider = if value.as_ref() == "cloud" { 5 } else { 0 };
+                        this.save_current_draft(cx);
+                        cx.notify();
+                    })),
+            );
         if cloud {
-            return view.child(self.task_service_picker(ServicePurpose::Speech, cx));
+            return view.child(motion::enter(
+                "cloud-speech-service",
+                v_flex()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(icons::cloud().size(px(20.)).text_color(color(GRAY)))
+                            .child(help("音频发送到所选识别服务")),
+                    )
+                    .child(self.task_service_picker(ServicePurpose::Speech, cx)),
+                cx,
+            ));
         }
         view = view
-            .child(help(format!(
-                "识别方式：{}；音频在本机处理。",
-                self.local_engine_name()
-            )))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(icons::computer().size(px(20.)).text_color(color(GRAY)))
+                    .child(help("音频在这台电脑上处理")),
+            )
             .child(
                 control("local-engine-choices")
                     .ghost()
                     .self_start()
-                    .label("选择本机识别方式")
+                    .icon(if self.show_engine_details {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .label(if self.show_engine_details {
+                        "收起识别选项"
+                    } else {
+                        "识别选项"
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_engine_details = !this.show_engine_details;
                         cx.notify();
                     })),
             );
-        if self.show_engine_details {
-            view = view.child(
+        let engine_options = v_flex()
+            .gap_2()
+            .child(help(format!("当前方式：{}", self.local_engine_name())))
+            .child(
                 SingleChoiceGroup::new("import-local-engine", "本机识别方式")
                     .options(
                         PROVIDERS[..5]
@@ -1263,9 +1497,16 @@ impl Desktop {
                         }
                     })),
             );
-        }
+        view = view.child(motion::disclosure(
+            "local-engine-options",
+            self.show_engine_details,
+            engine_options,
+            window,
+            cx,
+        ));
         let (provider, model, root) = self.import_model_request();
-        view.child(self.model_readiness_panel(provider, Some(&model), &root, window, cx))
+        let readiness = self.model_readiness_panel(provider, Some(&model), &root, window, cx);
+        view.child(motion::enter("local-speech-readiness", readiness, cx))
     }
 
     fn import_uses_speech(&self) -> bool {
@@ -1337,10 +1578,11 @@ impl Desktop {
             let entity = cx.entity().downgrade();
             let label = selected
                 .as_ref()
-                .map(|library| format!("{} · {}", library.name, library.root.display()))
+                .map(|library| library.name.clone())
                 .unwrap_or_else(|| "选择保存位置".into());
             view = view.child(
                 control("import-library")
+                    .icon(IconName::FolderOpen)
                     .w_full()
                     .justify_start()
                     .label(label)
@@ -1383,7 +1625,17 @@ impl Desktop {
                     }),
             );
         } else if let Some(library) = &selected {
-            view = view.child(help(library.name.clone()));
+            view = view.child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::FolderOpen)
+                            .size(px(18.))
+                            .text_color(color(GRAY)),
+                    )
+                    .child(help(library.name.clone())),
+            );
         }
         view = view.child(
             h_flex()
@@ -1394,17 +1646,19 @@ impl Desktop {
                         .min_w_0()
                         .child(self.folder_picker(None, 0, cx)),
                 )
-                .child(outline_pill("import-new-folder").label("新建文件夹").on_click(
-                    cx.listener(|this, _, window, cx| this.begin_folder(None, window, cx)),
-                )),
+                .child(
+                    outline_pill("import-new-folder")
+                        .icon(icons::create_new_folder())
+                        .label("新建文件夹")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.begin_folder(None, window, cx)),
+                        ),
+                ),
         );
-        if let Some(library) = selected {
-            view = view.child(help(library.root.display().to_string()));
-        }
         view
     }
 
-    fn import_exports(&self, cx: &mut Context<Self>) -> Div {
+    fn import_exports(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let labels = ["Markdown 包", "网页文件", "JSON 数据"];
         let selected: Vec<_> = labels
             .iter()
@@ -1412,76 +1666,107 @@ impl Desktop {
             .filter(|(index, _)| self.task_options.formats[*index])
             .map(|(_, label)| *label)
             .collect();
-        let mut view = box_section("可选产物").child(
-            quiet("show-export-options")
-                .self_start()
-                .label(if self.show_export_options {
-                    "收起导出选项"
-                } else {
-                    "同时导出文件"
-                })
-                .icon(if self.show_export_options {
-                    IconName::ChevronUp
-                } else {
-                    IconName::ChevronDown
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_export_options = !this.show_export_options;
-                    cx.notify();
-                })),
-        );
-        if !selected.is_empty() {
-            view = view.child(help(format!("同时导出：{}。", selected.join("、"))));
-        }
-        if self.show_export_options {
-            view = view.child(help(
-                "笔记会保存在课程库中。需要在其他应用使用时，可以同时导出；也可以完成后再导出。",
-            ));
-            for (index, (label, description)) in [
-                ("Markdown 包", "在笔记软件中编辑，ZIP 包含文稿和图片"),
-                ("网页文件", "在浏览器中阅读和分享，单个 HTML 内嵌图片"),
-                ("JSON 数据", "供程序处理，包含正文、图片 ID 和时间信息"),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                view = view.child(
-                    v_flex()
-                        .gap_1()
-                        .child(
-                            Checkbox::new(("import-export", index))
-                                .label(label)
-                                .checked(self.task_options.formats[index])
-                                .min_h(px(32.))
-                                .on_click(cx.listener(move |this, value, _, cx| {
-                                    this.task_options.formats[index] = *value;
-                                    this.save_current_draft(cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(help(description)),
-                );
-            }
-        }
-        if !selected.is_empty() {
-            view = view.child(help(
-                "导出文件保存在本版笔记的 exports 文件夹；完成后可在任务中打开。",
-            ));
-        }
-        if self.online {
-            view = view.child(crate::settings_ui::preference(
-                "保留视频供离线播放",
-                "生成后保留下载的视频，会占用额外空间",
-                coral_switch(
-                    Switch::new("import-keep-video")
-                        .checked(self.task_options.keep_video)
-                        .on_click(cx.listener(|this, value, _, cx| {
-                            this.task_options.keep_video = *value;
-                            this.save_current_draft(cx);
+        let mut view = box_section("导出与视频").child(
+            h_flex()
+                .gap_3()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    quiet("show-export-options")
+                        .label(if self.show_export_options {
+                            "收起导出选项"
+                        } else {
+                            "同时导出文件"
+                        })
+                        .icon(if self.show_export_options {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_export_options = !this.show_export_options;
                             cx.notify();
                         })),
-                ),
-            ));
+                )
+                .when(!selected.is_empty(), |row| {
+                    row.child(help(selected.join(" · ")))
+                }),
+        );
+        let mut options = v_flex()
+            .gap_3()
+            .p_4()
+            .rounded(RADIUS_CARD)
+            .bg(color(INSET))
+            .child(help("可同时导出到其他应用使用，也可以生成后再导出。"));
+        for (index, (label, description)) in [
+            ("Markdown 包", "便于在笔记软件中编辑，包含文稿和图片"),
+            ("网页文件", "单个文件，便于阅读与分享"),
+            ("JSON 数据", "供其他程序读取和处理"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let icon = match index {
+                0 => Icon::new(IconName::File),
+                1 => icons::web(),
+                _ => icons::code(),
+            };
+            options = options.child(
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .child(icon.size(px(20.)).text_color(color(GRAY)))
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Checkbox::new(("import-export", index))
+                                    .label(label)
+                                    .checked(self.task_options.formats[index])
+                                    .min_h(px(32.))
+                                    .on_click(cx.listener(move |this, value, _, cx| {
+                                        this.task_options.formats[index] = *value;
+                                        this.save_current_draft(cx);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(help(description)),
+                    ),
+            );
+        }
+        view = view.child(motion::disclosure(
+            "import-export-options",
+            self.show_export_options,
+            options,
+            window,
+            cx,
+        ));
+        if self.online {
+            view = view.child(
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .child(icons::movie().size(px(20.)).mt_2().text_color(color(GRAY)))
+                    .child(
+                        crate::settings_ui::preference(
+                            "保留视频供离线播放",
+                            "生成后保留下载的视频，会占用额外空间",
+                            coral_switch(
+                                Switch::new("import-keep-video")
+                                    .checked(self.task_options.keep_video)
+                                    .on_click(cx.listener(|this, value, _, cx| {
+                                        this.task_options.keep_video = *value;
+                                        this.save_current_draft(cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                        )
+                        .flex_1()
+                        .min_w_0(),
+                    ),
+            );
         }
         view
     }
@@ -1539,10 +1824,7 @@ impl Desktop {
                 lines.push("语音识别服务尚未选择".into());
             }
         } else {
-            lines.push(format!(
-                "音频在这台电脑上识别（{}）",
-                self.local_engine_name()
-            ));
+            lines.push("音频在这台电脑上识别".into());
         }
         if self.task_options.llm || self.task_options.summarize {
             if let Some(service) = self.selected_task_service(ServicePurpose::Ai) {
@@ -1582,60 +1864,102 @@ impl Desktop {
         lines
     }
 
-    fn generation_plan(&self) -> Vec<String> {
+    fn generation_plan(&self) -> Vec<(&'static str, Vec<String>)> {
         let Some(source) = &self.source_preview else {
             return Vec::new();
         };
-        let mut lines = Vec::new();
-        if let Some(draft) = self
-            .workspace
-            .as_ref()
-            .and_then(|workspace| workspace.state.draft())
-        {
-            lines.push(format!("笔记名称：{}", draft.title));
-        }
+        let mut sections = Vec::new();
+        let mut attention = Vec::new();
         if let Some(message) = self
             .ordinary_preferences_submit_issue()
             .map(|issue| issue.message)
             .or_else(|| self.submission_issue())
         {
-            lines.push(format!("尚未就绪：{message}"));
+            attention.push(message);
         }
-        lines.push(format!("本次处理 1 个视频：{}", source.title));
-        lines.push(format!("视频来源：{}", source.input));
-        lines.extend(self.generation_summary());
-        if source.online {
-            lines.push("下载本次选择的视频，提取画面。".into());
-            if self.task_options.keep_video {
-                lines.push("保留本次下载的视频，供以后查看。".into());
-            } else {
-                lines.push("不额外保留下载的视频。".into());
+        if let Some(task) = self.matching_current_task() {
+            attention.push(format!(
+                "已有相同处理任务：《{}》。查看时保留该任务的名称和文件夹，本草稿的更改尚未应用。",
+                task.plan.title
+            ));
+        } else if let Some(course) = self.existing_source_note() {
+            attention.push(format!(
+                "这个视频已有笔记：《{}》。草稿中的更改可用于生成新版，原笔记继续保留。",
+                course.title
+            ));
+        }
+        if !attention.is_empty() {
+            sections.push(("需要处理", attention));
+        }
+        sections.push((
+            "所选视频",
+            vec![
+                format!("本次处理 1 个视频：{}", source.title),
+                format!("来源：{}", source.input),
+                if source.online {
+                    "下载所选视频并提取画面".into()
+                } else {
+                    "读取所选视频并提取画面，原视频留在原位置".into()
+                },
+            ],
+        ));
+        sections.push((
+            "笔记内容",
+            self.generation_summary()
+                .into_iter()
+                .filter(|line| !line.starts_with("保存到："))
+                .collect(),
+        ));
+        let mut saving = Vec::new();
+        if let Some(workspace) = &self.workspace {
+            if let Some(draft) = workspace.state.draft() {
+                saving.push(format!("笔记名称：{}", draft.title));
+                if let Some(library) = workspace.state.library(&draft.library_id) {
+                    saving.push(format!("保存位置：{}", library.root.display()));
+                }
             }
-        } else {
-            lines.push("读取所选视频，提取画面；原视频留在原位置。".into());
         }
+        saving.extend(
+            self.generation_summary()
+                .into_iter()
+                .filter(|line| line.starts_with("保存到：")),
+        );
+        let formats: Vec<_> = ["Markdown 包", "网页文件", "JSON 数据"]
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| self.task_options.formats[*index])
+            .map(|(_, label)| label)
+            .collect();
+        if !formats.is_empty() {
+            saving.push(format!(
+                "同时导出：{}。文件位于本版笔记的 exports 文件夹。",
+                formats.join("、")
+            ));
+        }
+        if source.online && self.task_options.keep_video {
+            saving.push("保留下载的视频供离线播放".into());
+        }
+        sections.push(("名称与保存", saving));
+        let mut technical = Vec::new();
         if self.import_uses_speech() {
             if self.task_options.provider == 5 {
                 if let Some(service) = self.selected_task_service(ServicePurpose::Speech) {
-                    lines.push(format!(
-                        "语音识别模型：{}；服务地址：{}",
-                        service.config.model, service.config.endpoint
-                    ));
+                    technical.push(format!("语音识别模型：{}", service.config.model));
+                    technical.push(format!("识别服务地址：{}", service.config.endpoint));
                 }
             } else {
                 let (_, model, root) = self.import_model_request();
-                lines.push(format!(
-                    "本机识别模型：{model}；模型位置：{}",
-                    root.display()
+                technical.push(format!(
+                    "本机识别方式：{}；模型：{model}",
+                    self.local_engine_name()
                 ));
+                technical.push(format!("模型位置：{}", root.display()));
             }
         }
         if self.task_options.llm || self.task_options.summarize {
             if let Some(service) = self.selected_task_service(ServicePurpose::Ai) {
-                lines.push(format!(
-                    "AI 模型：{}；服务地址：{}",
-                    service.config.model, service.config.endpoint
-                ));
+                technical.push(format!("AI 模型：{}", service.config.model));
+                technical.push(format!("AI 服务地址：{}", service.config.endpoint));
             }
             if self.task_options.llm {
                 if let Some(prompt) = self
@@ -1644,34 +1968,14 @@ impl Desktop {
                     .prompt
                     .filter(|prompt| !prompt.trim().is_empty())
                 {
-                    lines.push(format!("本次校对使用的自定义规则：\n{prompt}"));
+                    technical.push(format!("自定义校对规则：\n{prompt}"));
                 }
             }
         }
-        if let Some(library) = self.workspace.as_ref().and_then(|workspace| {
-            workspace
-                .state
-                .draft()
-                .and_then(|draft| workspace.state.library(&draft.library_id))
-        }) {
-            lines.push(format!("笔记保存位置：{}", library.root.display()));
+        if !technical.is_empty() {
+            sections.push(("技术详情", technical));
         }
-        lines.push("笔记保存在应用中，生成后即可阅读。".into());
-        let formats: Vec<_> = ["Markdown 包", "网页文件", "JSON 数据"]
-            .into_iter()
-            .enumerate()
-            .filter(|(index, _)| self.task_options.formats[*index])
-            .map(|(_, label)| label)
-            .collect();
-        if !formats.is_empty() {
-            lines.push(format!("同时导出：{}", formats.join("、")));
-        }
-        if let Some(task) = self.matching_current_task() {
-            lines.push(format!("已有相同处理任务：《{}》。查看任务会保留该任务的名称和文件夹，本草稿中的更改尚未应用。", task.plan.title));
-        } else if let Some(course) = self.existing_source_note() {
-            lines.push(format!("这个视频已有笔记：《{}》。打开已有笔记会保留原名称和文件夹；本草稿中的更改可用于生成新版。", course.title));
-        }
-        lines
+        sections
     }
 
     fn open_generation_plan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1724,7 +2028,16 @@ impl Desktop {
             let entity = cx.entity().downgrade();
             row = row.child(
                 control("import-drafts")
-                    .label(format!("草稿：{label}"))
+                    .icon(IconName::File)
+                    .tooltip(label.clone())
+                    .child(
+                        div()
+                            .max_w(rems(14.))
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(format!("草稿：{label}")),
+                    )
+                    .child(Icon::new(IconName::ChevronDown).size(px(16.)))
                     .dropdown_menu(move |menu, _, _| {
                         drafts.iter().fold(menu, |menu, draft| {
                             let id = draft.id.clone();
@@ -1751,7 +2064,8 @@ impl Desktop {
                 .child(
                     control("new-import-draft")
                         .ghost()
-                        .label("生成另一篇笔记")
+                        .icon(IconName::Plus)
+                        .label("新笔记")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.new_draft(this.online, false, window, cx)
                         })),
@@ -1759,6 +2073,8 @@ impl Desktop {
                 .child(
                     control("discard-import-draft")
                         .ghost()
+                        .icon(icons::delete())
+                        .text_color(color(DANGER))
                         .label("丢弃草稿")
                         .on_click(
                             cx.listener(|this, _, window, cx| {
@@ -1814,37 +2130,6 @@ impl Desktop {
         .detach();
     }
 
-    /// Hero above the workbench box (workbench page only). Decorative wordmark.
-    fn workbench_hero(&self) -> Div {
-        v_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .pt_4()
-            .child(
-                h_flex().items_baseline().children([
-                    div()
-                        .text_size(TEXT_DISPLAY)
-                        .font_weight(FontWeight::BOLD)
-                        .child("course"),
-                    div()
-                        .text_size(TEXT_DISPLAY)
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(color(ACCENT))
-                        .child("2"),
-                    div()
-                        .text_size(TEXT_DISPLAY)
-                        .font_weight(FontWeight::BOLD)
-                        .child("md"),
-                ]),
-            )
-            .child(
-                div()
-                    .text_color(color(GRAY))
-                    .child("课程视频，整理成笔记。"),
-            )
-    }
-
     /// Box bottom row while no video is confirmed yet: subtitle-language
     /// preference on the left, the read action as the only primary.
     fn box_bottom_row(&self, cx: &mut Context<Self>) -> Div {
@@ -1852,22 +2137,28 @@ impl Desktop {
             .w_full()
             .items_center()
             .gap_3()
+            .flex_wrap()
             .child(self.subtitle_language_control(cx))
             .child(div().flex_1())
-            .when(self.preview_cancel.is_none(), |row| {
-                row.child(
-                    primary_pill("read-source")
-                        .icon(icons::arrow_forward())
-                        .label("读取视频")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.value(Field::Source, cx).is_empty() {
-                                this.inputs[&Field::Source]
-                                    .update(cx, |state, cx| state.focus(window, cx));
-                            }
-                            this.inspect_source(cx);
-                        })),
-                )
-            })
+            .when(
+                self.preview_cancel.is_none()
+                    && (self.online || !self.value(Field::Source, cx).is_empty())
+                    && self.preview_error.is_none(),
+                |row| {
+                    row.child(
+                        primary_pill("read-source")
+                            .icon(icons::arrow_forward())
+                            .label("读取视频")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.value(Field::Source, cx).is_empty() {
+                                    this.inputs[&Field::Source]
+                                        .update(cx, |state, cx| state.focus(window, cx));
+                                }
+                                this.inspect_source(cx);
+                            })),
+                    )
+                },
+            )
     }
 
     /// Preferred subtitle language capsule; options commit through the settings path.
@@ -1878,31 +2169,31 @@ impl Desktop {
             .preferred_subtitle_languages
             .clone();
         let label = match current.as_slice() {
-            [] => "跟随界面语言".to_owned(),
+            [] => "自动".to_owned(),
             [single] if single == "zh-Hans" => "简体中文".into(),
             [single] if single == "en" => "English".into(),
             other => format!("自定义：{}", other.join(", ")),
         };
         let entity = cx.entity().downgrade();
-        control("subtitle-language")
+        quiet("subtitle-language")
+            .icon(icons::subtitles())
             .h_auto()
             .min_h(rems(2.286))
-            .rounded(RADIUS_PILL)
-            .accessibility_label(format!("首选字幕语言：{label}"))
+            .accessibility_label(format!("字幕语言：{label}"))
             .tooltip(label.clone())
             .child(
                 div()
                     .min_w_0()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(format!("首选字幕语言：{label}")),
+                    .child(format!("字幕语言 · {label}")),
             )
             .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
             .dropdown_menu(move |menu, _, _| {
                 [
-                    ("跟随界面语言", Vec::<String>::new()),
-                    ("简体中文优先", vec!["zh-Hans".to_owned()]),
-                    ("English 优先", vec!["en".to_owned()]),
+                    ("自动", Vec::<String>::new()),
+                    ("简体中文", vec!["zh-Hans".to_owned()]),
+                    ("English", vec!["en".to_owned()]),
                 ]
                 .into_iter()
                 .fold(menu, |menu, (name, languages)| {
@@ -1920,25 +2211,53 @@ impl Desktop {
             })
     }
 
-    pub fn new_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub fn new_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.task_options.provider != 5 && self.import_uses_speech() {
             let (provider, model, root) = self.import_model_request();
             self.ensure_model_diagnostic(provider, Some(&model), &root, cx);
         }
-        let mut view = v_flex().gap_6().w_full().min_w_0();
-        view = view.child(self.workbench_hero());
-        view = view.child(self.draft_picker(cx));
-        let mut bx = v_flex()
+        let mut view = v_flex()
+            .gap_6()
             .w_full()
             .min_w_0()
-            .p_6()
-            .gap_4()
-            .bg(color(SURFACE))
-            .border_1()
-            .border_color(color(HAIRLINE))
-            .rounded(RADIUS_HERO)
-            .shadow(shadow_hero());
-        bx = bx.child(self.box_source_input(cx));
+            .child(
+                h_flex()
+                    .gap_4()
+                    .items_center()
+                    .flex_wrap()
+                    .child(
+                        accessible_text("workbench-title", "把视频整理成笔记")
+                            .text_size(rems(1.857))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .flex_1(),
+                    )
+                    .child(self.draft_picker(cx)),
+            )
+            .child(self.source_kind_tabs(cx));
+        if self.online || self.source_preview.is_none() {
+            let mut source = v_flex()
+                .w_full()
+                .min_w_0()
+                .p_6()
+                .gap_4()
+                .bg(color(SURFACE))
+                .border_1()
+                .border_color(color(HAIRLINE))
+                .rounded(RADIUS_HERO)
+                .child(self.box_source_input(window, cx));
+            if self.source_preview.is_none() {
+                source = source.child(self.box_bottom_row(cx));
+            }
+            view = view.child(motion::enter(
+                if self.online {
+                    "source-input-online"
+                } else {
+                    "source-input-local"
+                },
+                source,
+                cx,
+            ));
+        }
         let linked_task = self
             .workspace
             .as_ref()
@@ -1958,30 +2277,51 @@ impl Desktop {
                         }))
             });
         if let Some(task) = linked_task {
-            bx = match task.state {
+            let task_view = match task.state {
                 crate::workspace::TaskState::Queued
                 | crate::workspace::TaskState::Running
-                | crate::workspace::TaskState::Pausing => {
-                    bx.child(self.box_task_running(&task, _window, cx))
-                }
-                _ => bx.child(self.box_task_attention(&task, cx)),
+                | crate::workspace::TaskState::Pausing => self.box_task_running(&task, window, cx),
+                _ => self.box_task_attention(&task, cx),
             };
-        } else if self.source_preview.is_none() {
-            bx = bx.child(self.box_bottom_row(cx));
-        } else {
-            bx = bx
-                .child(self.box_selected_video(cx))
-                .child(self.text_source_view(_window, cx))
+            view = view.child(
+                task_view
+                    .p_6()
+                    .rounded(RADIUS_CARD)
+                    .bg(color(SURFACE))
+                    .border_1()
+                    .border_color(color(HAIRLINE)),
+            );
+        } else if let Some(source) = &self.source_preview {
+            let source_key = text_id("source-confirmation", &source.identity);
+            let confirmation = v_flex()
+                .w_full()
+                .min_w_0()
+                .p_6()
+                .gap_6()
+                .bg(color(SURFACE))
+                .border_1()
+                .border_color(color(HAIRLINE))
+                .rounded(RADIUS_HERO)
+                .child(self.box_selected_video(window, cx))
+                .child(self.text_source_view(window, cx))
                 .child(self.import_destination(cx))
-                .child(self.import_exports(cx))
+                .child(self.import_exports(window, cx))
                 .child(self.plan_inset(cx));
+            view = view.child(motion::enter(source_key, confirmation, cx));
         }
-        view = view.child(bx);
         if let Some(recent) = self.recent_notes_section(cx) {
             view = view.child(recent);
         }
         if let Some(error) = &self.workspace_error {
-            view = view.child(issue(error.clone()));
+            view = view.child(motion::enter(
+                text_id("workspace-error", error),
+                v_flex()
+                    .p_4()
+                    .rounded(RADIUS_CARD)
+                    .bg(color(DANGER_BG))
+                    .child(issue(error.clone())),
+                cx,
+            ));
         }
         view.into_any_element()
     }
@@ -2021,21 +2361,11 @@ impl Desktop {
             .border_1()
             .border_color(color(HAIRLINE))
             .child(
-                accessible_text("plan-inset-label", "本次计划")
-                    .text_size(TEXT_AUX)
+                accessible_text("plan-inset-label", "准备生成")
+                    .text_size(TEXT_BODY)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(color(GRAY)),
             );
-        if let Some(source) = &self.source_preview {
-            inset = inset.child(plan_row(
-                if source.online {
-                    "视频：下载所选视频并提取画面 · 本次处理 1 个视频".to_owned()
-                } else {
-                    "视频：读取所选视频并提取画面 · 原视频留在原位置".to_owned()
-                },
-                false,
-            ));
-        }
         for line in self.generation_summary() {
             let warning = line.starts_with("文字来源尚未确认")
                 || line.contains("尚未选择")
@@ -2046,6 +2376,7 @@ impl Desktop {
         if let Some(issue) = preferences_issue {
             actions = actions.child(
                 outline_pill("repair-generation-preferences")
+                    .icon(icons::refresh())
                     .label(if issue.can_retry {
                         "重试保存生成选项"
                     } else {
@@ -2081,6 +2412,7 @@ impl Desktop {
             let id = library.id.clone();
             actions = actions.child(
                 outline_pill("reassociate-import-location")
+                    .icon(IconName::FolderOpen)
                     .label("重新关联此保存位置")
                     .disabled(self.storage_ui.busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -2101,14 +2433,12 @@ impl Desktop {
                     format!("已有相同处理任务：《{}》（{location}）", task.plan.title),
                     true,
                 ))
-                .child(plan_row(
-                    "该任务的名称和文件夹保持不变，草稿中的更改尚未应用。",
-                    false,
-                ));
+                .child(plan_row("查看现有任务；本草稿的更改尚未应用。", false));
             actions = actions.child(
                 primary_pill("show-matching-task")
                     .track_focus(&self.import_submit_focus)
                     .self_start()
+                    .icon(icons::task())
                     .label("查看任务")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.save_current_draft(cx);
@@ -2128,16 +2458,14 @@ impl Desktop {
                     format!("这个视频已有笔记：《{}》（{location}）", course.title),
                     false,
                 ))
-                .child(plan_row(
-                    "打开已有笔记会保留原名称和文件夹；草稿更改可用于生成新版。",
-                    false,
-                ));
+                .child(plan_row("原笔记继续保留；本次更改可用于生成新版。", false));
             actions = actions.child(
                 h_flex()
                     .gap_2()
                     .flex_wrap()
                     .child(
                         primary_pill("open-existing-note")
+                            .icon(IconName::BookOpen)
                             .label("打开已有笔记")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.save_current_draft(cx);
@@ -2146,6 +2474,7 @@ impl Desktop {
                     )
                     .child(
                         outline_pill("generate-new-version")
+                            .icon(icons::refresh())
                             .track_focus(&self.import_submit_focus)
                             .label("生成新版笔记")
                             .disabled(reading || self.workspace.is_none() || preferences_blocked)
@@ -2155,10 +2484,7 @@ impl Desktop {
                     ),
             );
             if busy {
-                inset = inset.child(plan_row(
-                    "新版笔记会加入队列，等待当前任务完成。",
-                    false,
-                ));
+                inset = inset.child(plan_row("新版笔记会加入队列，等待当前任务完成。", false));
             }
         } else {
             if busy {
@@ -2172,7 +2498,7 @@ impl Desktop {
                     .track_focus(&self.import_submit_focus)
                     .self_start()
                     .icon(icons::arrow_forward())
-                    .label(if busy { "加入队列" } else { "生成笔记" })
+                    .label(if busy { "加入队列" } else { "开始生成" })
                     .disabled(reading || self.workspace.is_none() || preferences_blocked)
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.value(Field::Source, cx).is_empty() {
@@ -2190,10 +2516,9 @@ impl Desktop {
         }
         actions = actions.child(
             quiet("show-import-full-plan")
-                .label("查看完整计划")
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.open_generation_plan(window, cx)),
-                ),
+                .icon(IconName::Info)
+                .label("计划详情")
+                .on_click(cx.listener(|this, _, window, cx| this.open_generation_plan(window, cx))),
         );
         inset
             .when_some(submission_error, |view, message| {
@@ -2202,8 +2527,7 @@ impl Desktop {
                         .role(Role::Alert)
                         .text_sm()
                         .whitespace_normal()
-                        .line_clamp(3)
-                        .text_color(rgb(0xa32626)),
+                        .text_color(color(DANGER)),
                 )
             })
             .child(actions)

@@ -9,10 +9,10 @@ fn shell_column() -> Div {
 }
 
 fn shell_column_for(page: Page) -> Div {
-    if page == Page::Settings {
-        shell_column_settings()
-    } else {
-        shell_column()
+    match page {
+        Page::Settings => shell_column_settings(),
+        Page::Library | Page::Result => shell_column_at(rems(82.)),
+        _ => shell_column(),
     }
 }
 
@@ -27,8 +27,7 @@ fn shell_column_at(width: Rems) -> Div {
 
 impl Desktop {
     /// Keep task results reachable while the user is on another page.
-    fn shell_topbar(&self, cx: &mut Context<Self>) -> Div {
-        let settings_problem = self.settings_have_problem();
+    fn shell_topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> TitleBar {
         let task_count = self.workspace.as_ref().map_or(0, |workspace| {
             workspace
                 .state
@@ -46,117 +45,105 @@ impl Desktop {
                 })
                 .count()
         });
+        let index = match self.page {
+            Page::Library | Page::Result => 1.,
+            Page::Task => 2.,
+            _ => 0.,
+        };
+        let position = crate::motion::value("navigation-indicator", index, window, cx);
         let task_label = if task_count == 0 {
             "任务".to_owned()
         } else {
-            format!("任务（{task_count}）")
+            format!("任务 · {task_count}")
         };
-        let wordmark = h_flex().flex_shrink_0().items_baseline().children([
-            div()
-                .text_size(TEXT_BODY)
-                .font_weight(FontWeight::BOLD)
-                .child("course"),
-            div()
-                .text_size(TEXT_BODY)
-                .font_weight(FontWeight::BOLD)
-                .text_color(color(ACCENT))
-                .child("2"),
-            div()
-                .text_size(TEXT_BODY)
-                .font_weight(FontWeight::BOLD)
-                .child("md"),
-        ]);
-        let tabs = h_flex()
-            .flex_1()
-            .min_w_0()
-            .justify_center()
-            .gap_6()
-            .children(
-                [
-                    (Page::New, "工作台"),
-                    (Page::Library, "我的笔记"),
-                    (Page::Task, task_label.as_str()),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(index, (page, label))| {
-                    // 阅读页归入我的笔记 tab（mock v2 同样归位）。
-                    let active =
-                        self.page == page || (page == Page::Library && self.page == Page::Result);
-                    control(("shell-tab", index))
-                        .ghost()
-                        .h_auto()
-                        .px(px(2.))
-                        .py(px(6.))
-                        .selected(active)
-                        .toggled(active)
-                        .accessibility_label(label.to_owned())
-                        .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_color(color(if active { INK } else { GRAY }))
-                                        .when(active, |text| text.font_weight(FontWeight::SEMIBOLD))
-                                        .child(label.to_owned()),
-                                )
-                                .child(div().h(px(2.)).w_full().rounded_full().bg(if active {
-                                    color(ACCENT)
-                                } else {
-                                    rgba(0x00000000)
-                                })),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if page == Page::Library {
-                                this.folder_filter = None;
-                            }
-                            this.navigate(page, cx);
-                        }))
-                }),
+        let nav = div()
+            .relative()
+            .w(px(360.))
+            .h(px(36.))
+            .flex_shrink_0()
+            .when(self.page != Page::Settings, |view| {
+                view.child(
+                    div()
+                        .absolute()
+                        .left(px(120. * position))
+                        .top(px(0.))
+                        .w(px(120.))
+                        .h(px(36.))
+                        .rounded(RADIUS_SMALL)
+                        .bg(color(ACCENT_SOFT)),
+                )
+            })
+            .child(
+                h_flex().w_full().h_full().children(
+                    [
+                        (Page::New, "工作台".to_owned(), icons::dashboard()),
+                        (Page::Library, "我的笔记".to_owned(), icons::book_open()),
+                        (Page::Task, task_label, icons::task()),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (page, label, icon))| {
+                        let active = self.page == page
+                            || (page == Page::Library && self.page == Page::Result);
+                        control(("shell-tab", index))
+                            .ghost()
+                            .w(px(120.))
+                            .h(px(36.))
+                            .min_h(px(36.))
+                            .px(px(12.))
+                            .rounded(RADIUS_SMALL)
+                            .bg(gpui::transparent_black())
+                            .text_color(color(if active { ACCENT_STRONG } else { GRAY }))
+                            .selected(active)
+                            .toggled(active)
+                            .icon(icon.size(px(18.)))
+                            .label(label)
+                            .when(active, |button| button.font_weight(FontWeight::SEMIBOLD))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if page == Page::Library {
+                                    this.folder_filter = None;
+                                }
+                                this.navigate(page, cx);
+                            }))
+                    }),
+                ),
             );
-        let gear = control("shell-settings")
-            .ghost()
-            .h_auto()
-            .min_h(rems(2.286))
-            .min_w(rems(2.286))
-            .rounded(RADIUS_PILL)
-            .icon(IconName::Settings)
+        let settings_problem = self.settings_have_problem();
+        let gear = quiet("shell-settings")
+            .icon(icons::settings())
+            .label("设置")
+            .h(px(36.))
+            .min_h(px(36.))
+            .selected(self.page == Page::Settings)
+            .toggled(self.page == Page::Settings)
+            .when(self.page == Page::Settings, |b| {
+                b.bg(color(ACCENT_SOFT)).text_color(color(ACCENT_STRONG))
+            })
+            .when(settings_problem, |b| b.text_color(color(WARNING)))
             .accessibility_label(if settings_problem {
                 "设置，未保存"
             } else {
                 "设置"
             })
-            .selected(self.page == Page::Settings)
-            .toggled(self.page == Page::Settings)
-            .when(self.page == Page::Settings, |button| {
-                button.bg(color(BADGE_PROGRESS_BG))
-            })
-            .when(settings_problem, |button| {
-                button.text_color(color(ACCENT_STRONG))
-            })
             .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
-        div()
-            .w_full()
-            .flex_shrink_0()
-            .border_b_1()
+        TitleBar::new()
+            .h(px(52.))
+            .bg(color(CANVAS))
             .border_color(color(HAIRLINE))
             .child(
                 h_flex()
                     .w_full()
                     .min_w_0()
-                    .max_w(COLUMN)
-                    .mx_auto()
-                    .px(px(24.))
-                    .py(px(12.))
-                    .items_center()
-                    .child(wordmark)
-                    .child(tabs)
-                    .child(gear),
+                    .h_full()
+                    .pr(px(16.))
+                    .gap(px(16.))
+                    .child(div().flex_1().min_w_0())
+                    .child(nav)
+                    .child(h_flex().flex_1().min_w_0().justify_end().child(gear)),
             )
     }
 
-    fn task_result_notice(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn task_result_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let task = self
             .workspace
             .as_ref()?
@@ -173,7 +160,8 @@ impl Desktop {
             workspace::TaskState::Uncertain => "确认请求结果",
             _ => "查看任务",
         };
-        Some(
+        Some(crate::motion::enter(
+            SharedString::from(format!("task-result-notice-{}", task.id)),
             shell_column_for(self.page).py_2().flex_shrink_0().child(
                 h_flex()
                     .w_full()
@@ -183,6 +171,7 @@ impl Desktop {
                     .p_3()
                     .rounded_md()
                     .bg(color(TINT))
+                    .child(icons::info().text_color(color(ACCENT)))
                     .child(
                         accessible_text(
                             "background-task-result",
@@ -195,6 +184,7 @@ impl Desktop {
                     )
                     .child(
                         control("open-task-result")
+                            .icon(icons::arrow_forward())
                             .label(action)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.navigate(Page::Task, cx);
@@ -224,7 +214,8 @@ impl Desktop {
                             })),
                     ),
             ),
-        )
+            cx,
+        ))
     }
     fn page_title(&self) -> String {
         match self.page {
@@ -281,13 +272,20 @@ impl Render for Desktop {
             .when(self.page == Page::Result, |v| v.h_full().min_h_0())
             .when(self.reading, |v| {
                 v.child(
-                    accessible_text("opening-note", "正在打开笔记…")
-                        .role(Role::Status)
-                        .text_color(color(MUTED)),
+                    h_flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(crate::motion::spinner("opening-note-spinner", cx))
+                        .child(
+                            accessible_text("opening-note", "正在打开笔记…")
+                                .role(Role::Status)
+                                .text_color(color(MUTED)),
+                        ),
                 )
             })
             .child(content);
-        let topbar = self.shell_topbar(cx);
+        let content = crate::motion::enter(("page-enter", self.page as usize), content, cx);
+        let topbar = self.shell_topbar(window, cx);
         let task_notice = self.task_result_notice(cx);
         let body = v_flex()
             .flex_1()
@@ -295,24 +293,22 @@ impl Render for Desktop {
             .min_h_0()
             .w_full()
             .when_some(task_notice, |body, notice| body.child(notice))
-            .when(
-                !matches!(self.page, Page::New | Page::Result | Page::Settings),
-                |v| {
-                    v.child(
-                        shell_column_for(self.page)
-                            .flex_shrink_0()
-                            .child(self.page_header(window)),
-                    )
-                },
-            )
+            .when(self.page == Page::Library, |v| {
+                v.child(
+                    shell_column_for(self.page)
+                        .flex_shrink_0()
+                        .child(self.page_header(window)),
+                )
+            })
             .when(self.page == Page::Library, |v| {
                 v.child(shell_column_for(self.page).child(self.library_toolbar(cx)))
             })
             .when_some(self.workspace_error.clone(), |v, message| {
-                v.child(
+                v.child(crate::motion::enter(
+                    SharedString::from(format!("workspace-error-{message}")),
                     shell_column_for(self.page)
                         .pb_3()
-                        .text_color(rgb(0xa32626))
+                        .text_color(color(DANGER))
                         .child(accessible_text("workspace-error", message).role(Role::Alert))
                         .child(
                             h_flex()
@@ -321,6 +317,7 @@ impl Render for Desktop {
                                 .mt_2()
                                 .child(
                                     control("retry-workspace-records")
+                                        .icon(icons::refresh())
                                         .label("重新读取并保存记录")
                                         .disabled(self.job.is_some() || self.storage_ui.busy)
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -330,6 +327,7 @@ impl Render for Desktop {
                                 .when(self.workspace.is_none(), |row| {
                                     row.child(
                                         control("rebuild-workspace-records")
+                                            .icon(icons::restart())
                                             .label("保全原文件并重建记录")
                                             .disabled(self.job.is_some() || self.storage_ui.busy)
                                             .on_click(cx.listener(|this, _, window, cx| {
@@ -338,10 +336,12 @@ impl Render for Desktop {
                                     )
                                 }),
                         ),
-                )
+                    cx,
+                ))
             })
             .when_some(self.message.clone(), |v, message| {
-                v.child(
+                v.child(crate::motion::enter(
+                    SharedString::from(format!("app-message-{message}")),
                     shell_column_for(self.page).pb_3().child(
                         h_flex()
                             .min_w_0()
@@ -349,6 +349,7 @@ impl Render for Desktop {
                             .p_3()
                             .rounded_md()
                             .bg(color(TINT))
+                            .child(icons::info().text_color(color(ACCENT)))
                             .child(
                                 accessible_text("app-message", message)
                                     .role(Role::Status)
@@ -367,7 +368,8 @@ impl Render for Desktop {
                                     })),
                             ),
                     ),
-                )
+                    cx,
+                ))
             })
             .child(
                 div()
@@ -392,18 +394,6 @@ impl Render for Desktop {
             .bg(color(CANVAS))
             .text_color(color(INK))
             .text_size(rems(1.))
-            .when(!self.system_titlebar, |v| {
-                v.child(
-                    TitleBar::new().bg(color(SIDEBAR)).child(
-                        h_flex().w_full().gap_3().child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(color(MUTED))
-                                .child("course2md"),
-                        ),
-                    ),
-                )
-            })
             .child(topbar)
             .child(body);
         div()

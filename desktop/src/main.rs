@@ -223,7 +223,6 @@ struct Desktop {
     settings_snapshot: course2md::settings::ConfigFile,
     settings_deadline: Option<Instant>,
     settings_status: String,
-    system_titlebar: bool,
     desktop_settings: course2md::settings::DesktopSettings,
     last_tick: Instant,
     logs: VecDeque<String>,
@@ -477,7 +476,6 @@ impl Desktop {
             inputs,
             settings_snapshot: config.clone(),
             desktop_settings: config.desktop.clone(),
-            system_titlebar: true,
             settings_deadline: None,
             settings_status: String::new(),
             last_tick: Instant::now(),
@@ -589,6 +587,19 @@ impl Desktop {
         if page == Page::Library {
             self.refresh_library(cx);
         }
+        if page == Page::Task {
+            let visible_unread = self.workspace.as_ref().and_then(|workspace| {
+                let id = workspace.state.selected_task.as_ref()?;
+                workspace
+                    .state
+                    .task(id)
+                    .filter(|task| task.unread)
+                    .map(|_| id.clone())
+            });
+            if let Some(id) = visible_unread {
+                self.select_task(&id, cx);
+            }
+        }
         cx.notify();
     }
     fn value(&self, field: Field, cx: &App) -> String {
@@ -616,10 +627,17 @@ impl Desktop {
                 Input::new(&self.inputs[&field])
                     .min_h(rems(2.6))
                     .aria_label(label)
-                    .when(error.is_some(), |input| input.border_color(theme::color(theme::DANGER))),
+                    .when(error.is_some(), |input| {
+                        input.border_color(theme::color(theme::DANGER))
+                    }),
             )
             .when_some(error, |v, message| {
-                v.child(div().text_sm().text_color(theme::color(theme::DANGER)).child(message))
+                v.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::color(theme::DANGER))
+                        .child(message),
+                )
             })
     }
     fn output(&self, _cx: &App) -> PathBuf {
@@ -1043,7 +1061,6 @@ fn main() {
         gpui_component::init(cx);
         gpui_component::set_locale("zh-CN");
         theme::init(cx);
-        let system_titlebar = true;
         // Debug validation uses the same native window and render path at an exact size.
         // Release builds always use the ordinary initial window size.
         let initial_size = if cfg!(debug_assertions) {
@@ -1064,21 +1081,17 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::centered(initial_size, cx)),
                 window_min_size: Some(size(px(860.), px(620.))),
-                ..if system_titlebar {
-                    WindowOptions {
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("course2md".into()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }
-                } else {
-                    TitleBar::window_options()
-                }
+                titlebar: Some(TitlebarOptions {
+                    traffic_light_position: Some(point(px(16.), px(19.))),
+                    ..TitleBar::title_bar_options()
+                }),
+                ..TitleBar::window_options()
             },
             |window, cx| {
                 window.set_window_title("course2md");
-                window.observe_window_appearance(|window, _| window.refresh()).detach();
+                window
+                    .observe_window_appearance(|window, _| window.refresh())
+                    .detach();
                 let view = cx.new(|cx| Desktop::new(window, cx));
                 let weak = view.downgrade();
                 let quit_view = weak.clone();
