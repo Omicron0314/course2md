@@ -2220,7 +2220,7 @@ impl Desktop {
                 !task.state.finished()
                     || (task.state == crate::workspace::TaskState::Partial
                         && task.artifact.as_ref().is_some_and(|path| {
-                            !crate::task_ui::task_component_outcomes(task, path).is_empty()
+                            !crate::task_ui::task_component_failures(task, path).is_empty()
                         }))
             });
         if let Some(task) = linked_task {

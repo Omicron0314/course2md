@@ -1418,7 +1418,7 @@ impl Desktop {
                             | crate::workspace::TaskState::Paused
                     ) || (task.state == crate::workspace::TaskState::Partial
                         && task.artifact.as_ref().is_some_and(|path| {
-                            !crate::task_ui::task_component_outcomes(*task, path).is_empty()
+                            !crate::task_ui::task_component_failures(*task, path).is_empty()
                         })))
             })
             .cloned()
@@ -1471,7 +1471,7 @@ impl Desktop {
             let partial_component: Option<String> =
                 if task.state == crate::workspace::TaskState::Partial {
                     task.artifact.as_ref().and_then(|path| {
-                        crate::task_ui::task_component_outcomes(&task, path)
+                        crate::task_ui::task_component_failures(&task, path)
                             .first()
                             .map(|(component, _, _)| component.clone())
                     })

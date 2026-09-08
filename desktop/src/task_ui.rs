@@ -1513,14 +1513,7 @@ impl Desktop {
                     );
                 }
                 if let Some(path) = &task.artifact {
-                    for (component, label, outcome) in task_component_outcomes(task, path) {
-                        if !matches!(
-                            outcome.status,
-                            course2md::artifact::Status::Failed
-                                | course2md::artifact::Status::Partial
-                        ) {
-                            continue;
-                        }
+                    for (component, label, outcome) in task_component_failures(task, path) {
                         let unknown_component = uncertain.iter().any(|request| {
                             let purpose = request.purpose.as_deref().unwrap_or_default();
                             (component == "proofreading" && purpose.contains("proof"))
@@ -1956,7 +1949,7 @@ impl Desktop {
             task.artifact
                 .as_ref()
                 .map(|path| {
-                    task_component_outcomes(task, path)
+                    task_component_failures(task, path)
                         .into_iter()
                         .map(|(component, label, outcome)| {
                             let reason = activity::component_failure_message(
@@ -2522,8 +2515,83 @@ mod tests {
         config.defaults.transcript_source = Some(TranscriptSource::Asr);
         validate_plan_config("video.mp4", &config).unwrap();
     }
+
+    #[test]
+    fn partial_task_recovery_excludes_successful_and_unrequested_components() {
+        use crate::workspace::{Intent, TaskPlan, TaskRecord, TaskState};
+        use course2md::artifact::{Outcome, Outcomes, Status};
+
+        let mut outcomes = Outcomes::default();
+        outcomes.transcript = Outcome::succeeded();
+        outcomes.screenshots = Outcome::succeeded();
+        outcomes.proofreading = Outcome {
+            status: Status::Partial,
+            message: Some("部分校对请求尚未完成".into()),
+            completed: Some(1),
+            total: Some(2),
+        };
+        outcomes.exports.insert("md".into(), Outcome::succeeded());
+        outcomes
+            .exports
+            .insert("json".into(), Outcome::not_requested());
+        outcomes
+            .exports
+            .insert("html".into(), Outcome::failed("HTML 写入失败"));
+        let path = std::path::PathBuf::from("published-note");
+        let mut task = TaskRecord {
+            id: "partial-task".into(),
+            plan: TaskPlan {
+                operation: Default::default(),
+                source: source("https://example.test/video", "课程"),
+                source_id: "online:video".into(),
+                title: "课程".into(),
+                library_id: "library".into(),
+                folder: None,
+                options: Default::default(),
+                subtitle: None,
+                config: Default::default(),
+                asr_service: None,
+                ai_service: None,
+            },
+            state: TaskState::Partial,
+            intent: Intent::Run,
+            created: 0,
+            updated: 0,
+            parent: None,
+            handled_by: None,
+            work_dir: "work".into(),
+            stages: Default::default(),
+            error: None,
+            artifact: Some(path.clone()),
+            outcomes: Some(serde_json::to_value(&outcomes).unwrap()),
+            unread: false,
+            logs: Vec::new(),
+            blocked: Vec::new(),
+            resend: Vec::new(),
+        };
+        // The first recovery action in Recent Notes and every action in the
+        // task cards must target actual incomplete work, never the first success.
+        let failures = super::task_component_failures(&task, &path);
+        assert_eq!(
+            failures
+                .iter()
+                .map(|(key, _, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["proofreading", "exports"]
+        );
+        assert_eq!(failures[0].2.status, Status::Partial);
+        assert_eq!(failures[0].2.completed, Some(1));
+        assert_eq!(failures[1].2.message.as_deref(), Some("HTML 写入失败"));
+
+        outcomes.proofreading = Outcome::succeeded();
+        outcomes.exports.insert("html".into(), Outcome::succeeded());
+        task.outcomes = Some(serde_json::to_value(outcomes).unwrap());
+        assert!(super::task_component_failures(&task, &path).is_empty());
+        task.outcomes = None;
+        assert!(super::task_component_failures(&task, &path).is_empty());
+    }
 }
-pub(crate) fn task_component_outcomes(
+pub(crate) fn task_component_failures(
     task: &TaskRecord,
     _path: &std::path::Path,
 ) -> Vec<(String, String, course2md::artifact::Outcome)> {
@@ -2539,7 +2607,13 @@ pub(crate) fn task_component_outcomes(
     ] {
         if let Some(outcome) = value
             .get(key)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .and_then(|v| serde_json::from_value::<course2md::artifact::Outcome>(v.clone()).ok())
+            .filter(|outcome| {
+                matches!(
+                    outcome.status,
+                    course2md::artifact::Status::Failed | course2md::artifact::Status::Partial
+                )
+            })
         {
             results.push((key.into(), label.into(), outcome));
         }
