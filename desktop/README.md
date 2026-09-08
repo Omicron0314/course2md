@@ -52,6 +52,8 @@ python3 desktop/scripts/package.py
 
 发布命令核对实际工作树与冻结记录，并使用 Cargo `--locked`。普通开发命令仍继续追踪 main。CI 为三个系统分别构建；发布使用冻结记录，PR 构建使用主线。可以手动运行 release 工作流并指定版本，全部构建成功后再创建对应 tag 和 GitHub Release。
 
+预发布使用 `2.0.0-alpha.1` 格式，并同步更新两个 Cargo.toml、锁文件和 `docs/releases/v版本.md`。release 工作流会设置 GitHub Pre-release，保留稳定版 Latest。Homebrew 自动更新独立的 `course2md@alpha` / `course2md-gui@alpha` 通道；AUR 跳过预发布。macOS 包将完整版本保存在 `Course2mdVersion`，使用符合 Apple 格式的数字短版本及开发后缀（如 `2.0.0` / `2.0.0a1`），应用「关于」和 CLI 显示完整 SemVer。
+
 ## 验证
 
 ```sh

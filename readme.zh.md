@@ -4,6 +4,8 @@
 
 [English](readme.md) · **中文** · [GitHub Wiki](https://github.com/mizorewww/course2md/wiki)
 
+**2.0 alpha 试用：**[2.0.0-alpha.1 发布说明与安装](https://github.com/mizorewww/course2md/releases/tag/v2.0.0-alpha.1)。Homebrew 使用 `course2md-gui@alpha`；以下默认安装入口继续提供稳定版。
+
 ## 安装桌面应用（GUI）
 
 按你的系统选择下面的一种安装方式。**GUI 已自带转换引擎，无需另装 CLI。**

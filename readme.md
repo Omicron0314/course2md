@@ -4,6 +4,8 @@ Turn **YouTube, Bilibili, or local videos** into illustrated Markdown / HTML not
 
 **English** · [中文](readme.zh.md) · [GitHub Wiki](https://github.com/mizorewww/course2md/wiki)
 
+**Try the 2.0 alpha:** [2.0.0-alpha.1 release notes and installation](https://github.com/mizorewww/course2md/releases/tag/v2.0.0-alpha.1). Use the `course2md-gui@alpha` Homebrew cask; the default installation options below provide the stable release.
+
 ## Install the desktop app (GUI)
 
 Choose one installation method for your system below. **The GUI includes its conversion engine; no separate CLI install is needed.**
