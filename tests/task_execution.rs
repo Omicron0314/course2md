@@ -84,6 +84,7 @@ fn events(output: &Output) -> Vec<serde_json::Value> {
 }
 
 #[test]
+#[cfg(unix)]
 fn scanning_finishes_before_a_slow_screenshot_reports_zero_of_its_real_total() {
     use std::{
         io::{BufRead, BufReader},

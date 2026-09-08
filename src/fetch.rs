@@ -694,7 +694,7 @@ pub fn bilibili_retry_delay(stderr: &str, retries: usize) -> Option<std::time::D
 
 pub const BILIBILI_412_HINT: &str = "Bilibili 暂时限制了请求（HTTP 412）。请稍后重试；若持续失败，请运行 course2md --login bilibili 登录或重新登录，更新 yt-dlp，并确认该链接能在浏览器播放，也可以导入已下载的本地视频。";
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn run(cmd: &mut Command) -> Result<String> {
     let out = run_output(cmd).await?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
