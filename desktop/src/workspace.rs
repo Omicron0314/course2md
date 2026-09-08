@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use course2md::settings::ConfigFile;
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -50,6 +51,8 @@ pub enum Override {
     Formats,
 }
 
+/// The single current input form. Its serialized type/field names are retained
+/// so existing workspaces can be upgraded without changing task records.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Draft {
     pub id: String,
@@ -85,7 +88,7 @@ pub struct Draft {
 impl Draft {
     pub fn new(online: bool, library_id: String, defaults: ConversionOptions) -> Self {
         Self {
-            id: new_id("draft"),
+            id: new_id("input"),
             revision: 0,
             online,
             input: String::new(),
@@ -104,19 +107,6 @@ impl Draft {
             submitted_task: None,
             scroll: 0.,
             updated: now(),
-        }
-    }
-
-    pub fn label(&self) -> String {
-        let label = if !self.title.is_empty() {
-            &self.title
-        } else {
-            &self.input
-        };
-        if self.retry_of.is_some() && !label.is_empty() {
-            format!("调整《{label}》")
-        } else {
-            label.clone()
         }
     }
 
@@ -400,6 +390,19 @@ impl State {
     pub fn draft_mut(&mut self) -> Option<&mut Draft> {
         self.drafts.iter_mut().find(|d| d.id == self.current_draft)
     }
+    pub fn matches_input(&self, id: &str, revision: u64) -> bool {
+        self.draft()
+            .is_some_and(|input| input.id == id && input.revision == revision)
+    }
+    fn replace_input(&mut self, input: Draft) {
+        self.current_draft = input.id.clone();
+        self.drafts = vec![input];
+    }
+    fn retain_current_input(&mut self) {
+        if let Some(input) = self.draft().cloned() {
+            self.replace_input(input);
+        }
+    }
     pub fn library(&self, id: &str) -> Option<&LibraryLocation> {
         self.libraries.iter().find(|l| l.id == id)
     }
@@ -415,7 +418,8 @@ impl State {
         })
     }
 
-    pub fn fresh_draft(
+    /// Start a new note by replacing the one input form; task plans stay frozen.
+    pub fn reset_input(
         &mut self,
         online: bool,
         options: ConversionOptions,
@@ -426,25 +430,34 @@ impl State {
             draft.library_id = library;
             draft.folder = Some(folder);
         }
-        self.current_draft = draft.id.clone();
-        self.drafts.push(draft);
+        self.replace_input(draft);
         self.current_draft.clone()
     }
 
     pub fn switch_source_kind(&mut self, online: bool, options: ConversionOptions) {
-        if let Some(draft) = self
-            .drafts
-            .iter()
-            .rev()
-            .find(|d| d.online == online && d.submitted_task.is_none() && d.retry_of.is_none())
-        {
-            self.current_draft = draft.id.clone();
-        } else {
-            self.fresh_draft(online, options, None);
+        let Some(previous) = self.draft() else {
+            self.reset_input(online, options, None);
+            return;
+        };
+        if previous.online == online {
+            return;
         }
+        // Source modes belong to the same form. Keep common choices, clear the
+        // incompatible source and detach any submitted/retry task association.
+        let mut input = Draft::new(
+            online,
+            previous.library_id.clone(),
+            previous.options.clone(),
+        );
+        input.folder = previous.folder;
+        input.overrides = previous.overrides.clone();
+        input.asr_service = previous.asr_service.clone();
+        input.ai_service = previous.ai_service.clone();
+        input.base_config = previous.base_config.clone();
+        self.replace_input(input);
     }
 
-    /// Create a revision from the recorded task without changing another source draft.
+    /// Replace the current form with a task's options without mutating that task.
     pub fn adjust_task(&mut self, id: &str) -> Result<()> {
         let task = self.task(id).context("任务不存在")?.clone();
         ensure!(
@@ -484,8 +497,7 @@ impl State {
         .into_iter()
         .collect();
         draft.base_config = Some(task.plan.config);
-        self.current_draft = draft.id.clone();
-        self.drafts.push(draft);
+        self.replace_input(draft);
         Ok(())
     }
 
@@ -623,7 +635,9 @@ impl State {
         task.updated = now();
         task.state = match intent {
             Intent::Run => TaskState::Queued,
-            Intent::Quit if matches!(task.state, TaskState::NeedsAttention | TaskState::Uncertain) => {
+            Intent::Quit
+                if matches!(task.state, TaskState::NeedsAttention | TaskState::Uncertain) =>
+            {
                 task.state
             }
             Intent::Cancel if matches!(task.state, TaskState::Running | TaskState::Pausing) => {
@@ -726,7 +740,7 @@ impl State {
             };
             ensure!(
                 failed,
-                "这部分已经完成或没有要求处理，无需补做；可以在新草稿中选择生成新版"
+                "这部分已经完成或没有要求处理，无需补做；可以新建笔记并生成新版"
             );
         }
         if !resend.is_empty() {
@@ -807,6 +821,9 @@ pub struct Workspace {
     pub state: State,
     pub recovery: Option<String>,
     path: PathBuf,
+    /// Last mirror attempt per task and registered location. A normal input
+    /// save must not probe the disks holding every historical task.
+    mirror_snapshots: RefCell<BTreeMap<String, (TaskRecord, LibraryLocation)>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -910,7 +927,7 @@ fn failed_outcome(value: &serde_json::Value) -> bool {
 pub fn check_library(location: &LibraryLocation) -> Result<()> {
     ensure!(
         location.root.is_dir(),
-        "保存位置暂时不可访问。请连接对应磁盘，原任务与草稿仍保留。"
+        "保存位置暂时不可访问。请连接对应磁盘，原任务与当前输入仍保留。"
     );
     let identity = std::fs::read_to_string(location.root.join(".course2md-library-id")).context(
         "这个保存位置尚未重新关联，请在设置的存储中选择“重新关联此保存位置”。原任务和文件仍保留。",
@@ -1143,6 +1160,9 @@ impl Workspace {
             "保存位置暂时不可访问，请先连接对应磁盘"
         );
         create_library_marker(&library)?;
+        self.mirror_snapshots
+            .borrow_mut()
+            .retain(|_, (_, location)| location.id != id);
         self.transaction(|state| {
             state.marker_registry_version = 1;
             Ok(())
@@ -1360,6 +1380,7 @@ impl Workspace {
                     .unwrap_or_default();
             }
         }
+        state.retain_current_input();
         state.recover();
         course2md::checkpoint::atomic_write(&path, &serde_json::to_vec_pretty(&state)?)?;
         let recovery = format!(
@@ -1376,6 +1397,7 @@ impl Workspace {
             state,
             recovery: Some(recovery),
             path,
+            mirror_snapshots: Default::default(),
         })
     }
 
@@ -1409,7 +1431,7 @@ impl Workspace {
                                 path.with_extension(format!("{}.damaged", new_id("backup")));
                             std::fs::copy(&path, &saved).context("无法保留损坏的任务记录")?;
                             recovery = Some(
-                                "已从备份恢复草稿和任务。无法确认最后一次操作，未完成任务已暂停。"
+                                "已从备份恢复输入和任务。无法确认最后一次操作，未完成任务已暂停。"
                                     .into(),
                             );
                             let mut state = state;
@@ -1423,7 +1445,7 @@ impl Workspace {
                             state
                         }
                         Err(_) => {
-                            return Err(error).context("草稿和任务记录无法读取，原文件已保留");
+                            return Err(error).context("输入和任务记录无法读取，原文件已保留");
                         }
                     }
                 }
@@ -1458,6 +1480,9 @@ impl Workspace {
             }
             initial
         };
+        if state.drafts.len() > 1 {
+            Self::upgrade_to_single_input(&path, &mut state)?;
+        }
         let marker_issues = upgrade_library_markers(&mut state);
         if !marker_issues.is_empty() {
             let detail = marker_issues.join("；");
@@ -1482,7 +1507,27 @@ impl Workspace {
             state,
             recovery,
             path,
+            mirror_snapshots: Default::default(),
         })
+    }
+
+    fn upgrade_to_single_input(path: &Path, state: &mut State) -> Result<()> {
+        let parent = path.parent().context("输入记录缺少保存目录")?;
+        let _lock = course2md::runtime::lock_file(&path.with_extension("lock"))?;
+        let archive = parent.join(new_id("workspace-single-input-upgrade"));
+        std::fs::create_dir(&archive).context("无法备份原输入记录，尚未升级")?;
+        for original in [path.to_owned(), path.with_extension("json.bak")] {
+            if original.exists() {
+                let bytes = read_record_bytes(&original)?;
+                course2md::checkpoint::atomic_write(
+                    &archive.join(original.file_name().context("原记录缺少文件名")?),
+                    &bytes,
+                )
+                .context("原输入记录备份未完成，尚未升级")?;
+            }
+        }
+        state.retain_current_input();
+        course2md::checkpoint::atomic_write(path, &serde_json::to_vec_pretty(state)?)
     }
     fn read(path: &Path) -> Result<State> {
         let state: State = serde_json::from_slice(
@@ -1496,7 +1541,7 @@ impl Workspace {
             state.library(&state.default_library).is_some(),
             "默认保存位置记录缺失"
         );
-        ensure!(state.draft().is_some(), "当前草稿记录缺失");
+        ensure!(state.draft().is_some(), "当前输入记录缺失");
         let ids: BTreeSet<_> = state.tasks.iter().map(|t| &t.id).collect();
         ensure!(ids.len() == state.tasks.len(), "任务记录包含重复身份");
         for task in &state.tasks {
@@ -1524,7 +1569,20 @@ impl Workspace {
             let Some(library) = state.library(&task.plan.library_id) else {
                 continue;
             };
+            if self
+                .mirror_snapshots
+                .borrow()
+                .get(&task.id)
+                .is_some_and(|(previous, location)| previous == task && location == library)
+            {
+                continue;
+            }
             if check_library(library).is_err() {
+                // Retry an unavailable location when the task/location changes,
+                // it is explicitly reassociated, or the application restarts.
+                self.mirror_snapshots
+                    .borrow_mut()
+                    .insert(task.id.clone(), (task.clone(), library.clone()));
                 continue;
             }
             validate_record_location(task, &state.libraries)?;
@@ -1538,6 +1596,9 @@ impl Workspace {
                 course2md::checkpoint::atomic_write(&mirror, &bytes)
                     .context("任务恢复副本未能保存，原任务记录仍保留")?;
             }
+            self.mirror_snapshots
+                .borrow_mut()
+                .insert(task.id.clone(), (task.clone(), library.clone()));
         }
         if self.path.is_file() && Self::read(&self.path).is_ok() {
             let bytes = std::fs::read(&self.path)?;
@@ -1640,7 +1701,7 @@ mod tests {
         assert!(ws.state.tasks.is_empty());
     }
     #[test]
-    fn frozen_task_survives_other_drafts_and_defaults_without_storing_credentials() {
+    fn frozen_task_survives_input_changes_without_storing_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("state.json");
         let mut ws =
@@ -1672,6 +1733,130 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn legacy_inputs_are_archived_once_before_only_the_current_form_is_retained() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let library = ws.state.default_library.clone();
+        let frozen = plan(&library);
+        let task_id = ws.state.enqueue(frozen.clone(), None).unwrap().0;
+        let mut current = Draft::new(false, library.clone(), Default::default());
+        current.change_source("current-video.mp4".into());
+        current.title = "当前输入".into();
+        let mut other = Draft::new(true, library, Default::default());
+        other.change_source("https://example.test/older-form".into());
+        other.updated = current.updated + 100;
+        ws.state.drafts.extend([current.clone(), other]);
+        ws.state.current_draft = current.id.clone();
+        ws.save().unwrap();
+        ws.save().unwrap();
+        let primary = std::fs::read(ws.storage_path()).unwrap();
+        let backup = std::fs::read(ws.storage_path().with_extension("json.bak")).unwrap();
+        let mut reopened = test_workspace(dir.path());
+        assert_eq!(reopened.state.drafts.len(), 1);
+        assert_eq!(reopened.state.draft().unwrap(), &current);
+        assert!(reopened.state.task(&task_id).unwrap().plan == frozen);
+        let archives = || {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("workspace-single-input-upgrade-")
+                })
+                .collect::<Vec<_>>()
+        };
+        let archived = archives();
+        assert_eq!(archived.len(), 1);
+        let primary_name = ws.storage_path().file_name().unwrap();
+        let backup_path = ws.storage_path().with_extension("json.bak");
+        let backup_name = backup_path.file_name().unwrap();
+        assert_eq!(
+            std::fs::read(archived[0].join(primary_name)).unwrap(),
+            primary
+        );
+        assert_eq!(
+            std::fs::read(archived[0].join(backup_name)).unwrap(),
+            backup
+        );
+        reopened
+            .transaction(|state| {
+                state.reset_input(true, Default::default(), None);
+                Ok(())
+            })
+            .unwrap();
+        reopened.save().unwrap();
+        let final_workspace = test_workspace(dir.path());
+        assert_eq!(final_workspace.state.drafts.len(), 1);
+        assert_eq!(archives().len(), 1);
+        assert_eq!(
+            std::fs::read(archived[0].join(primary_name)).unwrap(),
+            primary
+        );
+        assert_eq!(
+            std::fs::read(archived[0].join(backup_name)).unwrap(),
+            backup
+        );
+    }
+
+    #[test]
+    fn input_only_save_does_not_probe_an_unchanged_task_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let task = plan(&ws.state.default_library);
+        let id = ws.transaction(|state| state.enqueue(task, None)).unwrap().0;
+        let mirror = ws
+            .state
+            .task(&id)
+            .unwrap()
+            .work_dir
+            .join("task-record.json");
+        std::fs::remove_file(&mirror).unwrap();
+        std::fs::create_dir(&mirror).unwrap();
+        ws.transaction(|state| {
+            state
+                .draft_mut()
+                .unwrap()
+                .change_source("next-video.mp4".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(mirror.is_dir());
+        let before = std::fs::read(ws.storage_path()).unwrap();
+        assert!(
+            ws.transaction(|state| state.set_intent(&id, Intent::Pause))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(ws.storage_path()).unwrap(), before);
+        assert_eq!(ws.state.task(&id).unwrap().intent, Intent::Run);
+    }
+
+    #[test]
+    fn save_updates_in_place_task_events_and_initially_missing_mirrors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let task = plan(&ws.state.default_library);
+        let id = ws.transaction(|state| state.enqueue(task, None)).unwrap().0;
+        let mirror = ws
+            .state
+            .task(&id)
+            .unwrap()
+            .work_dir
+            .join("task-record.json");
+        ws.state.task_mut(&id).unwrap().logs.push("实际进度".into());
+        ws.save().unwrap();
+        let saved: TaskMirror = serde_json::from_slice(&std::fs::read(&mirror).unwrap()).unwrap();
+        assert_eq!(saved.task.logs, ["实际进度"]);
+        std::fs::remove_file(&mirror).unwrap();
+        let restored = test_workspace(dir.path());
+        restored.save().unwrap();
+        let repaired: TaskMirror = serde_json::from_slice(&std::fs::read(mirror).unwrap()).unwrap();
+        assert_eq!(repaired.task.logs, ["实际进度"]);
+    }
+
     #[test]
     fn source_revisions_and_default_overrides_are_independent() {
         let mut draft = Draft::new(true, "lib".into(), Default::default());
@@ -1688,88 +1873,122 @@ mod tests {
         assert!(draft.options.llm && draft.options.summarize);
     }
     #[test]
-    fn source_drafts_keep_separate_options_and_destinations_across_defaults_queue_and_restart() {
+    fn new_note_replaces_the_form_and_keeps_submitted_task_plans() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("workspace.json");
-        let mut ws = Workspace::open_at(
-            file.clone(),
-            dir.path().join("library-a"),
-            Default::default(),
-        )
-        .unwrap();
-        let a_library = ws.state.default_library.clone();
-        let online = ws
-            .state
-            .fresh_draft(true, Default::default(), Some((a_library.clone(), 42)));
-        let draft = ws.state.draft_mut().unwrap();
-        draft.change_source("online-A".into());
-        let stale = draft.revision;
-        draft.change_source("online-B".into());
-        assert!(draft.accept_source(draft.revision, source("online-B", "B")));
-        assert!(!draft.accept_source(stale, source("online-A", "A")));
-        draft.options.formats = [false, false, true];
-        draft.options.llm = false;
-        draft
-            .overrides
-            .extend([Override::Formats, Override::Proofread]);
-        let mut defaults = ConversionOptions::default();
-        defaults.llm = true;
-        defaults.summarize = true;
-        draft.inherit(&defaults);
-        assert!(!draft.options.llm && draft.options.summarize);
-        assert_eq!(draft.options.formats, [false, false, true]);
-        let mut queued = plan(&a_library);
-        queued.source = draft.source.clone().unwrap();
-        queued.source_id = "online-B".into();
-        queued.folder = draft.folder;
-        queued.options = draft.options.clone();
-        let id = ws.state.enqueue(queued.clone(), None).unwrap().0;
-        ws.state.switch_source_kind(false, defaults.clone());
-        let local = ws.state.current_draft.clone();
-        let draft = ws.state.draft_mut().unwrap();
-        draft.change_source("local-C.mp4".into());
-        draft.accept_source(draft.revision, source("local-C.mp4", "C"));
-        draft.folder = Some(7);
-        draft.options.formats = [false, true, false];
-        draft.options.summarize = false;
-        draft
-            .overrides
-            .extend([Override::Formats, Override::Summary]);
-        let c = draft.clone();
-        let b_library = "library-b".to_string();
-        ws.state.libraries.push(LibraryLocation {
-            id: b_library.clone(),
-            name: "B".into(),
-            root: dir.path().join("library-b"),
-            previous_roots: vec![],
-        });
-        ws.state.default_library = b_library.clone();
-        ws.state.switch_source_kind(true, defaults.clone());
-        assert_eq!(ws.state.current_draft, online);
-        assert_eq!(ws.state.draft().unwrap().folder, Some(42));
-        assert_eq!(ws.state.draft().unwrap().input, "online-B");
-        defaults.summarize = false;
-        for draft in &mut ws.state.drafts {
-            draft.inherit(&defaults);
+        let mut ws = test_workspace(dir.path());
+        let library = ws.state.default_library.clone();
+        let submitted = plan(&library);
+        let id = ws.state.enqueue(submitted.clone(), None).unwrap().0;
+        let original_input = ws.state.current_draft.clone();
+        let input = ws.state.draft_mut().unwrap();
+        input.change_source("old-video.mp4".into());
+        input.title = "旧输入名称".into();
+        input.custom_title = true;
+        input.folder = Some(42);
+        input.subtitle = Some("old.srt".into());
+        input.submitted_task = Some(id.clone());
+        input.options.llm = true;
+        input.overrides.insert(Override::Proofread);
+        let defaults = ConversionOptions::default();
+        for _ in 0..8 {
+            ws.state.reset_input(true, defaults.clone(), None);
+            let input = ws.state.draft().unwrap();
+            assert_ne!(input.id, original_input);
+            assert_eq!(ws.state.drafts.len(), 1);
+            assert!(input.input.is_empty() && input.title.is_empty());
+            assert!(input.source.is_none() && input.subtitle.is_none());
+            assert!(input.submitted_task.is_none() && input.retry_of.is_none());
+            assert!(input.overrides.is_empty());
+            assert_eq!(input.options, defaults);
+            assert_eq!(input.folder, None);
+            assert!(ws.state.task(&id).unwrap().plan == submitted);
         }
-        assert!(ws.state.task(&id).unwrap().plan == queued);
+        ws.state
+            .reset_input(false, defaults, Some((library.clone(), 7)));
+        assert_eq!(ws.state.draft().unwrap().folder, Some(7));
+        assert_eq!(ws.state.draft().unwrap().library_id, library);
         ws.transaction(|_| Ok(())).unwrap();
-        drop(ws);
-        let mut restored =
-            Workspace::open_at(file, dir.path().join("fallback"), defaults.clone()).unwrap();
-        assert_eq!(restored.state.draft().unwrap().input, "online-B");
-        restored.state.switch_source_kind(false, defaults.clone());
-        assert_eq!(restored.state.current_draft, local);
-        assert_eq!(restored.state.draft().unwrap(), &c);
-        assert!(restored.state.task(&id).unwrap().plan == queued);
-        restored.state.fresh_draft(true, defaults.clone(), None);
-        assert_eq!(restored.state.draft().unwrap().library_id, b_library);
-        restored
-            .state
-            .fresh_draft(true, defaults, Some((a_library.clone(), 42)));
-        assert_eq!(restored.state.draft().unwrap().library_id, a_library);
-        assert_eq!(restored.state.draft().unwrap().folder, Some(42));
-        assert!(restored.state.task(&id).unwrap().plan == queued);
+        let restored = test_workspace(dir.path());
+        assert_eq!(restored.state.drafts.len(), 1);
+        assert_eq!(restored.state.draft().unwrap(), ws.state.draft().unwrap());
+        assert!(restored.state.task(&id).unwrap().plan == submitted);
+    }
+
+    #[test]
+    fn source_mode_switch_clears_only_the_source_and_never_revives_an_old_form() {
+        let mut state = State::initial("/tmp/library".into(), Default::default());
+        let input = state.draft_mut().unwrap();
+        input.change_source("https://example.test/online-a".into());
+        input.title = "在线课程 A".into();
+        input.custom_title = true;
+        input.source = Some(source("https://example.test/online-a", "A"));
+        input.subtitle = Some("captions.srt".into());
+        input.folder = Some(42);
+        input.options.formats = [false, true, true];
+        input.options.llm = true;
+        input.overrides.insert(Override::Formats);
+        input.ai_service = Some("ai-service".into());
+        input.retry_of = Some("older-task".into());
+        input.submitted_task = Some("submitted-task".into());
+        let before = input.clone();
+        state.switch_source_kind(true, Default::default());
+        assert_eq!(state.draft().unwrap(), &before);
+        state.switch_source_kind(false, Default::default());
+        let local = state.draft().unwrap();
+        assert_ne!(local.id, before.id);
+        assert!(!local.online);
+        assert!(local.input.is_empty() && local.title.is_empty());
+        assert!(local.source.is_none() && local.subtitle.is_none());
+        assert!(local.retry_of.is_none() && local.submitted_task.is_none());
+        assert_eq!(local.options, before.options);
+        assert_eq!(local.folder, before.folder);
+        assert_eq!(local.ai_service, before.ai_service);
+        assert_eq!(local.overrides, before.overrides);
+        state
+            .draft_mut()
+            .unwrap()
+            .change_source("local-b.mp4".into());
+        state.switch_source_kind(true, Default::default());
+        assert_eq!(state.drafts.len(), 1);
+        assert!(state.draft().unwrap().online);
+        assert!(state.draft().unwrap().input.is_empty());
+        assert_eq!(state.draft().unwrap().options, before.options);
+    }
+
+    #[test]
+    fn delayed_results_cannot_cross_new_note_or_mode_changes_even_with_the_same_revision() {
+        let mut state = State::initial("/tmp/library".into(), Default::default());
+        state
+            .draft_mut()
+            .unwrap()
+            .change_source("same-input".into());
+        let pending = state.draft().unwrap().clone();
+        assert!(state.matches_input(&pending.id, pending.revision));
+        state.reset_input(true, Default::default(), None);
+        state
+            .draft_mut()
+            .unwrap()
+            .change_source("same-input".into());
+        assert_eq!(state.draft().unwrap().revision, pending.revision);
+        assert!(!state.matches_input(&pending.id, pending.revision));
+        let after_new = state.draft().unwrap().clone();
+        state.switch_source_kind(false, Default::default());
+        state
+            .draft_mut()
+            .unwrap()
+            .change_source("same-input".into());
+        assert_eq!(state.draft().unwrap().revision, after_new.revision);
+        assert!(!state.matches_input(&after_new.id, after_new.revision));
+        let current = state.draft().unwrap().clone();
+        assert!(state.matches_input(&current.id, current.revision));
+        assert!(
+            state
+                .draft_mut()
+                .unwrap()
+                .accept_source(current.revision, source("same-input", "当前读取结果"),)
+        );
+        assert_eq!(state.draft().unwrap().title, "当前读取结果");
+        assert_eq!(state.drafts.len(), 1);
     }
 
     #[test]
@@ -1788,7 +2007,7 @@ mod tests {
     }
 
     #[test]
-    fn continuing_and_adjusting_a_failed_task_preserves_another_draft_after_restart() {
+    fn adjusting_a_failed_task_replaces_the_form_and_preserves_the_task_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let mut ws = test_workspace(dir.path());
         let mut original = plan(&ws.state.default_library);
@@ -1803,7 +2022,7 @@ mod tests {
         original.config.defaults.asr_model = Some("qwen3-0.6b".into());
         let id = ws.state.enqueue(original.clone(), None).unwrap().0;
         ws.state.task_mut(&id).unwrap().state = TaskState::Running;
-        ws.state.fresh_draft(true, Default::default(), None);
+        ws.state.reset_input(true, Default::default(), None);
         let b = ws.state.draft_mut().unwrap();
         b.change_source("online-B".into());
         b.title = "B 的未提交计划".into();
@@ -1837,10 +2056,8 @@ mod tests {
         drop(ws);
         let mut reopened = test_workspace(dir.path());
         assert_eq!(reopened.state.draft().unwrap(), &revision);
-        assert_eq!(
-            reopened.state.drafts.iter().find(|d| d.id == b.id),
-            Some(&b)
-        );
+        assert_eq!(reopened.state.drafts.len(), 1);
+        assert!(reopened.state.drafts.iter().all(|input| input.id != b.id));
         assert!(reopened.state.task(&id).unwrap().plan == original);
         assert_eq!(reopened.state.task(&id).unwrap().state, TaskState::Paused);
         let mut adjusted = original;
@@ -1856,10 +2073,8 @@ mod tests {
             (followup, false)
         );
         assert!(reopened.state.adjust_task(&id).is_err());
-        assert_eq!(
-            reopened.state.drafts.iter().find(|d| d.id == b.id),
-            Some(&b)
-        );
+        assert_eq!(reopened.state.drafts.len(), 1);
+        assert!(reopened.state.drafts.iter().all(|input| input.id != b.id));
     }
 
     #[test]

@@ -414,7 +414,7 @@ impl Desktop {
                 Ok(workspace) => (Some(workspace), None),
                 Err(error) => (
                     None,
-                    Some(format!("草稿与任务记录无法读取，原文件已保留：{error:#}")),
+                    Some(format!("输入与任务记录无法读取，原文件已保留：{error:#}")),
                 ),
             };
         let settings_ui = settings_ui::State::new(window, cx);
@@ -565,7 +565,7 @@ impl Desktop {
             .workspace
             .as_ref()
             .map(|workspace| workspace.state.current_draft.clone());
-        self.new_draft(true, false, window, cx);
+        self.new_note(true, false, window, cx);
         if self.page == Page::New
             && self
                 .workspace

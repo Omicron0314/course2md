@@ -1,4 +1,4 @@
-//! Persistent drafts and task execution. Navigation never supplies retry inputs.
+//! The current input form and task execution. Navigation never supplies retry inputs.
 use super::*;
 use crate::{
     notes::default_output,
@@ -91,6 +91,57 @@ fn update_draft_source_title(
     }
 }
 
+/// Apply the visible form without treating a save attempt as a user edit.
+/// Navigation often calls this with identical values; keep timestamps and disk
+/// records unchanged unless an actual input or option changed.
+fn update_input_form(
+    draft: &mut workspace::Draft,
+    input: String,
+    title: String,
+    source: Option<source::Source>,
+    options: ConversionOptions,
+    folder: Option<u64>,
+    scroll: f32,
+) -> bool {
+    let previous = draft.clone();
+    update_draft_source_title(draft, input, title, source);
+    use workspace::Override;
+    for (changed, field) in [
+        (
+            draft.options.provider != options.provider,
+            Override::Provider,
+        ),
+        (
+            draft.options.source_mode != options.source_mode,
+            Override::TextSource,
+        ),
+        (draft.options.llm != options.llm, Override::Proofread),
+        (
+            draft.options.summarize != options.summarize,
+            Override::Summary,
+        ),
+        (draft.options.vision != options.vision, Override::Vision),
+        (
+            draft.options.keep_video != options.keep_video,
+            Override::KeepVideo,
+        ),
+        (draft.options.formats != options.formats, Override::Formats),
+    ] {
+        if changed {
+            draft.overrides.insert(field);
+        }
+    }
+    draft.options = options;
+    draft.folder = folder;
+    draft.scroll = scroll;
+    draft.updated = previous.updated;
+    if *draft == previous {
+        return false;
+    }
+    draft.updated = workspace::now();
+    true
+}
+
 impl Desktop {
     pub fn retry_workspace_records(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(workspace) = &self.workspace {
@@ -166,6 +217,8 @@ impl Desktop {
             Some(environment) if environment.gpu.is_some() && environment.llama => AsrProvider::Gpu,
             Some(environment) if environment.npu && !environment.llama => AsrProvider::Npu,
             Some(_) => AsrProvider::Cpu,
+            // Detection runs in the background. A temporary display hint must
+            // not scan Linux devices or PATH while the interface is rendering.
             None if course2md::config::apple_native_available() => AsrProvider::Coreml,
             None => AsrProvider::Cpu,
         }
@@ -184,45 +237,21 @@ impl Desktop {
         let Some(workspace) = &mut self.workspace else {
             return false;
         };
+        let Some(mut next) = workspace.state.draft().cloned() else {
+            self.workspace_error = Some("当前输入记录暂时不可用，窗口中的内容仍保留。".into());
+            return false;
+        };
+        self.draft_deadline = None;
+        if !update_input_form(&mut next, input, title, source, options, folder, scroll) {
+            return true;
+        }
         let result = workspace.transaction(|state| {
-            let draft = state.draft_mut().context("没有可保存的草稿")?;
-            update_draft_source_title(draft, input, title, source);
-            use workspace::Override;
-            for (changed, field) in [
-                (
-                    draft.options.provider != options.provider,
-                    Override::Provider,
-                ),
-                (
-                    draft.options.source_mode != options.source_mode,
-                    Override::TextSource,
-                ),
-                (draft.options.llm != options.llm, Override::Proofread),
-                (
-                    draft.options.summarize != options.summarize,
-                    Override::Summary,
-                ),
-                (draft.options.vision != options.vision, Override::Vision),
-                (
-                    draft.options.keep_video != options.keep_video,
-                    Override::KeepVideo,
-                ),
-                (draft.options.formats != options.formats, Override::Formats),
-            ] {
-                if changed {
-                    draft.overrides.insert(field);
-                }
-            }
-            draft.options = options;
-            draft.folder = folder;
-            draft.scroll = scroll;
-            draft.updated = workspace::now();
+            *state.draft_mut().context("没有可保存的输入")? = next;
             Ok(())
         });
-        self.draft_deadline = None;
         if let Err(error) = result {
             self.workspace_error =
-                Some(format!("草稿尚未保存：{error:#}。当前内容仍保留在窗口中。"));
+                Some(format!("当前输入尚未保存：{error:#}。内容仍保留在窗口中。"));
             cx.notify();
             return false;
         }
@@ -271,35 +300,14 @@ impl Desktop {
         cx.notify();
     }
 
-    pub fn select_draft(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.save_current_draft(cx) {
-            return;
-        }
-        self.invalidate_source();
-        if let Some(workspace) = &mut self.workspace {
-            match workspace.transaction(|state| {
-                ensure!(state.drafts.iter().any(|d| d.id == id), "此草稿已不存在");
-                state.current_draft = id;
-                Ok(())
-            }) {
-                Ok(()) => self.restore_draft(window, cx),
-                Err(error) => self.workspace_error = Some(format!("无法切换草稿：{error:#}")),
-            }
-        }
-    }
-
-    pub fn new_draft(
+    pub fn new_note(
         &mut self,
         online: bool,
         inherit_folder: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.save_current_draft(cx) {
-            return;
-        }
         let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
-        self.invalidate_source();
         if let Some(workspace) = &mut self.workspace {
             let destination = if inherit_folder {
                 self.folder_filter.filter(|id| *id != 0).and_then(|folder| {
@@ -314,20 +322,31 @@ impl Desktop {
                 None
             };
             match workspace.transaction(|state| {
-                state.fresh_draft(online, defaults, destination);
+                state.reset_input(online, defaults, destination);
                 Ok(())
             }) {
                 Ok(()) => {
+                    self.invalidate_source();
+                    self.completed_source = None;
+                    self.show_options = false;
+                    self.show_export_options = false;
+                    self.show_engine_details = false;
+                    self.message = None;
                     self.restore_draft(window, cx);
                     self.page = Page::New;
                 }
-                Err(error) => self.workspace_error = Some(format!("尚未建立草稿：{error:#}")),
+                Err(error) => self.workspace_error = Some(format!("尚未开始新笔记：{error:#}")),
             }
         }
         cx.notify();
     }
 
-    pub fn switch_draft_kind(&mut self, online: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn switch_source_kind(
+        &mut self,
+        online: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.online == online {
             return;
         }
@@ -335,13 +354,17 @@ impl Desktop {
             return;
         }
         let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
-        self.invalidate_source();
         if let Some(workspace) = &mut self.workspace {
             match workspace.transaction(|state| {
                 state.switch_source_kind(online, defaults);
                 Ok(())
             }) {
-                Ok(()) => self.restore_draft(window, cx),
+                Ok(()) => {
+                    self.invalidate_source();
+                    self.completed_source = None;
+                    self.message = None;
+                    self.restore_draft(window, cx);
+                }
                 Err(error) => self.workspace_error = Some(format!("无法切换来源：{error:#}")),
             }
         }
@@ -579,7 +602,7 @@ impl Desktop {
                 self.message = Some(if created {
                     "已加入任务。你可以继续准备下一篇笔记。".into()
                 } else {
-                    "已有相同处理任务。该任务采用原来的名称和保存位置；本草稿中的更改仍保留。"
+                    "已有相同处理任务。该任务采用原来的名称和保存位置；当前输入与选项仍保留。"
                         .into()
                 });
                 self.select_task(&id, cx);
@@ -942,7 +965,7 @@ impl Desktop {
                 self.restore_draft(window, cx);
                 self.page = Page::New;
             }
-            Err(error) => self.workspace_error = Some(format!("调整草稿尚未建立：{error:#}")),
+            Err(error) => self.workspace_error = Some(format!("尚未打开任务调整选项：{error:#}")),
         }
         cx.notify();
     }
@@ -2266,8 +2289,55 @@ fn validate_plan_config(source: &str, config: &course2md::settings::ConfigFile) 
 #[cfg(test)]
 mod tests {
     use super::{
-        PlanValidation, update_draft_source_title, validate_plan_config, validate_plan_storage,
+        PlanValidation, update_draft_source_title, update_input_form, validate_plan_config,
+        validate_plan_storage,
     };
+
+    #[test]
+    fn unchanged_form_values_do_not_request_a_save_or_update_the_timestamp() {
+        let mut input = crate::workspace::Draft::new(true, "library".into(), Default::default());
+        let source = source("https://example.test/a", "课程 A");
+        update_draft_source_title(
+            &mut input,
+            source.input.clone(),
+            source.title.clone(),
+            Some(source),
+        );
+        input.updated = 123;
+        input.folder = Some(7);
+        input.scroll = -42.;
+        let expected = input.clone();
+        for _ in 0..8 {
+            assert!(!update_input_form(
+                &mut input,
+                expected.input.clone(),
+                expected.title.clone(),
+                expected.source.clone(),
+                expected.options.clone(),
+                expected.folder,
+                expected.scroll,
+            ));
+            assert_eq!(input, expected);
+        }
+        let mut options = expected.options.clone();
+        options.formats[0] = !options.formats[0];
+        assert!(update_input_form(
+            &mut input,
+            expected.input,
+            expected.title,
+            expected.source,
+            options.clone(),
+            expected.folder,
+            expected.scroll,
+        ));
+        assert_eq!(input.options, options);
+        assert!(
+            input
+                .overrides
+                .contains(&crate::workspace::Override::Formats)
+        );
+        assert_ne!(input.updated, 123);
+    }
 
     #[test]
     fn plan_preview_uses_loaded_storage_but_submission_rechecks_identity_and_folders() {

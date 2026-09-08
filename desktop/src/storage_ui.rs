@@ -488,7 +488,8 @@ impl Desktop {
                     "另有 {unreadable} 份已列出的笔记暂时无法读取，文件会保留。\n"
                 ));
             }
-            detail.push_str("\n关联后继续使用这个文件夹，现有笔记、原视频、草稿和任务都会保留。");
+            detail
+                .push_str("\n关联后继续使用这个文件夹，现有笔记、原视频、当前输入和任务都会保留。");
             let answer = this.update_in(cx, |this, window, cx| {
                 this.storage_ui.cancel = None;
                 window.close_dialog(cx);
@@ -1059,7 +1060,7 @@ impl Desktop {
         if let Some(access) = self.cached_library_access() {
             let message = match access.coverage() {
                 storage::LibraryCoverage::Unavailable => Some(
-                    "已登记的保存位置暂时都无法访问，笔记内容尚未读取；草稿和任务记录仍保留。"
+                    "已登记的保存位置暂时都无法访问，笔记内容尚未读取；当前输入和任务记录仍保留。"
                         .into(),
                 ),
                 storage::LibraryCoverage::Partial => Some(format!(
@@ -1490,8 +1491,6 @@ mod tests {
             workspace::Draft::new(false, library_id.clone(), ConversionOptions::default());
         outside_draft.input = outside_input.clone();
         outside_draft.source = Some(source);
-        let outside_draft_id = outside_draft.id.clone();
-        workspace.state.drafts.push(outside_draft);
         workspace
             .state
             .reader_sources
@@ -1511,6 +1510,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(workspace.state.library(&library_id).unwrap().root, old);
+        // Exercise an external current input separately: the workbench now has
+        // one form, and reopening must not revive a second managed draft.
+        let mut external_input_state = workspace.state.clone();
+        external_input_state.current_draft = outside_draft.id.clone();
+        external_input_state.drafts = vec![outside_draft];
+        publish_location(&mut external_input_state, &prepared.journal, &prepared.path).unwrap();
+        assert_eq!(external_input_state.draft().unwrap().input, outside_input);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1569,15 +1575,7 @@ mod tests {
             draft.source.as_ref().unwrap().identity,
             "local:content-stays-the-same"
         );
-        assert_eq!(
-            state
-                .drafts
-                .iter()
-                .find(|draft| draft.id == outside_draft_id)
-                .unwrap()
-                .input,
-            outside_input
-        );
+        assert_eq!(state.drafts.len(), 1);
         let task = state.task(&task_id).unwrap();
         assert_eq!(task.plan.title, "Frozen title");
         assert_eq!(task.plan.asr_service.as_deref(), Some("fixed-asr-version"));

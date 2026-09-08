@@ -263,8 +263,7 @@ impl Desktop {
                     if !this
                         .workspace
                         .as_ref()
-                        .and_then(|workspace| workspace.state.draft())
-                        .is_some_and(|draft| &draft.id == id && &draft.revision == revision)
+                        .is_some_and(|workspace| workspace.state.matches_input(id, *revision))
                     {
                         return;
                     }
@@ -403,8 +402,8 @@ impl Desktop {
                 if this.subtitle_generation != generation
                     || this.preview_generation != source_generation
                     || token.as_ref().is_some_and(|(id, revision)| !this
-                        .workspace.as_ref().and_then(|workspace| workspace.state.draft())
-                        .is_some_and(|draft| &draft.id == id && &draft.revision == revision))
+                        .workspace.as_ref()
+                        .is_some_and(|workspace| workspace.state.matches_input(id, *revision)))
                     || !this
                         .source_preview
                         .as_ref()
@@ -515,7 +514,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         if self.online {
-            self.switch_draft_kind(false, window, cx);
+            self.switch_source_kind(false, window, cx);
         }
         match files {
             [path] => self.select_source_input(path.display().to_string(), window, cx),
@@ -550,17 +549,17 @@ impl Desktop {
                     .label("视频链接")
                     .accessibility_label("视频链接")
                     .on_click(
-                        cx.listener(|this, _, window, cx| this.switch_draft_kind(true, window, cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.switch_source_kind(true, window, cx)
+                        }),
                     ),
                 seg_item("source-kind-local", !self.online)
                     .icon(icons::movie())
                     .label("本地文件")
                     .accessibility_label("本地文件")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.switch_draft_kind(false, window, cx)
-                        }),
-                    ),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.switch_source_kind(false, window, cx)
+                    })),
             ]),
         )
     }
@@ -1940,12 +1939,12 @@ impl Desktop {
         }
         if let Some(task) = self.matching_current_task() {
             attention.push(format!(
-                "已有相同处理任务：《{}》。查看时保留该任务的名称和文件夹，本草稿的更改尚未应用。",
+                "已有相同处理任务：《{}》。查看时保留该任务的名称和文件夹，当前输入与选项尚未应用。",
                 task.plan.title
             ));
         } else if let Some(course) = self.existing_source_note() {
             attention.push(format!(
-                "这个视频已有笔记：《{}》。草稿中的更改可用于生成新版，原笔记继续保留。",
+                "这个视频已有笔记：《{}》。当前输入与选项可用于生成新版，原笔记继续保留。",
                 course.title
             ));
         }
@@ -2066,135 +2065,6 @@ impl Desktop {
         });
     }
 
-    fn draft_picker(&self, cx: &mut Context<Self>) -> Div {
-        let Some(workspace) = &self.workspace else {
-            return v_flex();
-        };
-        let drafts: Vec<_> = workspace
-            .state
-            .drafts
-            .iter()
-            .filter(|draft| !draft.input.is_empty() || !draft.title.is_empty())
-            .cloned()
-            .collect();
-        let current = workspace.state.current_draft.clone();
-        let mut row = h_flex().min_w_0().max_w_full().gap_2().flex_wrap();
-        if drafts.len() > 1 {
-            let label = workspace
-                .state
-                .draft()
-                .map(|draft| draft.label())
-                .filter(|label| !label.is_empty())
-                .unwrap_or_else(|| "新笔记".into());
-            let entity = cx.entity().downgrade();
-            row = row.child(
-                control("import-drafts")
-                    .icon(IconName::File)
-                    .min_w_0()
-                    .max_w_full()
-                    .tooltip(label.clone())
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .max_w(rems(14.))
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(format!("草稿：{label}")),
-                    )
-                    .child(Icon::new(IconName::ChevronDown).size(px(16.)))
-                    .dropdown_menu(move |menu, _, _| {
-                        drafts.iter().fold(menu, |menu, draft| {
-                            let id = draft.id.clone();
-                            let entity = entity.clone();
-                            menu.item(
-                                PopupMenuItem::new(draft.label())
-                                    .checked(id == current)
-                                    .on_click(move |_, window, cx| {
-                                        let _ = entity.update(cx, |this, cx| {
-                                            this.select_draft(id.clone(), window, cx)
-                                        });
-                                    }),
-                            )
-                        })
-                    }),
-            );
-        }
-        if workspace
-            .state
-            .draft()
-            .is_some_and(|draft| !draft.input.is_empty())
-        {
-            row = row
-                .child(
-                    control("new-import-draft")
-                        .ghost()
-                        .icon(IconName::Plus)
-                        .label("新笔记")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.new_draft(this.online, false, window, cx)
-                        })),
-                )
-                .child(
-                    control("discard-import-draft")
-                        .ghost()
-                        .icon(icons::delete())
-                        .text_color(color(DANGER))
-                        .label("丢弃草稿")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.discard_import_draft(window, cx)
-                            }),
-                        ),
-                );
-        }
-        row
-    }
-
-    fn discard_import_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.state.current_draft.clone())
-        else {
-            return;
-        };
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "丢弃这份草稿？",
-            Some("已生成的笔记和已提交的任务会保留。"),
-            &["丢弃草稿", "保留草稿"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await.ok() != Some(0) {
-                return;
-            }
-            let _ = this.update_in(cx, |this, window, cx| {
-                let defaults = ConversionOptions::from_config(&this.preferences.defaults_config());
-                this.invalidate_source();
-                if let Some(workspace) = &mut this.workspace {
-                    match workspace.transaction(|state| {
-                        state.drafts.retain(|draft| draft.id != id);
-                        if let Some(draft) = state.drafts.last() {
-                            state.current_draft = draft.id.clone();
-                        } else {
-                            state.fresh_draft(true, defaults, None);
-                        }
-                        Ok(())
-                    }) {
-                        Ok(()) => this.restore_draft(window, cx),
-                        Err(error) => {
-                            this.workspace_error = Some(format!("尚未丢弃草稿：{error:#}"))
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     /// Box bottom row while no video is confirmed yet: subtitle-language
     /// preference on the left, the read action as the only primary.
     fn box_bottom_row(&self, cx: &mut Context<Self>) -> Div {
@@ -2300,7 +2170,15 @@ impl Desktop {
                             .font_weight(FontWeight::SEMIBOLD)
                             .flex_1(),
                     )
-                    .child(self.draft_picker(cx)),
+                    .child(
+                        quiet("new-note")
+                            .icon(IconName::Plus)
+                            .label("新建笔记")
+                            .disabled(self.workspace.is_none())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_note(this.online, false, window, cx)
+                            })),
+                    ),
             )
             .child(self.source_kind_tabs(cx));
         if self.online || self.source_preview.is_none() {
@@ -2505,7 +2383,7 @@ impl Desktop {
                     format!("已有相同处理任务：《{}》（{location}）", task.plan.title),
                     true,
                 ))
-                .child(plan_row("查看现有任务；本草稿的更改尚未应用。", false));
+                .child(plan_row("查看现有任务；当前输入与选项尚未应用。", false));
             actions = actions.child(
                 primary_pill("show-matching-task")
                     .track_focus(&self.import_submit_focus)

@@ -46,8 +46,7 @@ impl Render for FolderDialog {
 
 impl Desktop {
     pub fn begin_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Page::New, cx);
-        self.restore_draft(window, cx);
+        self.new_note(true, true, window, cx);
         if self.online && self.value(Field::Source, cx).is_empty() {
             self.inputs[&Field::Source].update(cx, |state, cx| state.focus(window, cx));
         }
@@ -157,7 +156,7 @@ impl Desktop {
                     this.preview_workers = this.preview_workers.saturating_sub(1);
                     if this.preview_generation != generation || this.value(Field::Source, cx) != request_input { return; }
                     if let Some((id, revision)) = &token {
-                        if !this.workspace.as_ref().and_then(|workspace| workspace.state.draft()).is_some_and(|draft| &draft.id == id && &draft.revision == revision) { return; }
+                        if !this.workspace.as_ref().is_some_and(|workspace| workspace.state.matches_input(id, *revision)) { return; }
                     }
                     this.preview_cancel = None;
                     match result {
@@ -327,7 +326,7 @@ impl Desktop {
                             Ok(())
                         }) {
                             self.folder_error =
-                                Some(format!("文件夹已创建，草稿归属尚未保存：{error:#}"));
+                                Some(format!("文件夹已创建，保存位置尚未更新：{error:#}"));
                             self.folder_editor = Some(saved);
                             cx.notify();
                             return;
