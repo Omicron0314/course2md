@@ -26,6 +26,11 @@ Developer checkouts are never patched.
 - `component-tooltip-lifecycle.patch` dismisses a window's managed tooltip
   before mouse or keyboard navigation can remove its trigger. It also cancels
   delayed tooltips, while preserving normal hovering and other windows.
+- `zed-metal-frame-lifetime.patch` scopes Metal drawing to one autorelease pool
+  per frame. `CAMetalLayer::nextDrawable` returns an autoreleased object from a
+  finite pool; keeping it alive across successive display callbacks can delay
+  reuse. The drawable, encoding and submission stay inside that scope. This
+  does not change frame scheduling, transaction presentation or Metal timeouts.
 
 When upgrading the locked revisions, review upstream changes before adjusting a
 patch. Do not edit `.deps` to fix an application build. The preparer deliberately
