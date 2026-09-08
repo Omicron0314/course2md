@@ -67,7 +67,7 @@ public func c2mVadDetect(
     do {
         let samples = try loadWav(String(cString: wavPath))
         let vad = try runSync {
-            try await SileroVADModel.fromPretrained(engine: .coreml, progressHandler: progressLog)
+            try await SileroVADModel.fromPretrained(engine: .coreml, offlineMode: true, progressHandler: cachedLoadProgress)
         }
         var config = VADConfig.sileroDefault
         config.minSpeechDuration = Float(minSpeech)
@@ -103,6 +103,12 @@ private func progressLog(_ p: Double, _ msg: String) {
     msg.withCString { reportModelProgress(p, $0) }
 }
 
+// Rust prepares missing files before loading. Cached inference must not contact
+// the Hub again, or offline use waits for network retries despite complete files.
+private func cachedLoadProgress(_ p: Double, _ msg: String) {
+    progressLog(p, msg.hasPrefix("Downloading") ? "正在加载本机模型…" : msg)
+}
+
 // MARK: - ASR：qwen3（CoreML 0.6B/ANE）| qwen3-1.7b（MLX/GPU）| whisper
 
 enum AsrKind {
@@ -123,6 +129,8 @@ public func c2mAsrPrepareCache(_ model: UnsafePointer<CChar>, _ errBuf: UnsafeMu
     let name = String(cString: model)
     do {
         try runSync {
+            let offline = ProcessInfo.processInfo.environment["HF_HUB_OFFLINE"]
+                .map { ["1", "true", "yes", "on"].contains($0.lowercased()) } ?? false
             var downloads: [(String, [String])] = []
             switch name {
             case "qwen3-1.7b":
@@ -138,7 +146,7 @@ public func c2mAsrPrepareCache(_ model: UnsafePointer<CChar>, _ errBuf: UnsafeMu
             downloads.append(("aufklarer/Silero-VAD-v6.2.1-CoreML", ["silero_vad.mlmodelc/**", "config.json"]))
             for (index, item) in downloads.enumerated() {
                 let directory = try HuggingFaceDownloader.getCacheDirectory(for: item.0)
-                try await HuggingFaceDownloader.downloadWeights(modelId: item.0, to: directory, additionalFiles: item.1, progressHandler: { fraction in
+                try await HuggingFaceDownloader.downloadWeights(modelId: item.0, to: directory, additionalFiles: item.1, offlineMode: offline, progressHandler: { fraction in
                     progressLog((Double(index) + fraction) / Double(downloads.count), item.0)
                 })
             }
@@ -161,7 +169,7 @@ public func c2mAsrCreate(_ model: UnsafePointer<CChar>, _ errBuf: UnsafeMutableP
         let kind: AsrKind
         if name == "whisper" {
             let m = try runSync {
-                try await WhisperASRModel.fromPretrained(progressHandler: progressLog)
+                try await WhisperASRModel.fromPretrained(offlineMode: true, progressHandler: cachedLoadProgress)
             }
             kind = .whisper(m)
         } else if name == "qwen3-1.7b" {
@@ -170,12 +178,13 @@ public func c2mAsrCreate(_ model: UnsafePointer<CChar>, _ errBuf: UnsafeMutableP
             let m = try runSync {
                 try await Qwen3ASRModel.fromPretrained(
                     modelId: "aufklarer/Qwen3-ASR-1.7B-MLX-8bit",
-                    progressHandler: progressLog)
+                    offlineMode: true,
+                    progressHandler: cachedLoadProgress)
             }
             kind = .qwenMlx(m)
         } else {
             let m = try runSync {
-                try await CoreMLASRModel.fromPretrained(progressHandler: progressLog)
+                try await CoreMLASRModel.fromPretrained(offlineMode: true, progressHandler: cachedLoadProgress)
             }
             try m.warmUp()
             kind = .qwen(m)

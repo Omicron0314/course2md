@@ -246,7 +246,7 @@ fn prompt_model_choice() -> Result<String> {
 }
 
 impl CoremlAsr {
-    /// 加载模型（首次会自动下载，约 1-2GB）。
+    /// 只加载已准备的缓存；缺失文件由模型准备阶段下载。
     pub fn load(model: &str) -> Result<Self> {
         let name = CString::new(model)?.into_raw();
         let mut err = vec![0u8; 1024];
@@ -295,7 +295,7 @@ impl CoremlAsr {
     }
 }
 
-/// Explicit model preparation uses the same loaders as transcription, with no user media.
+/// Verify prepared files using the same offline loaders as transcription, with no user media.
 pub fn prepare_model(model: &str) -> Result<()> {
     ensure_metallib()?;
     let _asr = CoremlAsr::load(model)?;
@@ -374,7 +374,7 @@ pub fn run_coreml(
     }
 
     ensure_metallib()?;
-    tracing::info!(model, "loading Apple native ASR（首次使用会自动下载模型）");
+    tracing::info!(model, "loading cached Apple native ASR");
     crate::progress::stage("model/apple", "start");
     let asr = CoremlAsr::load(model).context("CoreML 模型加载失败")?;
     crate::progress::stage("model/apple", "done");

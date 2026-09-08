@@ -80,9 +80,18 @@ pub async fn prepare(
             #[cfg(apple_native)]
             {
                 let model = model.to_owned();
-                tokio::task::spawn_blocking(move || crate::apple::prepare_model(&model))
-                    .await
-                    .context("模型准备进程未完成")?
+                let cached = matches!(
+                    before.state,
+                    status::CacheState::Cached | status::CacheState::Loaded
+                );
+                tokio::task::spawn_blocking(move || {
+                    if !cached {
+                        crate::apple::prepare_cache(&model)?;
+                    }
+                    crate::apple::prepare_model(&model)
+                })
+                .await
+                .context("模型准备进程未完成")?
             }
             #[cfg(not(apple_native))]
             {
