@@ -94,7 +94,9 @@ impl State {
     pub fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         cx.bind_keys([
             KeyBinding::new("right", NextSettingsTab, Some("SettingsTabs")),
+            KeyBinding::new("down", NextSettingsTab, Some("SettingsTabs")),
             KeyBinding::new("left", PreviousSettingsTab, Some("SettingsTabs")),
+            KeyBinding::new("up", PreviousSettingsTab, Some("SettingsTabs")),
             KeyBinding::new("home", FirstSettingsTab, Some("SettingsTabs")),
             KeyBinding::new("end", LastSettingsTab, Some("SettingsTabs")),
         ]);
@@ -175,6 +177,14 @@ impl Render for ServiceDialog {
 fn text(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Stateful<Div> {
     theme::accessible_text(id, value)
 }
+pub(super) fn field_label(
+    id: impl Into<ElementId>,
+    value: impl Into<SharedString>,
+) -> Stateful<Div> {
+    text(id, value)
+        .text_size(TEXT_BODY)
+        .font_weight(FontWeight::MEDIUM)
+}
 fn service_protocol_label(protocol: ServiceProtocol) -> &'static str {
     match protocol {
         ServiceProtocol::SpeechTranscriptions => "语音转录",
@@ -192,6 +202,25 @@ fn settings_tab_icon(index: usize) -> Icon {
         _ => icons::info(),
     }
 }
+const SETTINGS_TABS: [(usize, &str); 5] = [
+    (4, "外观"),
+    (0, "生成笔记"),
+    (1, "服务与账号"),
+    (2, "存储"),
+    (3, "应用"),
+];
+
+fn settings_tab_label(index: usize) -> &'static str {
+    ["生成笔记", "服务与账号", "存储", "应用", "外观"][index.min(4)]
+}
+
+fn settings_tab_position(index: usize) -> usize {
+    SETTINGS_TABS
+        .iter()
+        .position(|(tab, _)| *tab == index)
+        .unwrap_or(0)
+}
+
 fn group(id: &'static str, title: &'static str) -> Div {
     v_flex()
         .w_full()
@@ -206,8 +235,8 @@ fn group(id: &'static str, title: &'static str) -> Div {
                 .child(
                     match id {
                         "language-settings" => icons::subtitles(),
-                        "asr-default-settings" => icons::microphone(),
-                        "ai-default-settings" => icons::science(),
+                        "asr-default-settings" | "speech-services-heading" => icons::microphone(),
+                        "ai-default-settings" | "ai-services-heading" => icons::science(),
                         "export-default-settings" => icons::download(),
                         "account-settings-heading" => icons::login(),
                         "appearance-motion" => icons::tune(),
@@ -236,14 +265,14 @@ pub(super) fn preference(label: &'static str, hint: &'static str, control: Switc
                 .flex_1()
                 .min_w_0()
                 .gap_1()
-                .child(text(
+                .child(field_label(
                     SharedString::from(format!("preference-label-{label}")),
                     label,
                 ))
                 .when(!hint.is_empty(), |view| {
                     view.child(
                         text(SharedString::from(format!("preference-hint-{label}")), hint)
-                            .text_sm()
+                            .text_size(TEXT_AUX)
                             .text_color(color(MUTED)),
                     )
                 }),
@@ -326,10 +355,7 @@ impl Desktop {
             v_flex()
                 .w_full()
                 .gap_2()
-                .child(
-                    text(("setting-field-label", field as usize), label)
-                        .font_weight(FontWeight::MEDIUM),
-                )
+                .child(field_label(("setting-field-label", field as usize), label))
                 .child(
                     Input::new(&self.settings_ui.inputs[&field])
                         .w_full()
@@ -443,6 +469,149 @@ impl Desktop {
         cx.notify();
     }
 
+    fn settings_navigation(
+        &self,
+        sidebar: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let navigation_width = if sidebar {
+            crate::views::SETTINGS_SIDEBAR_WIDTH
+        } else {
+            crate::views::settings_content_width(window)
+        };
+        let gap = if sidebar { 8. } else { 4. };
+        let tab_height = f32::from(window.rem_size()) * 40. / 14.;
+        let tab_width = if sidebar {
+            navigation_width
+        } else {
+            (navigation_width - gap * 4.).max(0.) / 5.
+        };
+        let position = crate::motion::value(
+            ("settings-navigation-position", usize::from(sidebar)),
+            settings_tab_position(self.settings_tab) as f32,
+            window,
+            cx,
+        );
+        let indicator = div()
+            .absolute()
+            .w(px(tab_width))
+            .h(px(tab_height))
+            .rounded(RADIUS_SMALL)
+            .bg(color(ACCENT_SOFT))
+            .when(sidebar, |view| {
+                view.left(px(0.)).top(px(position * (tab_height + gap)))
+            })
+            .when(!sidebar, |view| {
+                view.left(px(position * (tab_width + gap))).top(px(0.))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .rounded_full()
+                    .bg(color(ACCENT))
+                    .when(sidebar, |view| {
+                        view.left(px(0.))
+                            .top(px(8.))
+                            .w(px(3.))
+                            .h(px(tab_height - 16.))
+                    })
+                    .when(!sidebar, |view| {
+                        view.left(px(12.))
+                            .bottom(px(0.))
+                            .w(px((tab_width - 24.).max(0.)))
+                            .h(px(3.))
+                    }),
+            );
+        gpui_base::Tabs::new("settings-tabs")
+            .aria_label("设置分类")
+            .key_context("SettingsTabs")
+            .on_action(cx.listener(|this, _: &NextSettingsTab, window, cx| {
+                let position = (settings_tab_position(this.settings_tab) + 1) % SETTINGS_TABS.len();
+                this.select_settings_tab(SETTINGS_TABS[position].0, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PreviousSettingsTab, window, cx| {
+                let position = (settings_tab_position(this.settings_tab) + SETTINGS_TABS.len() - 1)
+                    % SETTINGS_TABS.len();
+                this.select_settings_tab(SETTINGS_TABS[position].0, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FirstSettingsTab, window, cx| {
+                this.select_settings_tab(4, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &LastSettingsTab, window, cx| {
+                this.select_settings_tab(3, window, cx)
+            }))
+            .relative()
+            .flex()
+            .min_w_0()
+            .flex_shrink_0()
+            .gap(px(gap))
+            .when(sidebar, |view| {
+                view.flex_col().w(px(navigation_width)).self_start()
+            })
+            .when(!sidebar, |view| view.flex_row().w_full().h(px(tab_height)))
+            .child(indicator)
+            .children(
+                SETTINGS_TABS
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, (index, label))| {
+                        let selected = self.settings_tab == index;
+                        gpui_base::Tab::new(("settings-group", index))
+                            .accessibility_label(label)
+                            .set_position(position + 1, SETTINGS_TABS.len())
+                            .selected(selected)
+                            .track_focus(&self.settings_ui.tab_focus[index])
+                            .w(px(tab_width))
+                            .h(px(tab_height))
+                            .min_w_0()
+                            .flex_shrink_0()
+                            .px(px(12.))
+                            .text_size(TEXT_BODY)
+                            .rounded(RADIUS_SMALL)
+                            .border_2()
+                            .border_color(gpui::transparent_black())
+                            .bg(gpui::transparent_black())
+                            .text_color(color(if selected { ACCENT_STRONG } else { INK }))
+                            .when(selected, |tab| tab.font_weight(FontWeight::SEMIBOLD))
+                            .hover(move |style| {
+                                style.bg(color(HOVER_WARM)).border_color(color(if selected {
+                                    ACCENT
+                                } else {
+                                    HAIRLINE
+                                }))
+                            })
+                            .active(|style| {
+                                style
+                                    .bg(color(PRIMARY_ACTIVE))
+                                    .border_color(color(PRIMARY_ACTIVE))
+                                    .text_color(color(ON_PRIMARY))
+                            })
+                            .focus(|style| style.border_color(color(ACCENT)).shadow_sm())
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap(px(8.))
+                                    .items_center()
+                                    .when(!sidebar, |view| view.justify_center())
+                                    .child(settings_tab_icon(index).size(px(18.)).flex_shrink_0())
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(label),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_settings_tab(index, window, cx)
+                            }))
+                    }),
+            )
+            .into_any_element()
+    }
+
     pub fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.hydrate_settings_inputs(window, cx);
         self.ensure_settings_model_diagnostic(cx);
@@ -455,144 +624,101 @@ impl Desktop {
         for (index, focus) in self.settings_ui.tab_focus.iter_mut().enumerate() {
             *focus = focus.clone().tab_stop(index == self.settings_tab);
         }
+        let sidebar = crate::views::settings_uses_sidebar(window);
+        let content_width = crate::views::settings_content_width(window);
+        let layout_width = content_width
+            + if sidebar {
+                crate::views::SETTINGS_SIDEBAR_WIDTH + crate::views::SETTINGS_COLUMN_GAP
+            } else {
+                0.
+            };
         let origin = self.settings_origin.unwrap_or(Page::New);
-        let mut view = v_flex()
+        let header = h_flex()
             .w_full()
             .min_w_0()
-            .pt_4()
-            .gap_6()
-            .child(
-                h_flex().gap_3().items_center().flex_wrap().child(
-                    quiet("settings-back")
-                        .icon(icons::arrow_left())
-                        .label(match origin {
-                            Page::Library => "返回我的笔记",
-                            Page::Result => "返回阅读",
-                            Page::Task => "返回任务",
-                            _ => "返回工作台",
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if !this.close_service_editor(window, cx) {
-                                return;
-                            }
-                            this.settings_origin = None;
-                            this.navigate(origin, cx);
-                            if let Some(focus) = this.settings_return_focus.take() {
-                                focus.focus(window, cx);
-                            }
-                        })),
-                ),
-            )
+            .flex_shrink_0()
+            .gap(px(24.))
+            .items_center()
+            .justify_between()
             .child(
                 text("settings-page-title", "设置")
                     .role(Role::Heading)
-                    .text_size(TEXT_TITLE)
+                    .text_size(TEXT_DISPLAY)
                     .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
-                self.reveal_setting(
-                    "settings-tabs-reveal",
-                    h_flex().w_full().min_w_0().child(
-                        gpui_base::Tabs::new("settings-tabs")
-                            .key_context("SettingsTabs")
-                            .on_action(cx.listener(|this, _: &NextSettingsTab, window, cx| {
-                                this.select_settings_tab(
-                                    match this.settings_tab {
-                                        4 => 0,
-                                        0 => 1,
-                                        1 => 2,
-                                        2 => 3,
-                                        _ => 4,
-                                    },
-                                    window,
-                                    cx,
-                                )
-                            }))
-                            .on_action(cx.listener(|this, _: &PreviousSettingsTab, window, cx| {
-                                this.select_settings_tab(
-                                    match this.settings_tab {
-                                        4 => 3,
-                                        0 => 4,
-                                        1 => 0,
-                                        2 => 1,
-                                        _ => 2,
-                                    },
-                                    window,
-                                    cx,
-                                )
-                            }))
-                            .on_action(cx.listener(|this, _: &FirstSettingsTab, window, cx| {
-                                this.select_settings_tab(4, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &LastSettingsTab, window, cx| {
-                                this.select_settings_tab(3, window, cx)
-                            }))
-                            .flex()
-                            .flex_wrap()
-                            .flex_shrink_0()
-                            .gap(px(2.))
-                            .p(px(2.))
-                            .rounded_full()
-                            .bg(color(SEGMENT_TRACK))
-                            .max_w_full()
-                            .children(
-                                [
-                                    (4, "外观"),
-                                    (0, "生成笔记"),
-                                    (1, "服务与账号"),
-                                    (2, "存储"),
-                                    (3, "应用"),
-                                ]
-                                .into_iter()
-                                .enumerate()
-                                .map(
-                                    |(position, (index, label))| {
-                                        let selected = self.settings_tab == index;
-                                        gpui_base::Tab::new(("settings-group", index))
-                                            .accessibility_label(label)
-                                            .set_position(position + 1, 5)
-                                            .selected(selected)
-                                            .track_focus(&self.settings_ui.tab_focus[index])
-                                            .min_h(rems(2.286))
-                                            .min_w_0()
-                                            .max_w_full()
-                                            .h_auto()
-                                            .px(px(14.))
-                                            .py(px(2.))
-                                            .text_size(TEXT_BODY)
-                                            .rounded(RADIUS_PILL)
-                                            .border_2()
-                                            .border_color(gpui::transparent_black())
-                                            .text_color(color(if selected { INK } else { GRAY }))
-                                            .when(selected, |tab| {
-                                                tab.bg(color(SURFACE))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .shadow(shadow_segment_selected())
-                                            })
-                                            .focus(|style| {
-                                                style.border_color(color(INK)).shadow_sm()
-                                            })
-                                            .child(
-                                                h_flex()
-                                                    .gap_2()
-                                                    .items_center()
-                                                    .child(settings_tab_icon(index).size_4())
-                                                    .child(label),
-                                            )
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.select_settings_tab(index, window, cx)
-                                            }))
-                                    },
-                                ),
-                            ),
-                    ),
-                ),
+                quiet("settings-back")
+                    .icon(icons::arrow_left())
+                    .label(match origin {
+                        Page::Library => "返回我的笔记",
+                        Page::Result => "返回阅读",
+                        Page::Task => "返回任务",
+                        _ => "返回工作台",
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !this.close_service_editor(window, cx) {
+                            return;
+                        }
+                        this.settings_origin = None;
+                        this.navigate(origin, cx);
+                        if let Some(focus) = this.settings_return_focus.take() {
+                            focus.focus(window, cx);
+                        }
+                    })),
+            );
+        let navigation = self.settings_navigation(sidebar, window, cx);
+        let mut panel = v_flex()
+            .id("settings-panel")
+            .role(Role::TabPanel)
+            .aria_label(settings_tab_label(self.settings_tab))
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .w(px(content_width))
+            .gap(px(24.))
+            .child(
+                text(
+                    "settings-section-title",
+                    settings_tab_label(self.settings_tab),
+                )
+                .role(Role::Heading)
+                .flex_shrink_0()
+                .text_size(TEXT_TITLE)
+                .font_weight(FontWeight::SEMIBOLD),
             );
         for group in [
             PreferenceGroup::Generation,
             PreferenceGroup::Services,
             PreferenceGroup::Application,
         ] {
+            let current_group = match self.settings_tab {
+                0 => Some(PreferenceGroup::Generation),
+                1 => Some(PreferenceGroup::Services),
+                3 | 4 => Some(PreferenceGroup::Application),
+                _ => None,
+            };
+            if current_group == Some(group) {
+                if self.preferences.is_blocked(group)
+                    || self
+                        .settings_group_notice(group)
+                        .is_some_and(|(_, error)| error)
+                {
+                    panel = panel.child(
+                        div()
+                            .id(("fixed-settings-feedback", group as usize))
+                            .w_full()
+                            .min_w_0()
+                            .flex_shrink_0()
+                            .max_h(px(180.))
+                            .overflow_y_scroll()
+                            .p(px(12.))
+                            .rounded(RADIUS_SMALL)
+                            .bg(color(DANGER_BG))
+                            .child(self.group_feedback(group, cx)),
+                    );
+                }
+                continue;
+            }
             let target = match group {
                 PreferenceGroup::Generation => 0,
                 PreferenceGroup::Services => 1,
@@ -601,10 +727,16 @@ impl Desktop {
             if target != self.settings_tab
                 && let Some((message, true)) = self.settings_group_notice(group)
             {
-                view = view.child(
+                panel = panel.child(
                     h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .flex_shrink_0()
                         .gap_2()
                         .flex_wrap()
+                        .p_3()
+                        .rounded(RADIUS_SMALL)
+                        .bg(color(DANGER_BG))
                         .child(
                             text(
                                 ("settings-failed-group", target),
@@ -614,8 +746,10 @@ impl Desktop {
                                     format!("{}：{message}", group.label())
                                 },
                             )
+                            .role(Role::Alert)
                             .flex_1()
                             .min_w_0()
+                            .text_color(color(DANGER))
                             .text_sm(),
                         )
                         .child(
@@ -629,22 +763,54 @@ impl Desktop {
                 );
             }
         }
-        view.child(crate::motion::enter(
-            ("settings-page-transition", self.settings_tab),
+        let content = match self.settings_tab {
+            0 => self.generation_settings_page(window, cx),
+            1 => self.services_settings_page(window, cx),
+            2 => self.storage_settings_page(cx),
+            3 => self.application_settings_page(window, cx),
+            _ => self.appearance_page(window, cx),
+        };
+        let panel = panel.child(
             div()
-                .id("settings-panel")
-                .role(Role::TabPanel)
-                .aria_label(["生成笔记", "服务与账号", "存储", "应用", "外观"][self.settings_tab])
-                .child(match self.settings_tab {
-                    0 => self.generation_settings_page(window, cx),
-                    1 => self.services_settings_page(window, cx),
-                    2 => self.storage_settings_page(cx),
-                    3 => self.application_settings_page(window, cx),
-                    _ => self.appearance_page(window, cx),
-                }),
-            cx,
-        ))
-        .into_any_element()
+                .id("settings-content-scroll")
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .w_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.scrolls[Page::Settings as usize])
+                .child(crate::motion::enter(
+                    ("settings-page-transition", self.settings_tab),
+                    div().w_full().min_w_0().pb(px(24.)).child(content),
+                    cx,
+                )),
+        );
+        let body = div()
+            .flex()
+            .w_full()
+            .min_w_0()
+            .min_h_0()
+            .flex_1()
+            .when(sidebar, |view| {
+                view.flex_row()
+                    .items_stretch()
+                    .gap(px(crate::views::SETTINGS_COLUMN_GAP))
+            })
+            .when(!sidebar, |view| view.flex_col().gap(px(24.)))
+            .child(navigation)
+            .child(panel);
+        v_flex()
+            .w_full()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .max_w(px(layout_width))
+            .mx_auto()
+            .pt(px(24.))
+            .gap(px(24.))
+            .child(header)
+            .child(body)
+            .into_any_element()
     }
 
     fn generation_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -661,7 +827,7 @@ impl Desktop {
                     .text_sm()
                     .text_color(color(MUTED)),
             )
-            .child(text("subtitle-language-label", "字幕语言"))
+            .child(field_label("subtitle-language-label", "字幕语言"))
             .child(
                 self.setting_choices("default-subtitle-language", "字幕语言")
                     .options([
@@ -670,15 +836,9 @@ impl Desktop {
                         ("zh-Hant", "繁體中文"),
                         ("en", "English"),
                         ("ja", "日本語"),
-                        ("custom", "自定义"),
                     ])
                     .selected(language.to_owned())
                     .on_change(cx.listener(|this, selected: &SharedString, window, cx| {
-                        if selected.as_ref() == "custom" {
-                            this.settings_ui.language_details_open = true;
-                            cx.notify();
-                            return;
-                        }
                         let mut next = this.generation_edit_base();
                         next.preferred_subtitle_languages = if selected.is_empty() {
                             Vec::new()
@@ -825,7 +985,7 @@ impl Desktop {
                     self.settings_ui.asr_details_open,
                     v_flex()
                         .gap_3()
-                        .child(text("asr-hardware-heading", "固定识别方式"))
+                        .child(field_label("asr-hardware-heading", "固定识别方式"))
                         .child(
                             self.setting_choices("default-asr-hardware", "固定识别方式")
                                 .options(
@@ -1037,7 +1197,6 @@ impl Desktop {
                 .text_sm()
                 .text_color(color(MUTED)),
             )
-            .child(self.group_feedback(PreferenceGroup::Generation, cx))
             .child(languages)
             .child(recognition)
             .child(ai)
@@ -1122,7 +1281,7 @@ impl Desktop {
         let known = models.iter().any(|(id, _)| *id == selected);
         let mut view = v_flex()
             .gap_2()
-            .child(text("local-model-heading", "识别模型"))
+            .child(field_label("local-model-heading", "识别模型"))
             .child(
                 self.setting_choices("default-local-model", "默认识别模型")
                     .options(models)
@@ -1178,19 +1337,11 @@ impl Desktop {
     }
 
     fn services_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut view = v_flex()
-            .w_full()
-            .min_w_0()
-            .gap_5()
-            .child(self.group_feedback(PreferenceGroup::Services, cx))
-            .child(
-                text(
-                    "service-purpose-help",
-                    "连接你使用的语音或 AI 服务。保存后可用于生成；测试由你主动发起。",
-                )
+        let mut view = v_flex().w_full().min_w_0().gap_5().child(
+            text("service-purpose-help", "连接你使用的语音或 AI 服务。")
                 .text_sm()
                 .text_color(color(MUTED)),
-            );
+        );
         // Keep the active form near the start of the page, including in a long service list.
         let inline_editor = self
             .settings_ui
@@ -1211,15 +1362,21 @@ impl Desktop {
                 latest.insert(version.service_id.clone(), version.clone());
             }
         }
-        for (purpose, heading, add_label) in [
-            (ServicePurpose::Speech, "语音服务", "添加语音服务"),
-            (ServicePurpose::Ai, "AI 服务", "添加 AI 服务"),
+        for (purpose, heading_id, heading, add_label) in [
+            (
+                ServicePurpose::Speech,
+                "speech-services-heading",
+                "语音服务",
+                "添加语音服务",
+            ),
+            (
+                ServicePurpose::Ai,
+                "ai-services-heading",
+                "AI 服务",
+                "添加 AI 服务",
+            ),
         ] {
-            let mut section = v_flex().gap_2().w_full().child(
-                text(("services-heading", purpose as usize), heading)
-                    .text_size(TEXT_AUX)
-                    .text_color(color(GRAY)),
-            );
+            let mut section = group(heading_id, heading);
             for version in latest
                 .values()
                 .filter(|version| version.config.protocol.purpose() == purpose)
@@ -1878,7 +2035,7 @@ impl Desktop {
             .child(
                 v_flex()
                     .gap_2()
-                    .child(text("service-protocol-heading", "接口类型"))
+                    .child(field_label("service-protocol-heading", "接口类型"))
                     .child(
                         self.setting_choices("service-protocol", "服务接口类型")
                             .options(
@@ -1929,7 +2086,7 @@ impl Desktop {
             .child(
                 v_flex()
                     .gap_2()
-                    .child(text("service-auth-heading", "认证方式"))
+                    .child(field_label("service-auth-heading", "认证方式"))
                     .child(
                         self.setting_choices("service-auth-mode", "服务认证方式")
                             .options([("api_key", "API Key"), ("none", "无需认证")])
@@ -2752,7 +2909,7 @@ impl Desktop {
             format!("设置目录：{}\n{error:#}", self.preferences.root().display()),
         );
     }
-    fn settings_group_notice(&self, group: PreferenceGroup) -> Option<(String, bool)> {
+    pub(crate) fn settings_group_notice(&self, group: PreferenceGroup) -> Option<(String, bool)> {
         if let Some((message, error, when)) = self.settings_ui.feedback.get(&group)
             && (*error || when.elapsed() < Duration::from_secs(6))
         {
@@ -2770,12 +2927,14 @@ impl Desktop {
                 )
             })
     }
-    fn group_feedback(&self, group: PreferenceGroup, cx: &mut Context<Self>) -> Div {
-        let mut view = v_flex().gap_2();
+    pub(crate) fn group_feedback(&self, group: PreferenceGroup, cx: &mut Context<Self>) -> Div {
+        let mut view = v_flex().w_full().min_w_0().gap_2();
         if let Some((message, error)) = self.settings_group_notice(group) {
             view = view.child(crate::motion::enter(
                 SharedString::from(format!("preference-feedback-{}-{message}", group as usize)),
                 h_flex()
+                    .w_full()
+                    .min_w_0()
                     .gap_2()
                     .items_center()
                     .child(
@@ -2785,6 +2944,7 @@ impl Desktop {
                             icons::check_circle()
                         }
                         .size_4()
+                        .flex_shrink_0()
                         .text_color(color(if error {
                             DANGER
                         } else {
@@ -2793,7 +2953,9 @@ impl Desktop {
                     )
                     .child(
                         text(("settings-group-feedback", group as usize), message.clone())
-                            .text_sm()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(TEXT_BODY)
                             .text_color(color(if error { DANGER } else { MUTED })),
                     ),
                 cx,
@@ -3039,11 +3201,12 @@ impl Desktop {
     }
     pub(crate) fn appearance_controls(&self, cx: &mut Context<Self>) -> Div {
         group("appearance-motion", "界面偏好")
-            .child(self.group_feedback(PreferenceGroup::Application, cx))
             .child(
                 v_flex()
+                    .w_full()
+                    .max_w(CONTROL_GROUP_MAX)
                     .gap_2()
-                    .child(text("app-font-scale-label", "界面文字大小").text_sm())
+                    .child(field_label("app-font-scale-label", "界面文字大小"))
                     .child(
                         self.setting_choices("app-font-scale", "应用文字大小")
                             .options([1.0_f32, 1.25, 1.5, 2.0].into_iter().map(|scale| {
@@ -3052,6 +3215,7 @@ impl Desktop {
                                     format!("{}%", (scale * 100.) as u32),
                                 )
                             }))
+                            .full_width()
                             .selected(
                                 (self.preferences.application().font_scale * 100.)
                                     .round()
@@ -3075,7 +3239,7 @@ impl Desktop {
             .child(
                 self.setting_preference(
                     "减少动态效果",
-                    "简化界面动画，立即生效。",
+                    "关闭过渡与循环动画。",
                     Switch::new("app-reduce-motion")
                         .checked(self.preferences.application().desktop.reduce_motion)
                         .on_click(cx.listener(|this, enabled, _, cx| {
@@ -3083,13 +3247,13 @@ impl Desktop {
                             next.desktop.reduce_motion = *enabled;
                             this.commit_application(next, cx);
                         })),
-                ),
+                )
+                .max_w(CONTROL_GROUP_MAX),
             )
     }
     fn application_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .gap_6()
-            .child(self.group_feedback(PreferenceGroup::Application, cx))
             .child(group("about-heading", "关于").child(self.about_page(cx)))
             .child(self.legacy_migration_panel(cx))
             .child(self.environment_page(window, cx))

@@ -217,10 +217,11 @@ pub const RADIUS_PILL: Pixels = px(999.);
 pub const RADIUS_CARD: Pixels = px(12.);
 pub const RADIUS_HERO: Pixels = px(16.);
 pub const RADIUS_SMALL: Pixels = px(8.);
+/// Compact form choices stay associated with their labels in a wide pane.
+pub const CONTROL_GROUP_MAX: Pixels = px(520.);
 
 /* ---------- 栏宽（rems，随字号缩放的结构尺寸） ---------- */
 pub const COLUMN: Rems = rems(65.714);
-pub const COLUMN_SETTINGS: Rems = rems(65.714);
 pub const TOC_PANEL: Rems = rems(16.);
 
 /* ---------- 字级（rems；14px 为 1rem 基准） ---------- */
@@ -319,6 +320,36 @@ pub fn control(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button
 
 /* ---------- 共享控件 ---------- */
 
+/// A selectable preview surface. Its opaque contents cannot conceal pointer
+/// feedback: hover changes the outline/shadow, and press dims the whole card.
+pub fn selection_card(
+    id: impl Into<gpui::ElementId>,
+    selected: bool,
+    amount: f32,
+) -> gpui_base::Button {
+    use gpui::{prelude::*, *};
+    gpui_base::Button::new(id)
+        .selected(selected)
+        .aria_toggled(if selected {
+            gpui::accesskit::Toggled::True
+        } else {
+            gpui::accesskit::Toggled::False
+        })
+        .flex()
+        .flex_col()
+        .h_auto()
+        .min_h(px(0.))
+        .min_w_0()
+        .rounded(RADIUS_CARD)
+        .border_2()
+        .border_color(blend(color(HAIRLINE), color(ACCENT), amount))
+        .bg(color(SURFACE))
+        .cursor_pointer()
+        .hover(|style| style.border_color(color(ACCENT_STRONG)).shadow_sm())
+        .active(|style| style.opacity(0.8).shadow_none())
+        .focus(|style| style.border_color(color(INK)).shadow_sm())
+}
+
 /// The single forward action of a page or region, in the active theme's accent.
 pub fn primary_pill(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
     use gpui::Styled;
@@ -394,7 +425,7 @@ pub fn seg_item(id: impl Into<gpui::ElementId>, selected: bool) -> gpui_componen
     use gpui_component::{Selectable, button::ButtonVariants};
     control(id)
         .ghost()
-        .rounded(RADIUS_SMALL)
+        .rounded(RADIUS_PILL)
         .min_h(rems(2.286))
         .px(px(14.))
         .selected(selected)

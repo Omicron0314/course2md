@@ -5,28 +5,49 @@ use gpui_component::button::*;
 
 const SHELL_GUTTER: f32 = 24.;
 const WIDE_COLUMN: Rems = rems(82.);
+pub(super) const SETTINGS_SIDEBAR_WIDTH: f32 = 200.;
+pub(super) const SETTINGS_COLUMN_GAP: f32 = 32.;
+const SETTINGS_CONTENT_MAX_WIDTH: f32 = 920.;
+const SETTINGS_SHELL_WIDTH: f32 =
+    SETTINGS_SIDEBAR_WIDTH + SETTINGS_COLUMN_GAP + SETTINGS_CONTENT_MAX_WIDTH + SHELL_GUTTER * 2.;
+const SETTINGS_SIDEBAR_BREAKPOINT: f32 = 1100.;
 
 fn shell_column_for(page: Page) -> Div {
     shell_column_at(shell_column_width(page))
 }
 
-fn shell_column_width(page: Page) -> Rems {
+fn shell_column_width(page: Page) -> AbsoluteLength {
     match page {
-        Page::Settings => COLUMN_SETTINGS,
-        Page::Library | Page::Result => WIDE_COLUMN,
-        _ => COLUMN,
+        Page::Settings => px(SETTINGS_SHELL_WIDTH).into(),
+        Page::Library | Page::Result => WIDE_COLUMN.into(),
+        _ => COLUMN.into(),
     }
 }
 
 /// The max width includes both gutters; layout calculations use the same box.
 pub(super) fn shell_content_width(page: Page, window: &Window) -> f32 {
-    (f32::from(window.bounds().size.width)
-        .min(shell_column_width(page).0 * f32::from(window.rem_size()))
-        - SHELL_GUTTER * 2.)
+    (f32::from(window.bounds().size.width).min(f32::from(
+        shell_column_width(page).to_pixels(window.rem_size()),
+    )) - SHELL_GUTTER * 2.)
         .max(0.)
 }
 
-fn shell_column_at(width: Rems) -> Div {
+pub(super) fn settings_uses_sidebar(window: &Window) -> bool {
+    f32::from(window.bounds().size.width) >= SETTINGS_SIDEBAR_BREAKPOINT
+}
+
+/// Shared by the settings panel and its grids: exclude the real navigation and gutters.
+pub(super) fn settings_content_width(window: &Window) -> f32 {
+    let available_width = shell_content_width(Page::Settings, window);
+    if settings_uses_sidebar(window) {
+        (available_width - SETTINGS_SIDEBAR_WIDTH - SETTINGS_COLUMN_GAP)
+            .clamp(0., SETTINGS_CONTENT_MAX_WIDTH)
+    } else {
+        available_width
+    }
+}
+
+fn shell_column_at(width: AbsoluteLength) -> Div {
     div()
         .w_full()
         .min_w_0()
@@ -87,7 +108,7 @@ impl Desktop {
                         .w(px(tab_width))
                         .h(px(36.))
                         .rounded(RADIUS_SMALL)
-                        .bg(color(ACCENT_SOFT)),
+                        .bg(color(ACCENT)),
                 )
             })
             .child(
@@ -102,6 +123,11 @@ impl Desktop {
                     .map(|(index, (page, label, icon))| {
                         let active = self.page == page
                             || (page == Page::Library && self.page == Page::Result);
+                        let coverage = if self.page == Page::Settings {
+                            0.
+                        } else {
+                            (1. - (position - index as f32).abs()).clamp(0., 1.)
+                        };
                         control(("shell-tab", index))
                             .ghost()
                             .w(px(tab_width))
@@ -110,7 +136,7 @@ impl Desktop {
                             .px(px(12.))
                             .rounded(RADIUS_SMALL)
                             .bg(gpui::transparent_black())
-                            .text_color(color(if active { ACCENT_STRONG } else { GRAY }))
+                            .text_color(theme::blend(color(GRAY), color(ON_PRIMARY), coverage))
                             .selected(active)
                             .toggled(active)
                             .icon(icon.size(px(18.)))
@@ -126,17 +152,35 @@ impl Desktop {
                 ),
             );
         let settings_problem = self.settings_have_problem();
+        let settings_selected = self.page == Page::Settings;
+        let settings_amount = crate::motion::value(
+            "settings-navigation-selected",
+            if settings_selected { 1. } else { 0. },
+            window,
+            cx,
+        );
         let gear = quiet("shell-settings")
-            .icon(icons::settings())
+            .icon(if settings_problem {
+                icons::warning().text_color(color(if settings_selected {
+                    ON_PRIMARY
+                } else {
+                    WARNING
+                }))
+            } else {
+                icons::settings()
+            })
             .label("设置")
             .h(px(36.))
             .min_h(px(36.))
-            .selected(self.page == Page::Settings)
-            .toggled(self.page == Page::Settings)
-            .when(self.page == Page::Settings, |b| {
-                b.bg(color(ACCENT_SOFT)).text_color(color(ACCENT_STRONG))
-            })
-            .when(settings_problem, |b| b.text_color(color(WARNING)))
+            .selected(settings_selected)
+            .toggled(settings_selected)
+            .bg(theme::blend(color(CANVAS), color(ACCENT), settings_amount))
+            .text_color(theme::blend(
+                color(GRAY),
+                color(ON_PRIMARY),
+                settings_amount,
+            ))
+            .when(settings_selected, |b| b.font_weight(FontWeight::SEMIBOLD))
             .accessibility_label(if settings_problem {
                 "设置，未保存"
             } else {
@@ -292,7 +336,9 @@ impl Render for Desktop {
         };
         let content = v_flex()
             .gap_4()
-            .when(self.page == Page::Result, |v| v.h_full().min_h_0())
+            .when(matches!(self.page, Page::Result | Page::Settings), |v| {
+                v.h_full().min_h_0()
+            })
             .when(self.reading, |v| {
                 v.child(
                     h_flex()
@@ -401,14 +447,19 @@ impl Render for Desktop {
                     .min_h_0()
                     .min_w_0()
                     .w_full()
-                    .when(self.page != Page::Result, |view| {
-                        view.overflow_y_scroll()
-                            .track_scroll(&self.scrolls[self.page as usize])
-                    })
+                    .when(
+                        !matches!(self.page, Page::Result | Page::Settings),
+                        |view| {
+                            view.overflow_y_scroll()
+                                .track_scroll(&self.scrolls[self.page as usize])
+                        },
+                    )
                     .child(
                         shell_column_for(self.page)
-                            .when(self.page == Page::Result, |v| v.h_full().min_h_0())
-                            .pb_6()
+                            .when(matches!(self.page, Page::Result | Page::Settings), |v| {
+                                v.h_full().min_h_0()
+                            })
+                            .when(self.page != Page::Settings, |v| v.pb_6())
                             .child(content),
                     ),
             );

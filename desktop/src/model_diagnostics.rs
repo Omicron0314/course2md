@@ -867,7 +867,7 @@ impl Desktop {
             Some(CacheState::Loaded) => (true, "识别模型已就绪。".into()),
             Some(CacheState::Cached) => (true, "模型已下载，尚未验证加载。".into()),
             Some(CacheState::Missing | CacheState::Partial) => {
-                (true, "模型尚未准备，开始识别时会自动下载。".into())
+                (true, "首次识别时会自动下载所选模型。".into())
             }
             Some(CacheState::Unsupported) => {
                 (false, "当前识别方式不支持所选模型，请选择其他模型。".into())
