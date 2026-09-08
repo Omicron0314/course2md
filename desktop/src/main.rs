@@ -3,6 +3,7 @@ mod a11y;
 mod about;
 mod account_ui;
 mod activity;
+mod appearance_ui;
 mod backend;
 mod course_library;
 mod credentials;
@@ -466,7 +467,7 @@ impl Desktop {
             settings_origin: None,
             settings_return_focus: None,
             result_tab: 0,
-            settings_tab: 0,
+            settings_tab: 4,
             show_options: false,
             show_export_options: false,
             show_logs: false,

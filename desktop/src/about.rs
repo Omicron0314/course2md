@@ -46,12 +46,12 @@ impl Desktop {
                     .flex_wrap()
                     .child(div().flex_1())
                     .child(
-                        quiet("about-issue").label("发送反馈").on_click(|_, _, cx| {
+                        quiet("about-issue").icon(icons::edit()).label("发送反馈").on_click(|_, _, cx| {
                             cx.open_url("https://github.com/mizorewww/course2md/issues");
                         }),
                     )
                     .child(
-                        quiet("about-project").label("帮助").on_click(|_, _, cx| {
+                        quiet("about-project").icon(icons::external_link()).label("项目主页").on_click(|_, _, cx| {
                             cx.open_url("https://github.com/mizorewww/course2md");
                         }),
                     ),
@@ -66,7 +66,7 @@ impl Desktop {
                             .text_color(color(GRAY)),
                     )
                     .child(
-                        quiet("about-license").label("course2md · MIT").on_click(|_, _, cx| {
+                        quiet("about-license").icon(icons::info()).label("course2md · MIT").on_click(|_, _, cx| {
                             cx.open_url(
                                 "https://github.com/mizorewww/course2md/blob/main/LICENSE",
                             );
@@ -74,7 +74,7 @@ impl Desktop {
                     )
                     .child(
                         quiet("about-icons-license")
-                            .label("Material Icons · Apache 2.0")
+                            .icon(icons::external_link()).label("Material Icons · Apache 2.0")
                             .on_click(|_, _, cx| {
                                 cx.open_url(
                                     "https://github.com/google/material-design-icons/blob/master/LICENSE",

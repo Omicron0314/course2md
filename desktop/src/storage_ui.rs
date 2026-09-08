@@ -5,7 +5,7 @@ use crate::{
     theme::*,
 };
 use anyhow::{Context as _, Result, ensure};
-use gpui_component::{button::*, progress::Progress as ProgressBar};
+use gpui_component::button::*;
 use std::{
     path::Path,
     sync::{
@@ -44,13 +44,13 @@ struct StorageDialog {
     _observation: Subscription,
 }
 impl Render for StorageDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.desktop.update(cx, |desktop, cx| {
             div()
                 .id("storage-dialog-content")
                 .role(Role::Dialog)
                 .aria_label(desktop.storage_ui.title())
-                .child(desktop.storage_operation_view(cx))
+                .child(desktop.storage_operation_view(window, cx))
         })
     }
 }
@@ -778,8 +778,52 @@ impl Desktop {
         });
     }
 
-    fn storage_operation_view(&self, cx: &mut Context<Self>) -> Div {
-        let mut view = v_flex().gap_4();
+    fn storage_operation_view(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let cancelling = self
+            .storage_ui
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed));
+        let mut view = v_flex().gap_4().child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .when(self.storage_ui.busy, |row| {
+                    row.child(crate::motion::spinner("storage-operation-busy", cx))
+                })
+                .when(!self.storage_ui.busy, |row| {
+                    row.child(
+                        if self.storage_ui.error.is_some() {
+                            icons::warning()
+                        } else {
+                            icons::check_circle()
+                        }
+                        .size_6()
+                        .text_color(color(
+                            if self.storage_ui.error.is_some() {
+                                WARNING
+                            } else {
+                                SUCCESS
+                            },
+                        )),
+                    )
+                })
+                .child(
+                    accessible_text(
+                        "storage-operation-heading",
+                        if cancelling {
+                            "正在结束操作…"
+                        } else if self.storage_ui.busy {
+                            "正在处理文件…"
+                        } else if self.storage_ui.error.is_some() {
+                            "操作未完成"
+                        } else {
+                            "操作已完成"
+                        },
+                    )
+                    .font_weight(FontWeight::SEMIBOLD),
+                ),
+        );
         if !self.storage_ui.progress.message.is_empty() {
             view = view.child(accessible_text(
                 "storage-operation-state",
@@ -788,48 +832,52 @@ impl Desktop {
         }
         if let Some(error) = &self.storage_ui.error {
             view = view.child(
-                accessible_text("storage-operation-error", error.clone()).text_color(rgb(0xa32626)),
+                accessible_text("storage-operation-error", error.clone()).text_color(color(DANGER)),
             );
         }
         if self.storage_ui.busy {
             let progress = &self.storage_ui.progress;
-            view = view
-                .child(
-                    ProgressBar::new("storage-progress")
-                        .loading(progress.total == 0)
-                        .value(if progress.total > 0 {
-                            progress.completed as f32 / progress.total as f32 * 100.
+            if progress.total > 0 {
+                view = view.child(crate::motion::progress(
+                    "storage-progress",
+                    progress.completed as f32 / progress.total as f32,
+                    window,
+                    cx,
+                ));
+            }
+            view = view.child(
+                control("cancel-library-move")
+                    .icon(icons::close())
+                    .disabled(cancelling)
+                    .loading(cancelling)
+                    .label(if cancelling {
+                        "正在结束…"
+                    } else if self.storage_ui.association {
+                        "取消重新关联"
+                    } else if self.storage_ui.cleanup {
+                        "取消清理"
+                    } else {
+                        "取消迁移"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(cancel) = &this.storage_ui.cancel {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
+                        this.storage_ui.progress.message = if this.storage_ui.association {
+                            "正在结束读取，现有文件会保留…"
+                        } else if this.storage_ui.cleanup {
+                            "正在结束清理操作…"
                         } else {
-                            0.
-                        }),
-                )
-                .child(
-                    control("cancel-library-move")
-                        .label(if self.storage_ui.association {
-                            "取消重新关联"
-                        } else if self.storage_ui.cleanup {
-                            "取消清理"
-                        } else {
-                            "取消迁移"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(cancel) = &this.storage_ui.cancel {
-                                cancel.store(true, Ordering::Relaxed);
-                            }
-                            this.storage_ui.progress.message = if this.storage_ui.association {
-                                "正在结束读取，现有文件会保留…"
-                            } else if this.storage_ui.cleanup {
-                                "正在结束清理操作…"
-                            } else {
-                                "正在结束迁移，原课程库会保留…"
-                            }
-                            .into();
-                            cx.notify();
-                        })),
-                );
+                            "正在结束迁移，原课程库会保留…"
+                        }
+                        .into();
+                        cx.notify();
+                    })),
+            );
         } else {
             view = view.child(
                 control("close-storage-operation")
+                    .icon(icons::close())
                     .label("关闭")
                     .on_click(|_, window, cx| window.close_dialog(cx)),
             );
@@ -871,7 +919,7 @@ impl Desktop {
             view = view.child(
                 accessible_text("storage-status-error", error.clone())
                     .text_sm()
-                    .text_color(rgb(0xa32626)),
+                    .text_color(color(DANGER)),
             );
         }
         if let Some(workspace) = &self.workspace {
@@ -881,7 +929,7 @@ impl Desktop {
                     view = view.child(v_flex().gap_2()
                         .child(accessible_text(("storage-association-needed", index), format!("「{}」的关联记录缺失。重新关联后可继续使用这个位置，已有文件会保留。", location.name)))
                         .child(accessible_text(("storage-association-path", index), location.root.display().to_string()).text_sm().text_color(color(MUTED)))
-                        .child(control(("reassociate-storage-location", index)).label("重新关联此保存位置").self_start().disabled(self.storage_ui.busy)
+                        .child(control(("reassociate-storage-location", index)).icon(icons::storage()).label("重新关联此保存位置").self_start().disabled(self.storage_ui.busy)
                             .on_click(cx.listener(move |this, _, window, cx| this.begin_library_reassociation(id.clone(), window, cx)))));
                 } else if location.root.is_dir()
                     && let Err(error) = workspace::check_library(location)
@@ -893,7 +941,7 @@ impl Desktop {
                         )
                         .role(Role::Alert)
                         .text_sm()
-                        .text_color(rgb(0xa32626)),
+                        .text_color(color(DANGER)),
                     );
                 }
             }
@@ -916,6 +964,7 @@ impl Desktop {
                     ))
                     .child(
                         control(("resume-library-move", index))
+                            .icon(icons::play_arrow())
                             .label("继续迁移并切换位置")
                             .disabled(self.storage_ui.busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -932,12 +981,14 @@ impl Desktop {
                     .child(
                         control(("open-move-copy", index))
                             .ghost()
+                            .icon(icons::folder_open())
                             .label("打开目标副本")
                             .on_click(move |_, _, cx| cx.open_with_system(&destination)),
                     )
                     .child(
                         control(("abandon-library-move", index))
                             .ghost()
+                            .icon(icons::close())
                             .label("结束这次迁移，保留副本")
                             .disabled(self.storage_ui.busy)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -976,11 +1027,13 @@ impl Desktop {
                                 .gap_2()
                                 .child(
                                     control(("open-library-backup", index))
+                                        .icon(icons::folder_open())
                                         .label("打开备份位置")
                                         .on_click(move |_, _, cx| cx.open_with_system(&path)),
                                 )
                                 .child(
-                                    control(("cleanup-library-backup", index))
+                                    quiet(("cleanup-library-backup", index))
+                                        .icon(icons::delete())
                                         .label("清理旧位置备份…")
                                         .disabled(self.storage_ui.busy)
                                         .on_click(cx.listener(move |this, _, window, cx| {

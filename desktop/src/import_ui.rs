@@ -798,7 +798,7 @@ impl Desktop {
             )
     }
 
-    fn text_source_view(&self, cx: &mut Context<Self>) -> Div {
+    fn text_source_view(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let Some(source) = &self.source_preview else {
             return v_flex();
         };
@@ -1041,7 +1041,7 @@ impl Desktop {
             view = view.child(options);
         }
         if speech {
-            view = view.child(self.import_speech_options(cx));
+            view = view.child(self.import_speech_options(window, cx));
         }
         let ai_overridden = {
             let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
@@ -1193,7 +1193,7 @@ impl Desktop {
         cx.notify();
     }
 
-    fn import_speech_options(&self, cx: &mut Context<Self>) -> Div {
+    fn import_speech_options(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let cloud = self.task_options.provider == 5;
         let mut view = v_flex().gap_3().child(
             SingleChoiceGroup::new("import-speech-location", "在哪里识别视频声音")
@@ -1265,7 +1265,7 @@ impl Desktop {
             );
         }
         let (provider, model, root) = self.import_model_request();
-        view.child(self.model_readiness_panel(provider, Some(&model), &root, cx))
+        view.child(self.model_readiness_panel(provider, Some(&model), &root, window, cx))
     }
 
     fn import_uses_speech(&self) -> bool {
@@ -1971,7 +1971,7 @@ impl Desktop {
         } else {
             bx = bx
                 .child(self.box_selected_video(cx))
-                .child(self.text_source_view(cx))
+                .child(self.text_source_view(_window, cx))
                 .child(self.import_destination(cx))
                 .child(self.import_exports(cx))
                 .child(self.plan_inset(cx));

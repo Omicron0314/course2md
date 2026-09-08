@@ -5,7 +5,7 @@ use course2md::{
     config::{AsrProvider, model_dir_from},
     models::status::{CacheState, LocalModelStatus},
 };
-use gpui_component::{button::*, progress::Progress};
+use gpui_component::button::*;
 use std::path::Path;
 
 #[derive(Clone)]
@@ -46,6 +46,7 @@ pub(super) struct State {
     preparing: Option<Request>,
     result: Option<(String, bool)>,
     details: bool,
+    cache_details: std::collections::BTreeSet<String>,
 }
 fn bytes(value: u64) -> String {
     if value >= 1024 * 1024 * 1024 {
@@ -280,7 +281,7 @@ impl Desktop {
                         "已安装 Homebrew 时，可在终端运行 brew install llama.cpp。完成后重新打开应用并检查本机能力。",
                     ).text_sm())
                     .child(control(SharedString::from(format!("model-copy-llama-install-{key}")))
-                        .label("复制识别程序安装命令")
+                        .icon(icons::content_copy()).label("复制识别程序安装命令")
                         .self_start()
                         .on_click(|_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string("brew install llama.cpp".into()))));
             } else {
@@ -309,6 +310,7 @@ impl Desktop {
         provider: AsrProvider,
         model: Option<&str>,
         root: &Path,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let request = Request::new(provider, model, root);
@@ -330,7 +332,7 @@ impl Desktop {
                         issue.clone(),
                     )
                     .text_sm()
-                    .text_color(rgb(0xa32626)),
+                    .text_color(color(DANGER)),
                 )
                 .child(self.model_runtime_repair(provider, &key));
         }
@@ -340,12 +342,21 @@ impl Desktop {
             .and_then(|result| result.as_ref().ok());
         if checking {
             view = view.child(
-                accessible_text(
-                    SharedString::from(format!("model-checking-{key}")),
-                    "正在检查这套模型的本机缓存…",
-                )
-                .role(Role::Status)
-                .text_sm(),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(crate::motion::spinner(
+                        SharedString::from(format!("model-check-spinner-{key}")),
+                        cx,
+                    ))
+                    .child(
+                        accessible_text(
+                            SharedString::from(format!("model-checking-{key}")),
+                            "正在检查模型…",
+                        )
+                        .role(Role::Status)
+                        .text_sm(),
+                    ),
             );
         }
         if let Some(Err(error)) = entry.and_then(|entry| entry.result.as_ref()) {
@@ -355,20 +366,14 @@ impl Desktop {
                     format!("模型缓存检查未完成：{error}"),
                 )
                 .text_sm()
-                .text_color(rgb(0xa32626)),
+                .text_color(color(DANGER)),
             );
         }
         if let Some(status) = status {
             let description = match status.state {
-                CacheState::Missing => {
-                    "尚未下载。需要识别时，应用会先准备这套模型；可读取的字幕不需要它。"
-                }
-                CacheState::Partial => {
-                    "模型文件尚未齐全。准备时会复用完整文件，缺少或不完整的文件由下载器重新获取。"
-                }
-                CacheState::Cached => {
-                    "已找到所需模型文件，尚未验证能否加载。生成时仍会检查实际加载结果。"
-                }
+                CacheState::Missing => "尚未下载。开始语音识别时会自动准备；读取字幕不需要模型。",
+                CacheState::Partial => "模型尚未下载完整，继续准备会复用已有文件。",
+                CacheState::Cached => "模型已下载，尚未验证加载。",
                 CacheState::Loaded => "这套模型已成功加载，缓存文件从上次检查后未改变。",
                 CacheState::Unsupported => {
                     "这种识别方式不支持当前模型。原选择保留，请明确选择支持的模型。"
@@ -391,9 +396,16 @@ impl Desktop {
                     .text_color(color(MUTED)),
                 );
             }
+            let detail_key = key.clone();
+            let cache_open = self
+                .settings_ui
+                .model_diagnostics
+                .cache_details
+                .contains(&key);
+            let mut cache = v_flex().gap_2();
             for (index, part) in status.parts.iter().enumerate() {
                 let path = part.path.clone();
-                view = view
+                cache = cache
                     .child(
                         accessible_text(
                             SharedString::from(format!("model-cache-path-{key}-{index}")),
@@ -408,6 +420,7 @@ impl Desktop {
                                 "open-model-cache-{key}-{index}"
                             )))
                             .ghost()
+                            .icon(icons::folder_open())
                             .label("打开缓存位置")
                             .accessibility_label(format!(
                                 "打开 {} 的缓存位置：{}",
@@ -419,7 +432,7 @@ impl Desktop {
                         )
                     });
                 if !part.missing.is_empty() {
-                    view = view.child(
+                    cache = cache.child(
                         accessible_text(
                             SharedString::from(format!("model-missing-files-{key}-{index}")),
                             format!("缺少或尚未验证：{}", part.missing.join("、")),
@@ -428,6 +441,38 @@ impl Desktop {
                     );
                 }
             }
+            view = view
+                .child(
+                    quiet(SharedString::from(format!("model-cache-details-{key}")))
+                        .icon(icons::folder_open())
+                        .label(if cache_open {
+                            "收起缓存详情"
+                        } else {
+                            "查看缓存详情"
+                        })
+                        .self_start()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this
+                                .settings_ui
+                                .model_diagnostics
+                                .cache_details
+                                .remove(&detail_key)
+                            {
+                                this.settings_ui
+                                    .model_diagnostics
+                                    .cache_details
+                                    .insert(detail_key.clone());
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(crate::motion::disclosure(
+                    SharedString::from(format!("model-cache-content-{key}")),
+                    cache_open,
+                    cache,
+                    window,
+                    cx,
+                ));
             if let Some(error) = &status.last_error {
                 view = view.child(
                     accessible_text(
@@ -435,7 +480,7 @@ impl Desktop {
                         format!("上次准备未完成：{error}"),
                     )
                     .text_sm()
-                    .text_color(rgb(0xa32626)),
+                    .text_color(color(DANGER)),
                 );
             }
         }
@@ -450,6 +495,7 @@ impl Desktop {
         let request_for_check = request.clone();
         let mut actions = h_flex().gap_2().flex_wrap().child(
             control(SharedString::from(format!("recheck-model-{key}")))
+                .icon(icons::refresh())
                 .label("重新检查模型")
                 .disabled(checking || active)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -461,11 +507,17 @@ impl Desktop {
             && status.is_some_and(|status| status.can_prepare);
         if active {
             view = view.child(
-                accessible_text(
-                    "active-model-prepare",
-                    format!("正在准备 {}", request.model),
-                )
-                .role(Role::Status),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(crate::motion::spinner("model-prepare-spinner", cx))
+                    .child(
+                        accessible_text(
+                            "active-model-prepare",
+                            format!("正在准备 {}", request.model),
+                        )
+                        .role(Role::Status),
+                    ),
             );
             for (index, (stage, progress)) in self
                 .progress
@@ -483,14 +535,17 @@ impl Desktop {
                         .text_sm(),
                     )
                     .when_some(progress.fraction(), |view, fraction| {
-                        view.child(
-                            Progress::new(("model-download-bar", index))
-                                .value(fraction as f32 * 100.),
-                        )
+                        view.child(crate::motion::progress(
+                            ("model-download-bar", index),
+                            fraction,
+                            window,
+                            cx,
+                        ))
                     });
             }
             actions = actions.child(
                 control("stop-model-preparation")
+                    .icon(icons::pause())
                     .label(if self.cancelling {
                         "正在停止…"
                     } else {
@@ -519,6 +574,8 @@ impl Desktop {
             };
             actions = actions.child(
                 control(SharedString::from(format!("prepare-model-{key}")))
+                    .icon(icons::download())
+                    .primary()
                     .label(label)
                     .accessibility_label(format!(
                         "{label}：{} · {}",
@@ -539,11 +596,22 @@ impl Desktop {
                     .text_sm(),
                 );
             }
-            view = view.child(accessible_text(SharedString::from(format!("model-network-scope-{key}")), "准备可能下载模型文件，不发送课程内容。没有网络时已有完整缓存仍可尝试加载；下载失败会保留具体原因。").text_sm().text_color(color(MUTED)));
+            view = view.child(
+                accessible_text(
+                    SharedString::from(format!("model-network-scope-{key}")),
+                    "准备时可能下载模型，课程内容不会上传。",
+                )
+                .text_sm()
+                .text_color(color(MUTED)),
+            );
         }
         view.child(actions)
     }
-    pub(super) fn model_diagnostics_panel(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn model_diagnostics_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let request = self.default_model_request();
         let mut view = v_flex().gap_3().child(
             accessible_text("model-diagnostic-default", "当前默认识别方式与模型")
@@ -562,6 +630,7 @@ impl Desktop {
                 request.provider,
                 Some(&request.model),
                 &request.root,
+                window,
                 cx,
             ));
         }
@@ -579,6 +648,7 @@ impl Desktop {
                     active.provider,
                     Some(&active.model),
                     &active.root,
+                    window,
                     cx,
                 ));
         }
@@ -697,6 +767,7 @@ impl Desktop {
                                         "choose-available-model-{}",
                                         provider.as_str()
                                     )))
+                                    .icon(icons::microphone())
                                     .label(format!("默认改用 {}", provider_name(provider)))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let mut value = this.generation_edit_base();
@@ -717,6 +788,7 @@ impl Desktop {
         {
             view = view.child(
                 control("model-preparation-details")
+                    .icon(icons::info())
                     .ghost()
                     .label(if self.settings_ui.model_diagnostics.details {
                         "收起准备详情"
@@ -742,9 +814,19 @@ impl Desktop {
         }
         view
     }
-    pub(super) fn default_model_readiness_panel(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn default_model_readiness_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let request = self.default_model_request();
-        self.model_readiness_panel(request.provider, Some(&request.model), &request.root, cx)
+        self.model_readiness_panel(
+            request.provider,
+            Some(&request.model),
+            &request.root,
+            window,
+            cx,
+        )
     }
 
     /// One-line readiness conclusion for the generation group main flow; the full
@@ -754,8 +836,11 @@ impl Desktop {
         if request.provider == AsrProvider::Api {
             return (true, "当前使用语音服务识别，本机模型不参与。".into());
         }
-        if let Some(issue) = self.model_device_issue(request.provider) {
-            return (false, issue);
+        if self.model_device_issue(request.provider).is_some() {
+            return (
+                false,
+                "所选识别方式暂不可用，可在模型管理中查看原因。".into(),
+            );
         }
         let entry = self
             .settings_ui
@@ -763,7 +848,7 @@ impl Desktop {
             .entries
             .get(&request.key());
         if entry.is_none_or(|entry| entry.checking) {
-            return (true, format!("正在检查 {} 的本机缓存…", request.model));
+            return (true, "正在检查识别模型…".into());
         }
         if entry
             .and_then(|entry| entry.result.as_ref())
@@ -779,23 +864,15 @@ impl Desktop {
             .and_then(|result| result.as_ref().ok())
             .map(|status| &status.state)
         {
-            Some(CacheState::Loaded) => (true, format!("✓ 识别模型 {} 已验证加载", request.model)),
-            Some(CacheState::Cached) => (
-                true,
-                format!("识别模型 {} 的缓存完整，尚未验证能否加载。", request.model),
-            ),
-            Some(CacheState::Missing | CacheState::Partial) => (
-                true,
-                format!(
-                    "○ 识别模型 {} 尚未在本机准备好，需要识别时会自动准备",
-                    request.model
-                ),
-            ),
-            Some(CacheState::Unsupported) => (
-                false,
-                format!("○ 当前识别方式不支持 {}，请改选可用模型", request.model),
-            ),
-            None => (true, format!("○ 尚未检查 {} 的本机缓存", request.model)),
+            Some(CacheState::Loaded) => (true, "识别模型已就绪。".into()),
+            Some(CacheState::Cached) => (true, "模型已下载，尚未验证加载。".into()),
+            Some(CacheState::Missing | CacheState::Partial) => {
+                (true, "模型尚未准备，开始识别时会自动下载。".into())
+            }
+            Some(CacheState::Unsupported) => {
+                (false, "当前识别方式不支持所选模型，请选择其他模型。".into())
+            }
+            None => (true, "尚未检查识别模型。".into()),
         }
     }
 }

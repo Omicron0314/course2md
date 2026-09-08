@@ -86,11 +86,10 @@ impl Desktop {
             .w_full()
             .gap_3()
             .child(
-                div()
-                    .id("bilibili-account-status")
-                    .role(Role::Label)
-                    .aria_label(status.clone())
-                    .child(status),
+                h_flex().gap_2().items_center()
+                    .when(self.account.checking, |row| row.child(crate::motion::spinner("account-checking", cx)))
+                    .child(badge(if expired || self.account.status_error.is_some() { BadgeKind::Warning } else if matches!(self.account.status, Some(AccountStatus::Connected(_))) { BadgeKind::Success } else { BadgeKind::Neutral })
+                        .child(accessible_text("bilibili-account-status", status.trim_start_matches("Bilibili：").to_owned()))),
             )
             .child(accessible_text("bilibili-account-policy", if saved {
                 "获取字幕和视频将使用此账号的访问权限。退出登录后停止后续使用，课程和笔记保留。"
@@ -104,14 +103,14 @@ impl Desktop {
                     .child(
                         control("account-refresh")
                             .ghost()
-                            .label("重新检查")
+                            .icon(icons::refresh()).label("重新检查")
                             .disabled(self.account.checking)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_account(cx))),
                     )
                     .when(show_login, |view| {
                         view.child(
                             control("account-login")
-                                .label(if expired {
+                                .icon(icons::login()).primary().label(if expired {
                                     "重新登录 Bilibili"
                                 } else {
                                     "登录 Bilibili"
@@ -125,7 +124,7 @@ impl Desktop {
                         view.child(
                             control("account-logout")
                                 .ghost()
-                                .label("退出登录")
+                                .icon(icons::logout()).label("退出登录")
                                 .on_click(cx.listener(|this, _, _, cx| this.clear_account(cx))),
                         )
                     }),
@@ -184,6 +183,7 @@ impl Desktop {
             .child(
                 control("source-account-refresh")
                     .ghost()
+                    .icon(icons::refresh())
                     .label("重新检查")
                     .disabled(self.account.checking)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_account(cx))),
@@ -191,6 +191,7 @@ impl Desktop {
             .when(!temporary && !connected, |view| {
                 view.child(
                     control("source-account-login")
+                        .icon(icons::login())
                         .ghost()
                         .label(if expired {
                             "重新登录 Bilibili"
@@ -394,10 +395,18 @@ impl Desktop {
             .flex_shrink_0()
             .items_center()
             .justify_center()
-            .bg(rgb(0xffffff));
+            .rounded(RADIUS_CARD)
+            .bg(color(if success {
+                SUCCESS_BG
+            } else if retry {
+                WARNING_BG
+            } else {
+                INSET
+            }));
         if let Some(modules) = &self.account.modules {
             let modules = modules.clone();
-            visual = visual.child(
+            // A real QR code intentionally keeps its high-contrast white scanning surface.
+            visual = visual.bg(gpui::rgb(0xffffff)).child(
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
@@ -430,7 +439,7 @@ impl Desktop {
                                             ),
                                             size(px(unit), px(unit)),
                                         ),
-                                        rgb(0x000000),
+                                        gpui::rgb(0x000000),
                                     ));
                                 }
                             }
@@ -440,28 +449,66 @@ impl Desktop {
                 .w_full()
                 .h_full(),
             );
-        } else {
+        } else if success || retry {
             visual = visual.child(
-                Icon::new(if success {
-                    IconName::CircleCheck
-                } else if retry {
-                    IconName::TriangleAlert
+                if success {
+                    icons::check_circle()
                 } else {
-                    IconName::LoaderCircle
-                })
+                    icons::warning()
+                }
                 .size_8()
-                .text_color(color(if success { SUCCESS } else { MUTED })),
+                .text_color(color(if success { SUCCESS } else { WARNING })),
             );
+        } else {
+            visual = visual
+                .child(crate::motion::spinner("qr-code-generating", cx))
+                .child(
+                    accessible_text("qr-preparing-label", "正在获取二维码…")
+                        .text_sm()
+                        .text_color(color(MUTED))
+                        .mt_3(),
+                );
         }
+        let phase = match state {
+            QrDialogState::Generating => 0,
+            QrDialogState::Waiting(_) => 1,
+            QrDialogState::Confirming(_) => 2,
+            QrDialogState::Expired => 3,
+            QrDialogState::Error(_) => 4,
+            QrDialogState::Success(_) => 5,
+        };
         v_flex()
             .id("account-login-body")
             .max_h((window.bounds().size.height - px(150.)).max(px(180.)))
             .overflow_y_scroll()
             .gap_4()
             .items_center()
-            .child(visual)
             .child(
-                accessible_text("bilibili-login-step", message).font_weight(FontWeight::SEMIBOLD),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(icons::bilibili().size_6())
+                    .child(
+                        accessible_text("bilibili-login-brand", "Bilibili 账号")
+                            .font_weight(FontWeight::SEMIBOLD),
+                    ),
+            )
+            .child(crate::motion::enter(
+                SharedString::from(format!("qr-visual-{}-{phase}", self.account.generation)),
+                visual,
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .when(matches!(state, QrDialogState::Confirming(_)), |row| {
+                        row.child(crate::motion::spinner("qr-awaiting-confirmation", cx))
+                    })
+                    .child(
+                        accessible_text("bilibili-login-step", message)
+                            .font_weight(FontWeight::SEMIBOLD),
+                    ),
             )
             .when(!hint.is_empty(), |view| {
                 view.child(
@@ -489,6 +536,7 @@ impl Desktop {
                         view.child(
                             control("account-qr-source-retry")
                                 .primary()
+                                .icon(icons::refresh())
                                 .label("重新读取课程")
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     let retry = this.can_retry_account_source(cx);
@@ -502,6 +550,11 @@ impl Desktop {
                     })
                     .child(
                         control("account-qr-close")
+                            .icon(if success {
+                                icons::check_circle()
+                            } else {
+                                icons::close()
+                            })
                             .label(if success { "完成" } else { "取消" })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.close_account_dialog(cx);
