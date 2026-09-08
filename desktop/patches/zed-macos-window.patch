@@ -12,7 +12,7 @@
          VIEW_CLASS = {
              let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
              decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
-@@ -1813,6 +1818,23 @@
+@@ -1813,6 +1818,32 @@
          }
      }
  
@@ -22,11 +22,20 @@
 +            let Some(state) = state.upgrade() else {
 +                return;
 +            };
-+            let view = state.lock().native_view.clone();
-+            // Window invalidation runs on AppKit's main thread. Marking the
-+            // view dirty schedules a later native frame and never draws while
-+            // the App is borrowed. This also serves AX activation and async
-+            // results when initial occlusion has not started CVDisplayLink.
++            let view = {
++                let state = state.lock();
++                // display_layer and the display-link step take this callback
++                // while drawing. Invalidating AppKit inside that callback can
++                // redraw in the same CA transaction forever (e.g. a spinner).
++                // The frame source resumes after the callback and consumes
++                // animation demand at the display cadence instead.
++                if state.request_frame_callback.is_none() {
++                    return;
++                }
++                state.native_view.clone()
++            };
++            // Wake initial/occluded windows and asynchronous results only
++            // outside a frame callback. This never borrows or draws the App.
 +            unsafe {
 +                let _: () = msg_send![view.as_ptr(), setNeedsDisplay: YES];
 +            }
@@ -36,7 +45,7 @@
      fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
          self.0.as_ref().lock().request_frame_callback = Some(callback);
      }
-@@ -2156,7 +2178,7 @@
+@@ -2156,7 +2187,7 @@
          };
          let action_handler = A11yActionHandler(callbacks.action);
  
@@ -45,7 +54,7 @@
              accesskit_macos::SubclassingAdapter::for_window(
                  lock.native_window as *mut c_void,
                  activation_handler,
-@@ -2164,7 +2186,16 @@
+@@ -2164,7 +2195,16 @@
              )
          };
  
