@@ -14,15 +14,21 @@ Developer checkouts are never patched.
   handles native selection updates, reports read-only/disabled states, and skips
   disabled inputs in Tab navigation. Masked/password values remain excluded.
 - `zed-macos-window.patch` forwards native window focus to AccessKit, initializes
-  the adapter from the window's existing key state, and requests an AppKit draw
-  when GPUI is invalidated. Per-window requests are coalesced and delayed by
-  16 ms on the main thread, so initial draws, asynchronous results and animation
-  frames do not depend on a visible window's display link. Requests made during
-  a frame callback are retained until that callback is restored. Deferring the
-  AppKit invalidation avoids a synchronous CA redraw loop that starves input
-  while a spinner is visible; closing the window safely cancels pending demand.
-  Regression tests cover delayed coalescing, unavailable callbacks and requests
-  made reentrantly during wake delivery.
+  the adapter from the window's existing key state, and supplies an asynchronous
+  AppKit fallback when GPUI has unserved frame demand. The former independent
+  16 ms fallback also drew beside a working display link; a foreground trace
+  captured two ordinary submissions followed by a transaction draw stalled in
+  `nextDrawable`. Demand generations now let each callback consume only prior
+  requests, preserving new requests made inside it. The fallback checks actual
+  completed callbacks, rather than trusting a display-link running flag. Its
+  32 ms deadline is anchored to the request or latest completed callback, so
+  stopped or unavailable display links retain a redraw path after one interval
+  without progress. A working display link keeps its own refresh rate. Delayed
+  invalidation still yields the main thread; temporarily unavailable callbacks
+  retain a retry, and closing cancels pending demand. Pure state-machine tests
+  and executor tests cover primary consumption, demand inside a frame, takeover
+  after progress stops, coalescing, unavailable callbacks, reentrancy and close.
+  The Metal submission order and timeout settings are unchanged.
 - `component-tooltip-lifecycle.patch` dismisses a window's managed tooltip
   before mouse or keyboard navigation can remove its trigger. It also cancels
   delayed tooltips, while preserving normal hovering and other windows.
