@@ -873,49 +873,7 @@ impl Desktop {
         let Some(workspace) = &mut self.workspace else {
             return;
         };
-        let result = workspace.transaction(|state| {
-            let task = state.task(&id).context("任务不存在")?.clone();
-            ensure!(
-                task.handled_by.is_none(),
-                "此任务已有后续处理，请打开对应任务继续"
-            );
-            ensure!(
-                !matches!(
-                    task.state,
-                    TaskState::Running | TaskState::Pausing | TaskState::Queued
-                ),
-                "当前任务还在处理，请先暂停并等候当前步骤结束"
-            );
-            let mut draft = workspace::Draft::new(
-                task.plan.source.online,
-                task.plan.library_id.clone(),
-                task.plan.options.clone(),
-            );
-            draft.input = task.plan.source.input.clone();
-            draft.source = Some(task.plan.source);
-            draft.title = task.plan.title;
-            draft.custom_title = true;
-            draft.folder = task.plan.folder;
-            draft.subtitle = task.plan.subtitle;
-            draft.asr_service = task.plan.asr_service;
-            draft.ai_service = task.plan.ai_service;
-            draft.retry_of = Some(id);
-            draft.overrides = [
-                workspace::Override::Provider,
-                workspace::Override::TextSource,
-                workspace::Override::Proofread,
-                workspace::Override::Summary,
-                workspace::Override::Vision,
-                workspace::Override::KeepVideo,
-                workspace::Override::Formats,
-            ]
-            .into_iter()
-            .collect();
-            draft.base_config = Some(task.plan.config);
-            state.current_draft = draft.id.clone();
-            state.drafts.push(draft);
-            Ok(())
-        });
+        let result = workspace.transaction(|state| state.adjust_task(&id));
         match result {
             Ok(()) => {
                 self.invalidate_source();

@@ -444,6 +444,51 @@ impl State {
         }
     }
 
+    /// Create a revision from the recorded task without changing another source draft.
+    pub fn adjust_task(&mut self, id: &str) -> Result<()> {
+        let task = self.task(id).context("任务不存在")?.clone();
+        ensure!(
+            task.handled_by.is_none(),
+            "此任务已有后续处理，请打开对应任务继续"
+        );
+        ensure!(
+            !matches!(
+                task.state,
+                TaskState::Running | TaskState::Pausing | TaskState::Queued
+            ),
+            "当前任务还在处理，请先暂停并等候当前步骤结束"
+        );
+        let mut draft = Draft::new(
+            task.plan.source.online,
+            task.plan.library_id.clone(),
+            task.plan.options.clone(),
+        );
+        draft.input = task.plan.source.input.clone();
+        draft.source = Some(task.plan.source);
+        draft.title = task.plan.title;
+        draft.custom_title = true;
+        draft.folder = task.plan.folder;
+        draft.subtitle = task.plan.subtitle;
+        draft.asr_service = task.plan.asr_service;
+        draft.ai_service = task.plan.ai_service;
+        draft.retry_of = Some(id.to_owned());
+        draft.overrides = [
+            Override::Provider,
+            Override::TextSource,
+            Override::Proofread,
+            Override::Summary,
+            Override::Vision,
+            Override::KeepVideo,
+            Override::Formats,
+        ]
+        .into_iter()
+        .collect();
+        draft.base_config = Some(task.plan.config);
+        self.current_draft = draft.id.clone();
+        self.drafts.push(draft);
+        Ok(())
+    }
+
     pub fn enqueue(&mut self, plan: TaskPlan, parent: Option<String>) -> Result<(String, bool)> {
         ensure!(
             !plan.source_id.is_empty() && !plan.title.trim().is_empty(),
@@ -1737,6 +1782,138 @@ mod tests {
         state.recover();
         assert_eq!(state.task(&id).unwrap().state, TaskState::Paused);
         assert!(state.next_task().is_none());
+    }
+
+    #[test]
+    fn continuing_and_adjusting_a_failed_task_preserves_another_draft_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let mut original = plan(&ws.state.default_library);
+        original.title = "A 的手工名称".into();
+        original.folder = Some(42);
+        original.subtitle = Some(dir.path().join("french.srt"));
+        original.options.llm = true;
+        original.options.vision = true;
+        original.options.formats = [false, false, true];
+        original.asr_service = Some("asr-version-a".into());
+        original.ai_service = Some("ai-version-a".into());
+        original.config.defaults.asr_model = Some("qwen3-0.6b".into());
+        let id = ws.state.enqueue(original.clone(), None).unwrap().0;
+        ws.state.task_mut(&id).unwrap().state = TaskState::Running;
+        ws.state.fresh_draft(true, Default::default(), None);
+        let b = ws.state.draft_mut().unwrap();
+        b.change_source("online-B".into());
+        b.title = "B 的未提交计划".into();
+        b.folder = Some(7);
+        b.options.summarize = true;
+        let b = b.clone();
+        assert!(ws.state.adjust_task(&id).is_err());
+        assert_eq!(ws.state.draft().unwrap(), &b);
+
+        ws.state.task_mut(&id).unwrap().state = TaskState::NeedsAttention;
+        ws.state.set_intent(&id, Intent::Run).unwrap();
+        assert!(ws.state.next_task().unwrap().plan == original);
+        assert_eq!(ws.state.draft().unwrap(), &b);
+        ws.state.set_intent(&id, Intent::Pause).unwrap();
+        ws.transaction(|state| state.adjust_task(&id)).unwrap();
+        let revised = ws.state.draft_mut().unwrap();
+        let options = revised.options.clone();
+        revised.inherit(&ConversionOptions::default());
+        assert_eq!(revised.options, options);
+        assert_eq!(revised.input, original.source.input);
+        assert_eq!(revised.source.as_ref(), Some(&original.source));
+        assert_eq!(revised.title, original.title);
+        assert_eq!(revised.folder, original.folder);
+        assert_eq!(revised.library_id, original.library_id);
+        assert_eq!(revised.subtitle, original.subtitle);
+        assert_eq!(revised.asr_service, original.asr_service);
+        assert_eq!(revised.ai_service, original.ai_service);
+        assert_eq!(revised.retry_of.as_deref(), Some(id.as_str()));
+        assert!(revised.base_config.as_ref() == Some(&original.config));
+        let revision = revised.clone();
+        drop(ws);
+        let mut reopened = test_workspace(dir.path());
+        assert_eq!(reopened.state.draft().unwrap(), &revision);
+        assert_eq!(
+            reopened.state.drafts.iter().find(|d| d.id == b.id),
+            Some(&b)
+        );
+        assert!(reopened.state.task(&id).unwrap().plan == original);
+        assert_eq!(reopened.state.task(&id).unwrap().state, TaskState::Paused);
+        let mut adjusted = original;
+        adjusted.options.summarize = true;
+        adjusted.config.llm.summarize = true;
+        let (followup, created) = reopened
+            .state
+            .enqueue(adjusted.clone(), Some(id.clone()))
+            .unwrap();
+        assert!(created);
+        assert_eq!(
+            reopened.state.enqueue(adjusted, Some(id.clone())).unwrap(),
+            (followup, false)
+        );
+        assert!(reopened.state.adjust_task(&id).is_err());
+        assert_eq!(
+            reopened.state.drafts.iter().find(|d| d.id == b.id),
+            Some(&b)
+        );
+    }
+
+    #[test]
+    fn cold_start_resumes_only_unstopped_work_and_keeps_unknown_requests_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let mut ids = Vec::new();
+        for (index, intent) in [
+            Intent::Run,
+            Intent::Pause,
+            Intent::Quit,
+            Intent::Cancel,
+            Intent::Run,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut plan = plan(&ws.state.default_library);
+            plan.source_id = format!("source-{index}");
+            plan.source.input = format!("video-{index}.mp4");
+            let id = ws.state.enqueue(plan, None).unwrap().0;
+            let task = ws.state.task_mut(&id).unwrap();
+            task.state = TaskState::Running;
+            task.intent = intent;
+            if index == 4 {
+                write_unknown(task, 1);
+            }
+            ids.push(id);
+        }
+        ws.transaction(|_| Ok(())).unwrap();
+        let plans = ws
+            .state
+            .tasks
+            .iter()
+            .map(|task| task.plan.clone())
+            .collect::<Vec<_>>();
+        drop(ws);
+        let reopened = test_workspace(dir.path());
+        for ((id, expected), plan) in ids
+            .iter()
+            .zip([
+                TaskState::Queued,
+                TaskState::Paused,
+                TaskState::Paused,
+                TaskState::Cancelled,
+                TaskState::Uncertain,
+            ])
+            .zip(plans)
+        {
+            let task = reopened.state.task(id).unwrap();
+            assert_eq!(task.state, expected);
+            assert!(task.plan == plan);
+        }
+        assert_eq!(reopened.state.next_task().unwrap().id, ids[0]);
+        let unknown = reopened.state.task(&ids[4]).unwrap();
+        assert_eq!(unknown.blocked.len(), 1);
+        assert!(unknown.unread && unknown.resend.is_empty());
     }
 
     fn test_workspace(dir: &Path) -> Workspace {
