@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import shutil
 import subprocess
 import tomllib
@@ -14,6 +15,21 @@ from dmg import build_install_dmg
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT.parent
+
+
+def macos_versions(version):
+    """Keep the product SemVer while using Apple's bundle version syntax."""
+    match = re.fullmatch(r"(\d+\.\d+\.\d+)(?:-(alpha|beta|rc)\.([1-9]\d*))?", version)
+    if not match:
+        raise ValueError(f"Unsupported macOS release version: {version}")
+    short, channel, number = match.groups()
+    build = short
+    if channel:
+        if int(number) > 255:
+            raise ValueError("Apple prerelease build numbers must be in 1..255")
+        build += {"alpha": "a", "beta": "b", "rc": "fc"}[channel] + number
+    return {"CFBundleShortVersionString": short, "CFBundleVersion": build,
+            "Course2mdVersion": version}
 
 
 def run(*args):
@@ -70,7 +86,7 @@ def main():
                 "CFBundleName": "course2md", "CFBundleDisplayName": "course2md",
                 "CFBundleIdentifier": "dev.course2md.desktop",
                 "CFBundleExecutable": "course2md-desktop", "CFBundlePackageType": "APPL",
-                "CFBundleVersion": version, "CFBundleShortVersionString": version,
+                **macos_versions(version),
                 "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
                 "LSMinimumSystemVersion": "14.0", "CFBundleIconFile": "course2md.icns",
             }, stream)

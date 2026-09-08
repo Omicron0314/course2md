@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish after every build passes (for example v1.6.0)'
+        description: 'Version to publish after every build passes (for example v2.0.0-alpha.1)'
         required: true
 
 permissions:
@@ -29,6 +29,10 @@ jobs:
           assert root == desktop and os.environ['RELEASE_VERSION'] == 'v' + root
           assert pathlib.Path('docs/releases', 'v' + root + '.md').is_file()
           PYCODE
+      - name: Test release packaging
+        run: |
+          python3 -m unittest discover -s packaging -p 'test_*.py'
+          python3 -m unittest discover -s desktop/scripts -p 'test_*.py'
   build:
     needs: validate
     strategy:
@@ -211,3 +215,5 @@ jobs:
           body_path: docs/releases/${{ inputs.version || github.ref_name }}.md
           fail_on_unmatched_files: true
           generate_release_notes: true
+          prerelease: ${{ contains(inputs.version || github.ref_name, '-') }}
+          make_latest: ${{ contains(inputs.version || github.ref_name, '-') && 'false' || 'true' }}

@@ -5,6 +5,8 @@ import os
 import re
 import urllib.request
 
+VERSION = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc)\.([1-9]\d*))?")
+
 
 def api(path):
     request = urllib.request.Request(
@@ -20,25 +22,33 @@ def main():
     version = os.environ.get("REQUESTED_VERSION", "")
     if not version:
         branch = os.environ.get("RELEASE_BRANCH", "")
-        if re.fullmatch(r"v\d+\.\d+\.\d+", branch):
+        if branch.startswith("v") and VERSION.fullmatch(branch[1:]):
             version = branch
         else:
             sha = os.environ.get("RELEASE_SHA", "")
             releases = api("releases?per_page=100")
             matches = [r for r in releases if sha and r["target_commitish"] == sha
-                       and not r["draft"] and not r["prerelease"]]
+                       and not r["draft"]]
             if len(matches) != 1:
                 raise SystemExit("Cannot identify one published release for the triggering commit")
             version = matches[0]["tag_name"]
     version = version.removeprefix("v")
-    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        raise SystemExit("Expected a stable version such as 1.7.0")
+    match = VERSION.fullmatch(version)
+    if not match:
+        raise SystemExit("Expected a version such as 1.7.0 or 2.0.0-alpha.1")
+    channel = match[4] or "stable"
     release = api(f"releases/tags/v{version}")
-    if release["draft"] or release["prerelease"]:
-        raise SystemExit("Package channels only publish stable releases")
+    if release["draft"]:
+        raise SystemExit("Package channels cannot publish draft releases")
+    if release["prerelease"] != (channel != "stable"):
+        raise SystemExit("Release prerelease flag does not match its version")
+    publish = channel == "stable" or os.environ.get("ALLOW_PRERELEASE") == "true"
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-        output.write(f"version={version}\n")
-    print(f"Updating GUI and CLI packages to {version}")
+        output.write(f"version={version}\nchannel={channel}\npublish={str(publish).lower()}\n")
+    if publish:
+        print(f"Updating {channel} GUI and CLI packages to {version}")
+    else:
+        print(f"Skipping prerelease {version}: this package channel only publishes stable releases")
 
 
 if __name__ == "__main__":

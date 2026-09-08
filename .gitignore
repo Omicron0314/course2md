@@ -5,6 +5,7 @@ models/
 *.mp4
 .DS_Store
 .venv/
+__pycache__/
 out-bv/
 out-bench/
 out-gpu/

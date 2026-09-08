@@ -1,4 +1,4 @@
-cask "course2md-gui" do
+cask "@CASK_TOKEN@" do
   version "@VERSION@"
   sha256 "@SHA_DMG@"
 
@@ -6,6 +6,8 @@ cask "course2md-gui" do
   name "course2md"
   desc "Turn course videos into illustrated notes"
   homepage "https://github.com/mizorewww/course2md"
+@CONFLICTS@
+@LIVECHECK@
 
   depends_on arch: :arm64
   depends_on macos: :sequoia
