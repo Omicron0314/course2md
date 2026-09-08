@@ -12,7 +12,6 @@ struct State {
     container: FocusHandle,
     focused: Option<FocusHandle>,
     geometry: Option<(Pixels, Size<Pixels>)>,
-    mounted: bool,
 }
 
 impl RevealFocus {
@@ -31,48 +30,46 @@ impl RenderOnce for RevealFocus {
             container: cx.focus_handle(),
             focused: None,
             geometry: None,
-            mounted: false,
         });
         let focus = state.read(cx).container.clone();
-        // Read ancestry before prepaint moves reused dispatch subtrees out of the
-        // previous frame. During prepaint, contains_focused can otherwise miss them.
-        let focused = window
-            .focused(cx)
-            .filter(|_| focus.contains_focused(window, cx));
         div()
             .on_children_prepainted(move |bounds, window, cx| {
-                let Some(bounds) = bounds.first() else { return };
-                state.update(cx, |state, cx| {
-                    let geometry = (window.rem_size(), window.bounds().size);
-                    let reveal = focused.is_some()
-                        && (state.focused != focused || state.geometry != Some(geometry));
-                    state.focused = focused.clone();
-                    state.geometry = Some(geometry);
-                    if !state.mounted {
-                        state.mounted = true;
-                        window.defer(cx, |window, _| window.refresh());
-                    }
-                    if !reveal {
-                        return;
-                    }
-                    let viewport = self.scroll.bounds();
-                    if viewport.size.height <= px(0.) {
-                        return;
-                    }
-                    let delta = reveal_delta(
-                        f32::from(bounds.top()),
-                        f32::from(bounds.bottom()),
-                        f32::from(viewport.top()) + 8.,
-                        f32::from(viewport.bottom()) - 8.,
-                    );
-                    if delta != 0. {
-                        let scroll = self.scroll.clone();
-                        let offset = scroll.offset() + point(px(0.), px(delta));
-                        window.defer(cx, move |window, _| {
-                            scroll.set_offset(offset);
+                let Some(bounds) = bounds.first().copied() else {
+                    return;
+                };
+                let state = state.clone();
+                let scroll = self.scroll.clone();
+                let geometry = (window.rem_size(), window.bounds().size);
+                // Focus ancestry is only reliable after this frame has committed:
+                // prepaint moves reused subtrees out of the previous dispatch tree.
+                // This also covers a focus change while a saved-status row disappears.
+                window.defer(cx, move |window, cx| {
+                    let focused = window
+                        .focused(cx)
+                        .filter(|_| state.read(cx).container.contains_focused(window, cx));
+                    state.update(cx, |state, _| {
+                        let reveal = focused.is_some()
+                            && (state.focused != focused || state.geometry != Some(geometry));
+                        state.focused = focused;
+                        state.geometry = Some(geometry);
+                        if !reveal {
+                            return;
+                        }
+                        let viewport = scroll.bounds();
+                        if viewport.size.height <= px(0.) {
+                            return;
+                        }
+                        let delta = reveal_delta(
+                            f32::from(bounds.top()),
+                            f32::from(bounds.bottom()),
+                            f32::from(viewport.top()) + 8.,
+                            f32::from(viewport.bottom()) - 8.,
+                        );
+                        if delta != 0. {
+                            scroll.set_offset(scroll.offset() + point(px(0.), px(delta)));
                             window.refresh();
-                        });
-                    }
+                        }
+                    });
                 });
             })
             .id(self.id)
