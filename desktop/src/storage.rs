@@ -736,12 +736,16 @@ mod tests {
     }
     #[test]
     fn relocation_changes_only_paths_inside_the_source() {
-        let mut outside = PathBuf::from("/external/video.mp4");
-        let mut inside = PathBuf::from("/old/work/task");
-        relocate_path(&mut outside, Path::new("/old"), Path::new("/new"));
-        relocate_path(&mut inside, Path::new("/old"), Path::new("/new"));
-        assert_eq!(outside, PathBuf::from("/external/video.mp4"));
-        assert_eq!(inside, PathBuf::from("/new/work/task"));
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("old");
+        let new = directory.path().join("new");
+        let external = directory.path().join("external/video.mp4");
+        let mut outside = external.clone();
+        let mut inside = old.join("work/task");
+        relocate_path(&mut outside, &old, &new);
+        relocate_path(&mut inside, &old, &new);
+        assert_eq!(outside, external);
+        assert_eq!(inside, new.join("work/task"));
     }
 
     fn fixture() -> (tempfile::TempDir, PreparedMove) {

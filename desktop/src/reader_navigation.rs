@@ -219,7 +219,9 @@ mod tests {
     fn source_links_do_not_invent_local_or_unknown_seek_support() {
         assert!(source_target("", false).is_none());
         assert!(source_target("javascript:alert(1)", false).is_none());
-        let local = source_target("/tmp/video.mp4", true).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let video = directory.path().join("video.mp4");
+        let local = source_target(video.to_str().unwrap(), true).unwrap();
         assert!(seek_url(&local, 12.).is_none());
         let unknown = source_target("https://video.example/watch", false).unwrap();
         assert!(seek_url(&unknown, 12.).is_none());
