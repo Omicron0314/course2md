@@ -846,13 +846,14 @@ pub fn read_subtitle(
             }
             .into());
         }
-        let file = tempfile::Builder::new()
+        let mut file = tempfile::Builder::new()
             .suffix(".srt")
             .tempfile_in(&cache)?;
-        course2md::checkpoint::atomic_write(
-            file.path(),
-            course2md::subtitle::to_srt(&events).as_bytes(),
-        )?;
+        // The unique file is not published to a draft until keep() succeeds.
+        // Write through its existing handle: Windows cannot replace the open file.
+        use std::io::Write;
+        file.write_all(course2md::subtitle::to_srt(&events).as_bytes())?;
+        file.as_file().sync_all()?;
         ensure!(!cancel.load(Ordering::Relaxed), "已取消读取");
         Ok(CachedSubtitle {
             source_identity: source.identity.clone(),
@@ -973,6 +974,11 @@ mod tests {
         assert_eq!(cached.source_identity, source.identity);
         assert_eq!(cached.events[0].text, "Bonjour le monde");
         assert_ne!(cached.path, path);
+        assert!(
+            course2md::subtitle::read_subtitle_text(&cached.path)
+                .unwrap()
+                .contains("Bonjour le monde")
+        );
         assert!(
             course2md::subtitle::read_subtitle_text(&path)
                 .unwrap()
