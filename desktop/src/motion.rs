@@ -15,11 +15,11 @@ pub fn ease_out(t: f32) -> f32 {
 pub fn enter<E: IntoElement + Styled + 'static>(
     id: impl Into<ElementId>,
     view: E,
-    cx: &App,
+    _cx: &App,
 ) -> AnyElement {
-    if cx.reduce_motion() {
-        return view.into_any_element();
-    }
+    // Keep the same ancestor ID chain when the preference changes. GPUI's
+    // AnimationElement already paints the final state without scheduling frames
+    // under reduce-motion; removing it here remounts every keyed child.
     view.with_animation(
         id,
         Animation::new(Duration::from_millis(ENTER_MS))
@@ -49,13 +49,19 @@ pub fn spinner(id: impl Into<ElementId>, cx: &App) -> AnyElement {
 }
 
 pub fn value(id: impl Into<ElementId>, target: f32, window: &mut Window, cx: &mut App) -> f32 {
-    gpui_base::transition(
-        id.into(),
+    let id = id.into();
+    #[cfg(feature = "performance")]
+    let trace_id = id.clone();
+    let value = gpui_base::transition(
+        id,
         target,
         gpui_base::Transition::new(Duration::from_millis(VALUE_MS)).ease(ease_out),
         window,
         cx,
-    )
+    );
+    #[cfg(feature = "performance")]
+    crate::performance::record_motion(trace_id, target, value);
+    value
 }
 
 pub fn progress(
@@ -105,11 +111,108 @@ pub fn disclosure(
 
 #[cfg(test)]
 mod tests {
-    use super::{disclosure, ease_out};
+    use super::{disclosure, ease_out, enter, value};
     use gpui::{
-        Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-        Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+        App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+        Render, RenderOnce, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
     };
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    #[derive(IntoElement)]
+    struct StatefulChild {
+        target: f32,
+        mounts: Rc<Cell<usize>>,
+        sample: Rc<Cell<f32>>,
+    }
+
+    impl RenderOnce for StatefulChild {
+        fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+            window.use_keyed_state("motion-child-state", cx, |_, _| {
+                self.mounts.set(self.mounts.get() + 1);
+            });
+            self.sample
+                .set(value("motion-child-value", self.target, window, cx));
+            div().size(px(40.))
+        }
+    }
+
+    struct PreferenceHarness {
+        target: f32,
+        mounts: Rc<Cell<usize>>,
+        sample: Rc<Cell<f32>>,
+    }
+
+    impl Render for PreferenceHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            enter(
+                "motion-preference-parent",
+                div().child(StatefulChild {
+                    target: self.target,
+                    mounts: self.mounts.clone(),
+                    sample: self.sample.clone(),
+                }),
+                cx,
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn reduce_motion_preserves_child_state_and_later_value_transitions(cx: &mut TestAppContext) {
+        let mounts = Rc::new(Cell::new(0));
+        let sample = Rc::new(Cell::new(-1.));
+        let (view, cx) = cx.add_window_view({
+            let mounts = mounts.clone();
+            let sample = sample.clone();
+            move |_, _| PreferenceHarness {
+                target: 0.,
+                mounts,
+                sample,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(mounts.get(), 1);
+        assert_eq!(sample.get(), 0.);
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.target = 1.;
+                cx.set_reduce_motion(true);
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(mounts.get(), 1, "preference must not remount the child");
+        assert_eq!(
+            sample.get(),
+            1.,
+            "reduced motion paints the target immediately"
+        );
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.target = 0.;
+                cx.set_reduce_motion(false);
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(mounts.get(), 1);
+        assert_eq!(
+            sample.get(),
+            1.,
+            "restored motion retains the previous target"
+        );
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        assert!(
+            sample.get() > 0. && sample.get() < 1.,
+            "the next change must paint an intermediate value"
+        );
+        assert_eq!(mounts.get(), 1);
+    }
 
     struct RevealHarness {
         open: bool,
