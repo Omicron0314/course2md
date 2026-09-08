@@ -25,7 +25,11 @@ actions!(
         FitImage,
         CloseImage,
         NextReaderView,
-        PreviousReaderView
+        PreviousReaderView,
+        ReaderPageUp,
+        ReaderPageDown,
+        ReaderStart,
+        ReaderEnd
     ]
 );
 
@@ -67,6 +71,8 @@ struct ImageViewer {
     focus: FocusHandle,
 }
 pub(crate) struct State {
+    controls_scroll: ScrollHandle,
+    toc_scroll: ScrollHandle,
     view_focus: [FocusHandle; 2],
     find: Entity<InputState>,
     focus: FocusHandle,
@@ -124,8 +130,14 @@ impl State {
             KeyBinding::new("escape", CloseImage, Some("ReaderImage")),
             KeyBinding::new("right", NextReaderView, Some("ReaderViews")),
             KeyBinding::new("left", PreviousReaderView, Some("ReaderViews")),
+            KeyBinding::new("pageup", ReaderPageUp, Some("CourseReader && !Input")),
+            KeyBinding::new("pagedown", ReaderPageDown, Some("CourseReader && !Input")),
+            KeyBinding::new("home", ReaderStart, Some("CourseReader && !Input")),
+            KeyBinding::new("end", ReaderEnd, Some("CourseReader && !Input")),
         ]);
         Self {
+            controls_scroll: ScrollHandle::new(),
+            toc_scroll: ScrollHandle::new(),
             view_focus: std::array::from_fn(|_| cx.focus_handle()),
             find,
             focus: cx.focus_handle(),
@@ -380,6 +392,12 @@ fn paragraph(
         .child(ReaderText::new(id, text, order as u64, highlights))
 }
 impl Desktop {
+    fn scroll_reader_page(&mut self, direction: f32, cx: &mut Context<Self>) {
+        let step = self.reader_scroll.bounds().size.height * 0.85 * direction;
+        let offset = self.reader_scroll.offset() + point(px(0.), step);
+        self.reader_scroll.set_offset(offset);
+        cx.notify();
+    }
     pub fn save_library_presentation(&mut self, cx: &mut Context<Self>) {
         let mut preferences = self.preferences.application().clone();
         preferences.desktop = self.desktop_settings.clone();
@@ -579,6 +597,9 @@ impl Desktop {
             return;
         }
         self.reader_ui.loaded = Some(preview.course.dir.clone());
+        self.reader_ui
+            .controls_scroll
+            .set_offset(point(px(0.), px(0.)));
         self.reader_ui.frames.clear();
         self.reader_ui.versions.clear();
         self.reader_ui.issues.clear();
@@ -1093,6 +1114,9 @@ impl Desktop {
             return theme::accessible_text("opening-note", "正在打开笔记…").into_any_element();
         };
         self.ensure_reader_data(cx);
+        for (index, focus) in self.reader_ui.view_focus.iter_mut().enumerate() {
+            *focus = focus.clone().tab_stop(index == self.result_tab);
+        }
         if self.reader_ui.clear_find {
             self.reader_ui.clear_find = false;
             self.reader_ui
@@ -1122,6 +1146,18 @@ impl Desktop {
             )
             .on_action(cx.listener(|this, _: &NextMatch, _, cx| this.move_reader_match(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousMatch, _, cx| this.move_reader_match(-1, cx)))
+            .on_action(cx.listener(|this, _: &ReaderPageUp, _, cx| this.scroll_reader_page(1., cx)))
+            .on_action(
+                cx.listener(|this, _: &ReaderPageDown, _, cx| this.scroll_reader_page(-1., cx)),
+            )
+            .on_action(cx.listener(|this, _: &ReaderStart, _, cx| {
+                this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ReaderEnd, _, cx| {
+                this.reader_scroll.scroll_to_bottom();
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &CloseFind, window, cx| {
                 if this.reader_ui.find_open {
                     this.close_reader_find(window, cx);
@@ -1133,13 +1169,21 @@ impl Desktop {
             .min_h_0()
             .w_full()
             .gap_3();
-        let mut page = v_flex().id("reader-controls").w_full().min_w_0().gap_3().flex_shrink_0();
-        // 大字号下头区不再压进 34% 滚动帽：全部展开，正文区自己滚。
-        if self.preferences.application().font_scale < 1.5 {
-            page = page
-                .max_h(px((f32::from(window.bounds().size.height) * 0.34).max(140.)))
-                .overflow_y_scroll();
-        }
+        // Keep the article visible even when large text wraps the metadata and
+        // toolbar. Each focusable control reveals itself within this header.
+        let controls_scroll = self.reader_ui.controls_scroll.clone();
+        let reveal = |id: &'static str, child: AnyElement| {
+            crate::focus_scroll::RevealFocus::new(id, child, controls_scroll.clone()).inline()
+        };
+        let mut page = v_flex()
+            .id("reader-controls")
+            .w_full()
+            .min_w_0()
+            .gap_3()
+            .flex_shrink_0()
+            .max_h(relative(0.45))
+            .overflow_y_scroll()
+            .track_scroll(&controls_scroll);
         // v2 reader head (docs/ux-mock renderReader): back row, title, two meta
         // lines and the capsule toolbar sit above the scrolling article.
         let outline: Vec<(f64, String)> = preview
@@ -1182,14 +1226,16 @@ impl Desktop {
                 .gap_3()
                 .items_center()
                 .flex_wrap()
-                .child(
-                    quiet("reader-back")
+                .child(reveal(
+                    "reveal-reader-back",
+                    (quiet("reader-back")
                         .icon(IconName::ArrowLeft)
                         .label("我的笔记")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.navigate(this.result_origin, cx)
-                        })),
-                )
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.navigate(this.result_origin, cx)),
+                        ))
+                    .into_any_element(),
+                ))
                 .child(
                     theme::accessible_text("reader-back-hint", "保留当前筛选与阅读位置")
                         .text_size(TEXT_AUX)
@@ -1249,16 +1295,18 @@ impl Desktop {
         if let Some(source) = self.reader_source() {
             match &source {
                 nav::SourceTarget::Web(url) => {
-                    meta_facts = meta_facts.child(
-                        quiet("reader-source")
+                    meta_facts = meta_facts.child(reveal(
+                        "reveal-reader-source",
+                        (quiet("reader-source")
                             .icon(icons::external_link())
                             .label("打开原视频")
                             .min_h(rems(1.6))
                             .accessibility_label(format!("打开原视频：{url}"))
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.open_reader_source(None, cx)),
-                            ),
-                    );
+                            ))
+                        .into_any_element(),
+                    ));
                 }
                 nav::SourceTarget::Local(path) => {
                     let exists = path.is_file();
@@ -1273,14 +1321,16 @@ impl Desktop {
                             .min_w_0(),
                         )
                         .when(exists, |row| {
-                            row.child(
-                                quiet("reader-source")
+                            row.child(reveal(
+                                "reveal-reader-source",
+                                (quiet("reader-source")
                                     .label("打开原视频")
                                     .min_h(rems(1.6))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.open_reader_source(None, cx)
-                                    })),
-                            )
+                                    })))
+                                .into_any_element(),
+                            ))
                         })
                         .when(!exists, |row| {
                             row.child(
@@ -1292,8 +1342,9 @@ impl Desktop {
                                 .text_color(rgb(GRAY)),
                             )
                         })
-                        .child(
-                            quiet("relocate-reader-source")
+                        .child(reveal(
+                            "reveal-relocate-reader-source",
+                            (quiet("relocate-reader-source")
                                 .label(if self.reader_ui.source_loading {
                                     "正在核对视频…"
                                 } else {
@@ -1303,8 +1354,9 @@ impl Desktop {
                                 .disabled(self.reader_ui.source_loading)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.relocate_reader_source(window, cx)
-                                })),
-                        );
+                                })))
+                            .into_any_element(),
+                        ));
                 }
             }
         }
@@ -1327,8 +1379,9 @@ impl Desktop {
                 let weak = cx.weak_entity();
                 let versions = self.reader_ui.versions.clone();
                 let current = preview.course.dir.clone();
-                meta_version = meta_version.child(
-                    quiet("choose-note-version")
+                meta_version = meta_version.child(reveal(
+                    "reveal-choose-note-version",
+                    (quiet("choose-note-version")
                         .label("选择版本")
                         .min_h(rems(1.6))
                         .disabled(self.reading)
@@ -1351,11 +1404,13 @@ impl Desktop {
                                 ));
                             }
                             menu
-                        }),
-                );
+                        }))
+                    .into_any_element(),
+                ));
             }
-            meta_version = meta_version.child(
-                quiet("reader-information")
+            meta_version = meta_version.child(reveal(
+                "reveal-reader-information",
+                (quiet("reader-information")
                     .label(if self.reader_ui.info_open {
                         "收起课程信息"
                     } else {
@@ -1365,13 +1420,14 @@ impl Desktop {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.reader_ui.info_open = !this.reader_ui.info_open;
                         cx.notify();
-                    })),
-            );
+                    })))
+                .into_any_element(),
+            ));
             page = page.child(meta_version);
         }
-        let mut toolbar = h_flex().gap_2().flex_wrap().items_center().child(
-            gpui_base::Tabs::new("reader-tabs")
-                .tab_group()
+        let mut toolbar = h_flex().gap_2().flex_wrap().items_center().child(reveal(
+            "reveal-reader-tabs",
+            (gpui_base::Tabs::new("reader-tabs")
                 .key_context("ReaderViews")
                 .on_action(cx.listener(|this, _: &NextReaderView, window, cx| {
                     this.select_reader_view((this.result_tab + 1) % 2, window, cx)
@@ -1403,6 +1459,8 @@ impl Desktop {
                                 .py(px(2.))
                                 .text_size(TEXT_BODY)
                                 .rounded(RADIUS_PILL)
+                                .border_2()
+                                .border_color(transparent_black())
                                 .text_color(rgb(if selected { INK } else { GRAY }))
                                 .when(selected, |tab| {
                                     tab.bg(rgb(SURFACE))
@@ -1415,20 +1473,24 @@ impl Desktop {
                                     this.select_reader_view(index, window, cx)
                                 }))
                         }),
-                ),
-        );
+                ))
+            .into_any_element(),
+        ));
         toolbar = toolbar.child(div().flex_1());
-        toolbar = toolbar.child(
-            quiet("find-note")
+        toolbar = toolbar.child(reveal(
+            "reveal-find-note",
+            (quiet("find-note")
                 .icon(icons::search())
                 .label("查找")
                 .accessibility_label("在笔记中查找，Command F")
-                .on_click(cx.listener(|this, _, window, cx| this.open_reader_find(window, cx))),
-        );
+                .on_click(cx.listener(|this, _, window, cx| this.open_reader_find(window, cx))))
+            .into_any_element(),
+        ));
         if !headings.is_empty() {
             let toc_on = self.reader_ui.toc_open;
-            toolbar = toolbar.child(
-                control("note-contents")
+            toolbar = toolbar.child(reveal(
+                "reveal-note-contents",
+                (control("note-contents")
                     .rounded(RADIUS_PILL)
                     .min_h(rems(2.286))
                     .px(px(12.))
@@ -1459,12 +1521,14 @@ impl Desktop {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.reader_ui.toc_open = !this.reader_ui.toc_open;
                         cx.notify();
-                    })),
-            );
+                    })))
+                .into_any_element(),
+            ));
         }
         let copy_weak = cx.entity().downgrade();
-        toolbar = toolbar.child(
-            outline_pill("copy-note")
+        toolbar = toolbar.child(reveal(
+            "reveal-copy-note",
+            (outline_pill("copy-note")
                 .icon(icons::content_copy())
                 .label("复制纯文本")
                 .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
@@ -1494,13 +1558,15 @@ impl Desktop {
                                     cx.notify();
                                 }
                             });
-                        },
-                    ))
-                }),
-        );
+                        }),
+                    )
+                }))
+            .into_any_element(),
+        ));
         let export_weak = cx.entity().downgrade();
-        toolbar = toolbar.child(
-            outline_pill("export-note")
+        toolbar = toolbar.child(reveal(
+            "reveal-export-note",
+            (outline_pill("export-note")
                 .icon(icons::file_upload())
                 .label(if self.exporting {
                     "正在导出…"
@@ -1532,10 +1598,12 @@ impl Desktop {
                         ));
                     }
                     menu
-                }),
-        );
-        toolbar = toolbar.child(
-            control("note-files")
+                }))
+            .into_any_element(),
+        ));
+        toolbar = toolbar.child(reveal(
+            "reveal-note-files",
+            (control("note-files")
                 .ghost()
                 .rounded_full()
                 .icon(IconName::FolderOpen)
@@ -1544,8 +1612,9 @@ impl Desktop {
                     if let Some(preview) = &this.preview {
                         cx.reveal_path(&preview.course.dir);
                     }
-                })),
-        );
+                })))
+            .into_any_element(),
+        ));
         page = page.child(toolbar);
         if self.reader_ui.info_open
             && let Some(manifest) = &preview.course.manifest
@@ -1622,10 +1691,14 @@ impl Desktop {
                             "newer-note-version",
                             "这份笔记已有新版。当前阅读位置保留在本版。",
                         ))
-                        .child(control("open-newer-version").label("查看新版").on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.open_reader_version(newer.clone(), cx)
-                            }),
+                        .child(reveal(
+                            "reveal-open-newer-version",
+                            (control("open-newer-version").label("查看新版").on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.open_reader_version(newer.clone(), cx)
+                                }),
+                            ))
+                            .into_any_element(),
                         )),
                 );
             }
@@ -1653,17 +1726,16 @@ impl Desktop {
                     .min_h(rems(2.571))
                     .child(icons::search().size(px(16.)).text_color(rgb(GRAY)))
                     .child(
-                        div()
-                            .min_w(rems(6.))
-                            .flex_1()
-                            .child(
-                                Input::new(&self.reader_ui.find)
-                                    .aria_label("在这份笔记中查找")
-                                    .appearance(false)
-                                    .w_full()
-                                    .h_auto()
-                                    .min_h(rems(1.6)),
-                            ),
+                        div().min_w(rems(6.)).flex_1().child(reveal(
+                            "reveal-reader-find",
+                            (Input::new(&self.reader_ui.find)
+                                .aria_label("在这份笔记中查找")
+                                .appearance(false)
+                                .w_full()
+                                .h_auto()
+                                .min_h(rems(1.6)))
+                            .into_any_element(),
+                        )),
                     )
                     .when_some(status, |row, status: String| {
                         row.child(
@@ -1673,36 +1745,42 @@ impl Desktop {
                                 .flex_shrink_0(),
                         )
                     })
-                    .child(
-                        control("previous-match")
+                    .child(reveal(
+                        "reveal-previous-match",
+                        (control("previous-match")
                             .ghost()
                             .rounded_full()
                             .icon(IconName::ArrowUp)
                             .accessibility_label("上一处")
                             .disabled(count == 0)
-                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_match(-1, cx))),
-                    )
-                    .child(
-                        control("next-match")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.move_reader_match(-1, cx)),
+                            ))
+                        .into_any_element(),
+                    ))
+                    .child(reveal(
+                        "reveal-next-match",
+                        (control("next-match")
                             .ghost()
                             .rounded_full()
                             .icon(IconName::ArrowDown)
                             .accessibility_label("下一处")
                             .disabled(count == 0)
-                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_match(1, cx))),
-                    )
-                    .child(
-                        control("close-find")
+                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_match(1, cx))))
+                        .into_any_element(),
+                    ))
+                    .child(reveal(
+                        "reveal-close-find",
+                        (control("close-find")
                             .ghost()
                             .rounded_full()
                             .icon(IconName::Close)
                             .accessibility_label("关闭查找")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.close_reader_find(window, cx)
-                                }),
-                            ),
-                    ),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_reader_find(window, cx)
+                            })))
+                        .into_any_element(),
+                    )),
             );
             if let Some(found) = self
                 .reader_ui
@@ -1753,8 +1831,9 @@ impl Desktop {
                 });
             let mut actions = h_flex().gap_2().flex_wrap();
             if let Some(id) = task_id {
-                actions = actions.child(
-                    outline_pill("reader-view-incomplete-task")
+                actions = actions.child(reveal(
+                    "reveal-reader-view-incomplete-task",
+                    (outline_pill("reader-view-incomplete-task")
                         .label("查看任务")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.save_reading_position(cx);
@@ -1762,8 +1841,9 @@ impl Desktop {
                             // M4: 任务详情并入工作台输入盒；先回到工作台。
                             this.page = Page::New;
                             cx.notify();
-                        })),
-                );
+                        })))
+                    .into_any_element(),
+                ));
             }
             let has_details = preview.processing_issues.iter().any(|issue| {
                 issue
@@ -1773,8 +1853,9 @@ impl Desktop {
                     .is_some_and(|detail| !detail.trim().is_empty())
             });
             if has_details {
-                actions = actions.child(
-                    quiet("reader-processing-details")
+                actions = actions.child(reveal(
+                    "reveal-reader-processing-details",
+                    (quiet("reader-processing-details")
                         .label(if self.reader_ui.processing_details_open {
                             "收起处理详情"
                         } else {
@@ -1784,8 +1865,9 @@ impl Desktop {
                             this.reader_ui.processing_details_open =
                                 !this.reader_ui.processing_details_open;
                             cx.notify();
-                        })),
-                );
+                        })))
+                    .into_any_element(),
+                ));
             }
             problem = problem.child(actions);
             if self.reader_ui.processing_details_open {
@@ -1836,19 +1918,22 @@ impl Desktop {
         }
         if files_need_reload(&preview, &self.reader_ui.issues, &self.reader_ui.frames) {
             let course = preview.course.clone();
-            page = page.child(
-                outline_pill("reload-reader-files")
+            page = page.child(reveal(
+                "reveal-reload-reader-files",
+                (outline_pill("reload-reader-files")
                     .label("重新读取本版文件")
                     .self_start()
                     .disabled(self.reading)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.load_reader_version(course.clone(), true, cx)
-                    })),
-            );
+                    })))
+                .into_any_element(),
+            ));
         }
         if let Some(task) = self.reader_screenshot_retry() {
-            page = page.child(
-                outline_pill("reader-retry-screenshots")
+            page = page.child(reveal(
+                "reveal-reader-retry-screenshots",
+                (outline_pill("reader-retry-screenshots")
                     .label("仅补截图")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.save_reading_position(cx);
@@ -1858,8 +1943,9 @@ impl Desktop {
                             Vec::new(),
                             cx,
                         );
-                    })),
-            );
+                    })))
+                .into_any_element(),
+            ));
         }
         if let Some(path) = self
             .reader_ui
@@ -1872,13 +1958,15 @@ impl Desktop {
                 "已导出：{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             );
-            page = page.child(
-                control("reveal-reader-export")
+            page = page.child(reveal(
+                "reveal-reveal-reader-export",
+                (control("reveal-reader-export")
                     .ghost()
                     .label(label)
                     .accessibility_label(format!("在访达中显示导出文件：{}", path.display()))
-                    .on_click(move |_, _, cx| cx.reveal_path(&path)),
-            );
+                    .on_click(move |_, _, cx| cx.reveal_path(&path)))
+                .into_any_element(),
+            ));
         }
         // Find highlights group per block; the current match reads stronger.
         let mut find_marks: BTreeMap<usize, Vec<(Range<usize>, bool)>> = BTreeMap::new();
@@ -1941,6 +2029,11 @@ impl Desktop {
             .track_scroll(&self.reader_scroll)
             .gap_4()
             .py_2();
+        let article_scroll = self.reader_scroll.clone();
+        let reveal_article = |id: ElementId, child: AnyElement, full_width: bool| {
+            let view = crate::focus_scroll::RevealFocus::new(id, child, article_scroll.clone());
+            if full_width { view } else { view.inline() }
+        };
         let source = self.reader_source();
         if self.result_tab == 0 {
             let summary_paragraphs: Vec<(usize, String)> = preview
@@ -2071,13 +2164,16 @@ impl Desktop {
                                     })
                                     .children(heading)
                                     .when_some(url, |row, url| {
-                                        row.child(
-                                            quiet(("seek", index))
+                                        row.child(reveal_article(
+                                            ("reveal-seek", index).into(),
+                                            (quiet(("seek", index))
                                                 .label("从此处观看")
                                                 .min_h(rems(1.6))
                                                 .accessibility_label(format!("在原视频打开 {text}"))
-                                                .on_click(move |_, _, cx| cx.open_url(&url)),
-                                        )
+                                                .on_click(move |_, _, cx| cx.open_url(&url)))
+                                            .into_any_element(),
+                                            false,
+                                        ))
                                     }),
                             )
                             .children(
@@ -2150,8 +2246,9 @@ impl Desktop {
                             .border_color(rgb(CARD_LINE))
                             .rounded(RADIUS_CARD)
                             .overflow_hidden()
-                            .child(
-                                control(("note-image", index))
+                            .child(reveal_article(
+                                ("reveal-note-image", index).into(),
+                                (control(("note-image", index))
                                     .ghost()
                                     .p_0()
                                     .w_full()
@@ -2174,8 +2271,10 @@ impl Desktop {
                                         if let Some(index) = frame_index {
                                             this.open_reader_image(index, window, cx);
                                         }
-                                    })),
-                            )
+                                    })))
+                                .into_any_element(),
+                                true,
+                            ))
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -2200,12 +2299,15 @@ impl Desktop {
                                     ))
                                     .child(div().flex_1())
                                     .when_some(seek, |row, url| {
-                                        row.child(
-                                            quiet(("figure-watch", index))
+                                        row.child(reveal_article(
+                                            ("reveal-figure-watch", index).into(),
+                                            (quiet(("figure-watch", index))
                                                 .label("打开原视频从此处观看")
                                                 .min_h(rems(1.6))
-                                                .on_click(move |_, _, cx| cx.open_url(&url)),
-                                        )
+                                                .on_click(move |_, _, cx| cx.open_url(&url)))
+                                            .into_any_element(),
+                                            false,
+                                        ))
                                     }),
                             )
                             .into_any_element()
@@ -2242,8 +2344,9 @@ impl Desktop {
                     .rounded(RADIUS_CARD)
                     .overflow_hidden();
                 if let Some(path) = &frame.path {
-                    card = card.child(
-                        control(("screenshot", index))
+                    card = card.child(reveal_article(
+                        ("reveal-screenshot", index).into(),
+                        (control(("screenshot", index))
                             .ghost()
                             .p_0()
                             .w_full()
@@ -2263,8 +2366,10 @@ impl Desktop {
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_reader_image(index, window, cx)
-                            })),
-                    );
+                            })))
+                        .into_any_element(),
+                        true,
+                    ));
                 } else {
                     card = card.child(
                         div().p_3().child(
@@ -2329,38 +2434,47 @@ impl Desktop {
                 });
                 let mut actions = h_flex().gap_2().flex_wrap();
                 if let Some(body_index) = body_index {
-                    actions = actions.child(
-                        outline_pill(("frame-to-body", index))
+                    actions = actions.child(reveal_article(
+                        ("reveal-frame-to-body", index).into(),
+                        (outline_pill(("frame-to-body", index))
                             .label("在笔记中查看")
                             .min_h(rems(2.286))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.jump_reader_block(body_index, 0., cx)
-                            })),
-                    );
+                            })))
+                        .into_any_element(),
+                        false,
+                    ));
                 }
                 if let Some(url) = source.as_ref().and_then(|source| {
                     frame
                         .seconds
                         .and_then(|seconds| nav::seek_url(source, seconds))
                 }) {
-                    actions = actions.child(
-                        quiet(("frame-to-source", index))
+                    actions = actions.child(reveal_article(
+                        ("reveal-frame-to-source", index).into(),
+                        (quiet(("frame-to-source", index))
                             .label("从此处观看")
                             .min_h(rems(2.286))
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                    );
+                            .on_click(move |_, _, cx| cx.open_url(&url)))
+                        .into_any_element(),
+                        false,
+                    ));
                 } else if source.as_ref().is_some_and(|source| match source {
                     nav::SourceTarget::Web(_) => true,
                     nav::SourceTarget::Local(path) => path.is_file(),
                 }) {
-                    actions = actions.child(
-                        quiet(("frame-open-original", index))
+                    actions = actions.child(reveal_article(
+                        ("reveal-frame-open-original", index).into(),
+                        (quiet(("frame-open-original", index))
                             .label("打开原视频")
                             .min_h(rems(2.286))
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.open_reader_source(None, cx)),
-                            ),
-                    );
+                            ))
+                        .into_any_element(),
+                        false,
+                    ));
                 }
                 grid = grid.child(card.child(card_body.child(actions)));
             }
@@ -2414,11 +2528,12 @@ impl Desktop {
             .border_1()
             .border_color(rgb(CARD_LINE))
             .rounded(RADIUS_CARD)
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .track_scroll(&self.reader_ui.toc_scroll);
         panel = if side {
-            panel.w(rems(16.)).flex_shrink_0()
+            panel.w(rems(16.)).flex_shrink_0().max_h_full()
         } else {
-            panel.w_full().flex_shrink_0().max_h(px(240.))
+            panel.w_full().flex_shrink_0().max_h(relative(0.4))
         };
         panel = panel.child(
             theme::accessible_text("toc-title", "目录")
@@ -2429,7 +2544,8 @@ impl Desktop {
         for (index, label, seconds) in headings {
             let index = *index;
             let on = current == Some(index);
-            panel = panel.child(
+            panel = panel.child(crate::focus_scroll::RevealFocus::new(
+                ("reveal-toc-item", index),
                 control(("toc-item", index))
                     .ghost()
                     .w_full()
@@ -2473,7 +2589,8 @@ impl Desktop {
                             this.jump_reader_block(index, 0., cx)
                         }),
                     ),
-            );
+                self.reader_ui.toc_scroll.clone(),
+            ));
         }
         panel
     }
