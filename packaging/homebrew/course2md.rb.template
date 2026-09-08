@@ -4,6 +4,9 @@ class @FORMULA_CLASS@ < Formula
   version "@VERSION@"
   license "MIT"
 @KEG_ONLY@
+  depends_on "ffmpeg"
+  depends_on "yt-dlp"
+
   on_macos do
     on_arm do
       url "https://github.com/mizorewww/course2md/releases/download/v@VERSION@/course2md-macos-arm64"
@@ -30,9 +33,6 @@ class @FORMULA_CLASS@ < Formula
       sha256 "@SHA_LINUX_ARM@"
     end
   end
-
-  depends_on "ffmpeg"
-  depends_on "yt-dlp"
 
   def install
     binary = Dir["course2md-*"].first

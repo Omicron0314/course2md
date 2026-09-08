@@ -6,9 +6,8 @@ cask "@CASK_TOKEN@" do
   name "course2md"
   desc "Turn course videos into illustrated notes"
   homepage "https://github.com/mizorewww/course2md"
-@CONFLICTS@
 @LIVECHECK@
-
+@CONFLICTS@
   depends_on arch: :arm64
   depends_on macos: :sequoia
   depends_on formula: "ffmpeg"

@@ -47,7 +47,7 @@ def render(tap, version, fetch_checksum=checksum):
         "FORMULA_CLASS": "Course2md" + (f"AT{channel}" if suffix else ""),
         "CASK_TOKEN": cask_token,
         "KEG_ONLY": '\n  keg_only :versioned_formula\n' if suffix else "",
-        "CONFLICTS": f'\n  conflicts_with cask: [{", ".join(conflicts)}]',
+        "CONFLICTS": f'  conflicts_with cask: [{", ".join(conflicts)}]',
         "LIVECHECK": '\n  livecheck do\n    skip "Prerelease channel"\n  end\n' if suffix else "",
     }
     # Finish all downloads before touching either channel file. A missing asset
