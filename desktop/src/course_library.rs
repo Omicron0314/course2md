@@ -403,17 +403,15 @@ impl Desktop {
 
     pub fn library_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let scale = self.preferences.application().font_scale;
-        // Centered shell column: full width minus page padding, capped at COLUMN.
-        let column = COLUMN.0 * 14. * scale;
-        let content = (f32::from(window.bounds().size.width) - 48.)
-            .min(column)
-            .max(0.);
-        let columns = ((content + 16.) / (196. * scale + 16.)).floor().max(1.) as usize;
-        let card_w = (content - 16. * columns.saturating_sub(1) as f32) / columns as f32;
+        let rem = f32::from(window.rem_size());
+        let content = crate::views::shell_content_width(Page::Library, window);
+        // gap_4 is one rem, and card padding/menu spacing scales with that rem.
+        let columns = ((content + rem) / (16. * rem + rem)).floor().max(1.) as usize;
+        let card_w = (content - rem * columns.saturating_sub(1) as f32) / columns as f32;
         let layout = LibraryLayout {
             columns,
             chip_max: px(f32::min(224. * scale, 0.26 * content)),
-            card_chip_max: px((card_w - 76.).max(48.)),
+            card_chip_max: px((card_w - 5. * rem - 2.).max(48. * scale)),
             compact: content < 336. * scale,
         };
         let query = self.value(Field::Search, cx).to_lowercase();

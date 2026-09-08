@@ -2774,7 +2774,7 @@ impl Desktop {
         // otherwise (mock flex-wrap semantics).
         let toc_open = self.reader_ui.toc_open && !headings.is_empty() && self.result_tab == 0;
         let rem = f32::from(window.rem_size());
-        let content_width = (f32::from(window.bounds().size.width) - 48.).min(COLUMN.0 * rem);
+        let content_width = crate::views::shell_content_width(Page::Result, window);
         let toc_side = toc_open && content_width >= 40. * rem + 24.;
         let body = if toc_side {
             h_flex()
@@ -2826,7 +2826,7 @@ impl Desktop {
             .overflow_y_scroll()
             .track_scroll(&self.reader_ui.toc_scroll);
         panel = if side {
-            panel.w(rems(16.)).flex_shrink_0().max_h_full()
+            panel.w(rems(16.)).flex_shrink_0().h_full().min_h_0()
         } else {
             panel.w_full().flex_shrink_0().max_h(relative(0.4))
         };
@@ -2922,10 +2922,10 @@ impl Desktop {
             desktop,
         });
         let weak = cx.weak_entity();
-        let width = (f32::from(window.bounds().size.width) - 48.)
-            .min(1180.)
-            .max(280.);
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
+            let width = (f32::from(window.bounds().size.width) - 48.)
+                .min(1180.)
+                .max(280.);
             let closed = weak.clone();
             dialog
                 .title("查看截图")
@@ -3056,12 +3056,17 @@ impl Desktop {
             .gap_3()
             .h(px((f32::from(window.bounds().size.height) - 125.).max(160.)))
             .min_h_0()
-            .overflow_hidden()
+            .overflow_y_scroll()
             .track_scroll(&scroll)
             .child(
                 theme::accessible_text("image-title", label.clone())
                     .role(Role::Heading)
+                    .w_full()
+                    .min_w_0()
                     .flex_shrink_0()
+                    .whitespace_normal()
+                    .text_ellipsis()
+                    .line_clamp(2)
                     .text_lg(),
             )
             .child(
@@ -3168,7 +3173,7 @@ impl Desktop {
                     .border_color(color(HAIRLINE))
                     .rounded(RADIUS_CARD)
                     .flex_1()
-                    .min_h_0()
+                    .min_h(px(140.))
                     .w_full()
                     .overflow_x_scroll()
                     .overflow_y_scroll()

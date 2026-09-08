@@ -9,7 +9,8 @@ fn sample(palette: PaletteId) -> Div {
     // These are the selected palette's actual preview colors, not application chrome.
     div()
         .w_full()
-        .h(px(112.))
+        .h(px(96.))
+        .flex_shrink_0()
         .rounded_t(RADIUS_CARD)
         .overflow_hidden()
         .bg(rgb(p.canvas))
@@ -41,7 +42,7 @@ fn sample(palette: PaletteId) -> Div {
                 .child(
                     div()
                         .w(px(30.))
-                        .h(px(56.))
+                        .h(px(44.))
                         .rounded(px(5.))
                         .bg(rgb(p.inset))
                         .child(
@@ -56,9 +57,9 @@ fn sample(palette: PaletteId) -> Div {
                 .child(
                     v_flex()
                         .flex_1()
-                        .h(px(56.))
-                        .p(px(8.))
-                        .gap(px(6.))
+                        .h(px(44.))
+                        .p(px(6.))
+                        .gap(px(4.))
                         .rounded(px(6.))
                         .bg(rgb(p.surface))
                         .child(
@@ -99,11 +100,14 @@ impl Desktop {
             .into_iter()
             .filter(|id| id.is_dark() == dark)
             .collect::<Vec<_>>();
-        let width = f32::from(window.bounds().size.width);
-        let columns = if width < 1020. { 2 } else { 3 };
+        // The settings shell is narrower than the window, and text can scale.
+        // Size columns from that content area so names have room to wrap.
+        let rem = f32::from(window.rem_size());
+        let width = crate::views::shell_content_width(Page::Settings, window);
+        let columns = (((width + 16.) / (19. * rem + 16.)).floor() as usize).clamp(1, 3);
         let mut grid = v_flex().gap(px(16.));
         for row in cards.chunks(columns) {
-            let mut line = h_flex().w_full().gap(px(16.)).items_start();
+            let mut line = h_flex().w_full().gap(px(16.)).items_stretch();
             for &palette in row {
                 let selected = palette == current;
                 line = line.child(
@@ -128,40 +132,48 @@ impl Desktop {
                         .selected(selected)
                         .toggled(selected)
                         .child(
-                            v_flex().w_full().min_w_0().child(sample(palette)).child(
-                                h_flex()
-                                    .w_full()
-                                    .gap(px(8.))
-                                    .p(px(12.))
-                                    .items_center()
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap(px(4.))
-                                            .child(
-                                                div()
-                                                    .text_size(TEXT_BODY)
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(color(INK))
-                                                    .child(palette.name()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(TEXT_AUX)
-                                                    .text_color(color(GRAY))
-                                                    .child(palette.description()),
-                                            ),
-                                    )
-                                    .child(
-                                        if selected {
-                                            icons::check_circle().text_color(color(ACCENT))
-                                        } else {
-                                            icons::palette().text_color(color(FAINT))
-                                        }
-                                        .size(px(18.)),
-                                    ),
-                            ),
+                            v_flex()
+                                .w_full()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .text_left()
+                                .child(sample(palette))
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .flex_1()
+                                        .gap(px(8.))
+                                        .p(px(12.))
+                                        .items_center()
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap(px(4.))
+                                                .child(
+                                                    div()
+                                                        .text_size(TEXT_BODY)
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(color(INK))
+                                                        .child(palette.name()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(TEXT_AUX)
+                                                        .text_color(color(GRAY))
+                                                        .child(palette.description()),
+                                                ),
+                                        )
+                                        .child(
+                                            if selected {
+                                                icons::check_circle().text_color(color(ACCENT))
+                                            } else {
+                                                icons::palette().text_color(color(FAINT))
+                                            }
+                                            .size(px(18.))
+                                            .flex_shrink_0(),
+                                        ),
+                                ),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let mut next = this.application_edit_base();
@@ -215,26 +227,11 @@ impl Desktop {
             .w_full()
             .gap(px(24.))
             .child(
-                v_flex()
-                    .gap(px(8.))
-                    .child(
-                        h_flex()
-                            .gap(px(10.))
-                            .items_center()
-                            .child(icons::palette().size(px(22.)).text_color(color(ACCENT)))
-                            .child(
-                                accessible_text("appearance-heading", "外观")
-                                    .text_size(rems(1.714))
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            ),
-                    )
-                    .child(
-                        accessible_text(
-                            "appearance-description",
-                            "为工作台和笔记选择你的配色。更改会自动保存。",
-                        )
-                        .text_color(color(GRAY)),
-                    ),
+                accessible_text(
+                    "appearance-description",
+                    "为工作台和笔记选择你的配色。更改会自动保存。",
+                )
+                .text_color(color(GRAY)),
             )
             .child(
                 v_flex()

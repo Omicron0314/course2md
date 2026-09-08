@@ -3,26 +3,36 @@ use super::*;
 use crate::theme::*;
 use gpui_component::button::*;
 
-/// Every chrome row and page body sits in this one centered column.
-fn shell_column() -> Div {
-    shell_column_at(COLUMN)
-}
+const SHELL_GUTTER: f32 = 24.;
+const WIDE_COLUMN: Rems = rems(82.);
 
 fn shell_column_for(page: Page) -> Div {
+    shell_column_at(shell_column_width(page))
+}
+
+fn shell_column_width(page: Page) -> Rems {
     match page {
-        Page::Settings => shell_column_settings(),
-        Page::Library | Page::Result => shell_column_at(rems(82.)),
-        _ => shell_column(),
+        Page::Settings => COLUMN_SETTINGS,
+        Page::Library | Page::Result => WIDE_COLUMN,
+        _ => COLUMN,
     }
 }
 
-/// Settings groups run on the narrower column from the mock (COLUMN_SETTINGS).
-fn shell_column_settings() -> Div {
-    shell_column_at(COLUMN_SETTINGS)
+/// The max width includes both gutters; layout calculations use the same box.
+pub(super) fn shell_content_width(page: Page, window: &Window) -> f32 {
+    (f32::from(window.bounds().size.width)
+        .min(shell_column_width(page).0 * f32::from(window.rem_size()))
+        - SHELL_GUTTER * 2.)
+        .max(0.)
 }
 
 fn shell_column_at(width: Rems) -> Div {
-    div().w_full().min_w_0().max_w(width).mx_auto().px(px(24.))
+    div()
+        .w_full()
+        .min_w_0()
+        .max_w(width)
+        .mx_auto()
+        .px(px(SHELL_GUTTER))
 }
 
 impl Desktop {
@@ -56,18 +66,25 @@ impl Desktop {
         } else {
             format!("任务 · {task_count}")
         };
+        // Match the traffic-light reserve with an equal right-hand region.
+        // The navigation is centered in the full window, not the padded TitleBar.
+        let scale = self.preferences.application().font_scale;
+        let side_width = (72. * scale + 16.).max(96.);
+        let nav_width =
+            (360. * scale).min((f32::from(window.bounds().size.width) - side_width * 2.).max(0.));
+        let tab_width = nav_width / 3.;
         let nav = div()
             .relative()
-            .w(px(360.))
+            .w(px(nav_width))
             .h(px(36.))
             .flex_shrink_0()
             .when(self.page != Page::Settings, |view| {
                 view.child(
                     div()
                         .absolute()
-                        .left(px(120. * position))
+                        .left(px(tab_width * position))
                         .top(px(0.))
-                        .w(px(120.))
+                        .w(px(tab_width))
                         .h(px(36.))
                         .rounded(RADIUS_SMALL)
                         .bg(color(ACCENT_SOFT)),
@@ -87,7 +104,7 @@ impl Desktop {
                             || (page == Page::Library && self.page == Page::Result);
                         control(("shell-tab", index))
                             .ghost()
-                            .w(px(120.))
+                            .w(px(tab_width))
                             .h(px(36.))
                             .min_h(px(36.))
                             .px(px(12.))
@@ -128,6 +145,7 @@ impl Desktop {
             .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
         TitleBar::new()
             .h(px(52.))
+            .pl_0()
             .bg(color(CANVAS))
             .border_color(color(HAIRLINE))
             .child(
@@ -135,11 +153,16 @@ impl Desktop {
                     .w_full()
                     .min_w_0()
                     .h_full()
-                    .pr(px(16.))
-                    .gap(px(16.))
-                    .child(div().flex_1().min_w_0())
-                    .child(nav)
-                    .child(h_flex().flex_1().min_w_0().justify_end().child(gear)),
+                    .child(div().w(px(side_width)).flex_shrink_0())
+                    .child(h_flex().flex_1().min_w_0().justify_center().child(nav))
+                    .child(
+                        h_flex()
+                            .w(px(side_width))
+                            .flex_shrink_0()
+                            .pr(px(16.))
+                            .justify_end()
+                            .child(gear),
+                    ),
             )
     }
 

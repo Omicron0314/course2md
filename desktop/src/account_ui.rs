@@ -82,14 +82,47 @@ impl Desktop {
         let saved = self.account.has_saved_login;
         let expired = matches!(self.account.status, Some(AccountStatus::Expired));
         let show_login = !saved || expired;
+        let connected = matches!(self.account.status, Some(AccountStatus::Connected(_)));
+        let (kind, label) = if self.account.checking {
+            (BadgeKind::Progress, "验证中")
+        } else if self.account.status_error.is_some() {
+            (BadgeKind::Warning, "暂时无法验证")
+        } else if expired {
+            (BadgeKind::Warning, "登录已失效")
+        } else if connected {
+            (BadgeKind::Success, "已登录")
+        } else if saved {
+            (BadgeKind::Neutral, "已保留登录")
+        } else {
+            (BadgeKind::Neutral, "未登录")
+        };
+        let detail = status
+            .trim_start_matches("Bilibili：")
+            .trim_start_matches("已登录 · ")
+            .to_owned();
+        let show_detail = !self.account.checking && detail != label;
         v_flex()
             .w_full()
             .gap_3()
             .child(
-                h_flex().gap_2().items_center()
-                    .when(self.account.checking, |row| row.child(crate::motion::spinner("account-checking", cx)))
-                    .child(badge(if expired || self.account.status_error.is_some() { BadgeKind::Warning } else if matches!(self.account.status, Some(AccountStatus::Connected(_))) { BadgeKind::Success } else { BadgeKind::Neutral })
-                        .child(accessible_text("bilibili-account-status", status.trim_start_matches("Bilibili：").to_owned()))),
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .items_start()
+                    .when(self.account.checking, |row| {
+                        row.child(crate::motion::spinner("account-checking", cx))
+                    })
+                    .child(badge(kind).child(label))
+                    .when(show_detail, |row| {
+                        row.child(
+                            accessible_text("bilibili-account-status", detail)
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .py(px(3.)),
+                        )
+                    }),
             )
             .child(accessible_text("bilibili-account-policy", if saved {
                 "获取字幕和视频将使用此账号的访问权限。退出登录后停止后续使用，课程和笔记保留。"
