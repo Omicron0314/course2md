@@ -70,6 +70,7 @@ impl Desktop {
         self.preview_error = None;
         self.source_validation = None;
         self.show_preview_details = false;
+        self.expanded_subtitle_issue = None;
         self.source_deadline = None;
     }
 

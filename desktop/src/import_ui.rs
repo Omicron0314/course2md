@@ -124,6 +124,33 @@ impl Render for PlanDialog {
 }
 
 impl Desktop {
+    fn subtitle_issue(&self, kind: &str, message: &str, cx: &mut Context<Self>) -> Div {
+        let (summary, details) = message.split_once('\n').unwrap_or((message, ""));
+        let id = text_id(kind, message);
+        let expanded = self.expanded_subtitle_issue.as_ref() == Some(&id);
+        v_flex()
+            .min_w_0()
+            .gap_2()
+            .child(help(summary.to_owned()))
+            .when(!details.trim().is_empty(), |view| {
+                view.child(
+                    quiet(id.clone())
+                        .self_start()
+                        .label(if expanded {
+                            "收起技术详情"
+                        } else {
+                            "技术详情"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.expanded_subtitle_issue =
+                                if expanded { None } else { Some(id.clone()) };
+                            cx.notify();
+                        })),
+                )
+                .when(expanded, |view| view.child(help(details.to_owned())))
+            })
+    }
+
     fn import_base_config(&self) -> course2md::settings::ConfigFile {
         self.workspace
             .as_ref()
@@ -382,8 +409,7 @@ impl Desktop {
                         }
                     }
                     Err(error) => {
-                        this.subtitle_error =
-                            Some(format!("字幕未读取成功，尚不能确认是否可用：{error:#}"));
+                        this.subtitle_error = Some(format!("{error:#}"));
                         if let Some(source) = &mut this.source_preview {
                             source.subtitle_read_error = this.subtitle_error.clone().map(|message| SubtitleReadError::Failed { message });
                         }
@@ -860,7 +886,7 @@ impl Desktop {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(WARNING)),
                     )
-                    .child(issue(error.clone())),
+                    .child(self.subtitle_issue("subtitle-read", error, cx)),
             );
             if let Some(old) = &source.selected_subtitle {
                 view = view.child(
@@ -950,15 +976,22 @@ impl Desktop {
                             })),
                     ),
             );
-            if let SubtitleEvidence::Failed { message } = &source.subtitles {
-                options = options.child(help(message.clone()));
-            }
-            if let SubtitleEvidence::Found {
-                warning: Some(message),
-                ..
-            } = &source.subtitles
+            if self.subtitle_error.is_none()
+                && let SubtitleEvidence::Failed { message } = &source.subtitles
             {
-                options = options.child(help(format!("部分字幕尚未确认：{message}")));
+                options = options.child(self.subtitle_issue("subtitle-discovery", message, cx));
+            }
+            if self.subtitle_error.is_none()
+                && let SubtitleEvidence::Found {
+                    warning: Some(message),
+                    ..
+                } = &source.subtitles
+            {
+                options = options.child(self.subtitle_issue(
+                    "subtitle-warning",
+                    &format!("部分字幕尚未确认：{message}"),
+                    cx,
+                ));
             }
             if let SubtitleEvidence::Unsupported { message } = &source.subtitles {
                 options = options.child(help(message.clone()));
@@ -988,7 +1021,12 @@ impl Desktop {
                     .when(
                         source.online
                             && course2md::auth::is_bilibili_url(&source.input)
-                            && matches!(&source.subtitles, SubtitleEvidence::Failed { message } if source::is_login_failure(message)),
+                            && self.subtitle_error.as_deref().or_else(|| {
+                                match &source.subtitles {
+                                    SubtitleEvidence::Failed { message } => Some(message.as_str()),
+                                    _ => None,
+                                }
+                            }).is_some_and(source::is_login_failure),
                         |view| {
                             view.child(
                                 outline_pill("login-for-subtitles")
