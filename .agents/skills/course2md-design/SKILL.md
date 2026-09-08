@@ -5,7 +5,7 @@ description: Design, implement and review course2md's native GPUI desktop interf
 
 # course2md desktop design
 
-Use a compact desktop adaptation of Material Design 3, with macOS window behavior and the user's chosen Material Icons and configurable color themes. Follow the product rules below. They replace the cream-only, pill-heavy web mockups in older project documents.
+Use a compact desktop adaptation of Material Design 3, with macOS window behavior and the user's chosen Material Icons and configurable color themes. Preserve working layout and interaction from earlier versions unless a concrete problem requires changing them. These rules govern shared colors, controls and motion; they do not authorize replacing a useful composition for stylistic consistency.
 
 ## Product hierarchy
 
@@ -15,6 +15,7 @@ Use a compact desktop adaptation of Material Design 3, with macOS window behavio
 - Separate navigation, mode selection, data entry and results. Source tabs sit above the input surface. The video URL has a persistent label, visible border/background, a real input cursor and a useful example; platform logos sit outside the editable area.
 - Use YouTube and Bilibili's recognizable brand marks, with their intrinsic colors. Material Icons represent interface actions, never substitute for a platform logo.
 - Keep normal wording about the user's task: 自动, 读取视频, 开始生成, 阅读笔记. Put protocols, raw paths, runtimes, model implementation details, technical errors and diagnostic contracts under a clearly labeled details disclosure when they do not affect the current decision.
+- The workbench contains the current input for a new note. Do not expose drafts, a draft picker, draft management, draft naming or a discard-draft workflow. Keep current input when navigating; starting a new note resets that form. Submitted tasks retain their own source and settings. Service settings use ordinary edit, save and cancel actions, without a separate draft lifecycle.
 - A saved note is content to open. Make its row/card visibly clickable and provide a distinct 阅读笔记 action. Use completion status only where a generation/version state actually needs explanation.
 
 ## Layout and controls
@@ -24,6 +25,9 @@ Use a compact desktop adaptation of Material Design 3, with macOS window behavio
 - Body text: 14; supporting text: 12; section titles: 18; page titles: 24–28. Use the system font, regular body and semibold headings. Reserve monospace for technical details. Avoid giant branding headlines and excessive gray microcopy.
 - Ordinary controls are 36–40 high with an 8-pixel radius. Cards use 12; source/preview surfaces may use 16. Reserve capsules for compact status badges and segmented selectors.
 - Workbench content is centered around 800–920 wide. Libraries may use a wider content region; readers use a comfortable text measure and a separately sized outline. Keep equal outer gutters and align related section edges.
+- Measure centering against the complete window. Account for a component's built-in padding before adding safe areas; macOS title-bar navigation needs equal left and right reservations. Calculate columns from the actual inner width after gutters and the actual rem-based gap, not a second approximate page width.
+- Keep layout in the normal parent/child tree. A shared animation must not override a caller's padding, width or position. Expanded content must have its correct natural height on its first frame and after a width/content change. Do not hide overflow to conceal an incorrect size calculation; long content needs a deliberate wrapping or scrolling path.
+- Inspect the component's inner layout when alignment appears ineffective. A Button's centered inner label cannot be left-aligned by changing only the outer flex container. Keep badges to short status labels; place usernames, filenames and explanations in a separately constrained text region.
 - Labels and inputs form consistent vertical groups. Show validation next to its field and keep the input and recovery action available after failure.
 - Every important action and navigation item pairs a consistent 18–20 pixel Material icon with text. Use `desktop/src/icons.rs`. Do not mix emoji, text glyphs and unrelated icon families. Small status badges use 14–16 pixel icons.
 - Badges are one padded container holding an icon, a gap and a label. Success/warning/error/progress must use the same semantic tokens on every page. Never draw a colored empty pill beside unstyled text.
@@ -40,7 +44,7 @@ Use a compact desktop adaptation of Material Design 3, with macOS window behavio
 ## Motion contract
 
 - Use `desktop/src/motion.rs` for shared transitions. Motion explains a user's action or live work; do not add perpetual decoration.
-- Project timing: 120–160 ms hover/press; 200 ms selection or progress retargeting; 240 ms page/state entrance and disclosure; 280 ms theme color interpolation. Use ease-out for entry and smooth retargeting for values that can change mid-animation. Never delay accepting an action until animation finishes.
+- Project timing: 120–160 ms hover/press and opacity entrance; 200 ms selection or progress retargeting; 280 ms theme color interpolation. Disclosures enter at their full natural height with a short fade and close immediately. Do not use cached-height clipping or position offsets that move content beyond its container. Use ease-out for entry and smooth retargeting for values that can change mid-animation. Never delay accepting an action until animation finishes.
 - Provide actual animated busy indicators during URL reading, subtitle loading, note opening, service testing, model downloads, QR generation, export and migration. Keep layout stable and allow cancellation when supported.
 - Animate page/section changes, source confirmation, option expansion, progress changes and result/error notices. Stable IDs must preserve animation state across ordinary rerenders; changing data must not restart every animation.
 - Show truthful determinate progress only with real progress data. Otherwise use an indeterminate indicator and a plain status sentence. Completion should settle into a clear result and next action.
@@ -51,6 +55,10 @@ Use a compact desktop adaptation of Material Design 3, with macOS window behavio
 For broad UI work, assign independent subagent reviews by page and enumerate subpages, dialogs and exceptional states. Give reviewers the actual running screenshots as well as code. Turn findings into specific fixes; do not mark unvisited states as visually verified.
 
 Verify at a normal desktop size and the supported narrow size, in a light and dark palette; exercise every built-in theme, live switching and restart persistence. Check title-bar drag and controls, input-to-result flows, and animations in the running native build. Use isolated test data for generation, login, storage and destructive flows. Keep the user's installed release and real notes safe during development.
+
+Verify default text size first. Open disclosures and dialogs before resizing, use long real content, and inspect the first changed frame as well as the settled state. A screenshot of an empty or collapsed page does not verify its populated or expanded layout. Specialist accessibility and enlarged-text audits are outside this work unless the user requests them.
+
+For a performance complaint, profile an active workload and distinguish main-thread blocking, expensive drawing and delayed presentation. Render methods must not read files, probe disks or perform network work. Move checks to background work, cache results and reject stale results after a path change. Record measured frame/input latency when making performance claims; idle CPU and successful unit tests cannot establish responsiveness.
 
 Run appropriate existing tests for configuration persistence and changed behavior. Use a theme coverage check to catch hard-coded UI colors and missing embedded icons, but do not substitute it for visual inspection. Record remaining real limitations honestly. Finish with atomic commits and a runnable reviewed build.
 
