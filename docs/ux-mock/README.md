@@ -1,10 +1,32 @@
-# 课程库页面 高保真静态 mock
+# 桌面应用高保真静态 mock
 
-纯 HTML/CSS（无框架无构建），用于在浏览器里校准布局，之后原样复刻到 GPUI。
+当前复刻入口是 **[app.html](app.html)**：顶部「工作台 / 我的笔记」导航、居中内容列、奶油色画布与白卡片，覆盖工作台、笔记、阅读和设置。纯 HTML/CSS/JS，无框架与构建步骤，用于先校准布局，再与 GPUI 原生窗口对照。
 
-## 打开方式
+## 当前版本的打开方式
 
-浏览器直接打开 `index.html`，用 URL query 切换配置：
+浏览器直接打开 `app.html`，用 URL query 切换页面和静态状态：
+
+| `page` | `state`（首项为默认） |
+| --- | --- |
+| `home`（默认） | `empty`、`reading`、`loaded`、`collection`、`subtitle-failed`、`no-service`、`plan`、`duplicate`、`running`、`failed`、`recent-empty` |
+| `notes` | `list`、`cards`、`search` |
+| `reader` | `notes`、`shots`、`toc`、`find` |
+| `settings` | `general`、`services`、`storage`、`app` |
+
+`scale=1` / `1.25` / `1.5` / `2` 对应用户文字大小；`from=generate` 展示从工作台进入设置的返回提示。例如：
+
+- [设置 · 服务与账号](app.html?page=settings&state=services&from=generate)
+- [设置 · 应用 · 200% 字号](app.html?page=settings&state=app&scale=2)
+- [工作台 · 字幕读取失败](app.html?page=home&state=subtitle-failed)
+- [阅读 · 查找](app.html?page=reader&state=find)
+
+至少对照 1140px 宽窗和 860×620 最小内容窗口下的 100% / 200% 字号。静态 mock 的按钮与诊断数据仅展示状态，实际保存、服务请求、焦点滚动及辅助功能必须在原生应用验证，记录见 [UX 实机验收](../UX-VALIDATION-2026-09-07.md)。
+
+## 旧版课程库侧栏参考
+
+`index.html` 与 `mock.css` 保留第六轮课程库布局实验，下面的侧栏尺寸和蓝色选中态仅属于该旧版。当前应用的页面结构和配色以 `app.html` 为准；旧版仍可用于回查长文字截断与窄窗降级的来源。
+
+旧版 URL 参数：
 
 - `?view=list`（默认）/ `?view=cards`
 - `?scale=1`（默认）/ `1.25` / `1.5` / `2`

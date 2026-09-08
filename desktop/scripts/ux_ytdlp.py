@@ -28,7 +28,10 @@ with (root / "extractor-requests.jsonl").open("a") as log:
 
 if "SLOW" in case:
     time.sleep(25)
-if "--write-subs" in args and ("TIMEOUT" in case or "LOGIN" in case):
+# Restore captions for the same synthetic source without replacing its draft.
+recovery_file = root / "subtitle-recovery.json"
+recovered = json.loads(recovery_file.read_text()) if recovery_file.exists() else []
+if "--write-subs" in args and ("TIMEOUT" in case or "LOGIN" in case) and case not in recovered:
     print("ERROR: Sign in to read these subtitles" if "LOGIN" in case else "ERROR: timed out while reading subtitle metadata", file=sys.stderr)
     sys.exit(1)
 if "COLLECTION" in case and part is None:
