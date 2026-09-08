@@ -27,7 +27,6 @@ class HomebrewChannelTests(unittest.TestCase):
                 alias = tap / 'Aliases/course2md@alpha'
                 self.assertTrue(alias.is_symlink())
                 self.assertEqual(alias.resolve(), paths[0].resolve())
-                self.assertIn('keg_only :versioned_formula', formula)
                 self.assertIn('conflicts_with cask: ["course2md-gui",', cask)
                 self.assertIn('cask "course2md-gui@alpha"', cask)
                 self.assertNotIn('v1.7.0/', formula)

@@ -48,7 +48,8 @@ def render(tap, version, fetch_checksum=checksum):
         "VERSION": version,
         "FORMULA_CLASS": "Course2md" + (channel.capitalize() if suffix else ""),
         "CASK_TOKEN": cask_token,
-        "KEG_ONLY": '\n  keg_only :versioned_formula\n' if suffix else "",
+        # :versioned_formula may auto-link when no numeric sibling is found.
+        "KEG_ONLY": f'\n  keg_only "it is the {channel} prerelease channel"\n' if suffix else "",
         "CONFLICTS": f'  conflicts_with cask: [{", ".join(conflicts)}]',
         "LIVECHECK": '\n  livecheck do\n    skip "Prerelease channel"\n  end\n' if suffix else "",
     }
