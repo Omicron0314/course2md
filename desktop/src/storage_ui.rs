@@ -863,7 +863,7 @@ impl Desktop {
                 view = view.child(
                     accessible_text("storage-access-coverage", message)
                         .text_sm()
-                        .text_color(rgb(MUTED)),
+                        .text_color(color(MUTED)),
                 );
             }
         }
@@ -880,7 +880,7 @@ impl Desktop {
                     let id = location.id.clone();
                     view = view.child(v_flex().gap_2()
                         .child(accessible_text(("storage-association-needed", index), format!("「{}」的关联记录缺失。重新关联后可继续使用这个位置，已有文件会保留。", location.name)))
-                        .child(accessible_text(("storage-association-path", index), location.root.display().to_string()).text_sm().text_color(rgb(MUTED)))
+                        .child(accessible_text(("storage-association-path", index), location.root.display().to_string()).text_sm().text_color(color(MUTED)))
                         .child(control(("reassociate-storage-location", index)).label("重新关联此保存位置").self_start().disabled(self.storage_ui.busy)
                             .on_click(cx.listener(move |this, _, window, cx| this.begin_library_reassociation(id.clone(), window, cx)))));
                 } else if location.root.is_dir()

@@ -365,9 +365,9 @@ impl Desktop {
             view = view
                 .p_4()
                 .rounded_lg()
-                .bg(rgb(SURFACE))
+                .bg(color(SURFACE))
                 .border_1()
-                .border_color(rgb(LINE))
+                .border_color(color(LINE))
                 .child(accessible_text("folder-name-label", "文件夹名称"))
                 .child(
                     Input::new(&self.inputs[&Field::FolderName])
@@ -431,9 +431,9 @@ impl Desktop {
             view =
                 view.p_4()
                     .rounded_lg()
-                    .bg(rgb(SURFACE))
+                    .bg(color(SURFACE))
                     .border_1()
-                    .border_color(rgb(LINE))
+                    .border_color(color(LINE))
                     .child(accessible_text(
                         "folder-delete-title",
                         format!("删除「{name}」文件夹？"),
@@ -443,7 +443,7 @@ impl Desktop {
                             "folder-delete-description",
                             "其中的课程会回到未分类，笔记和原视频都会保留。",
                         )
-                        .text_color(rgb(MUTED)),
+                        .text_color(color(MUTED)),
                     )
                     .child(
                         h_flex()
@@ -784,7 +784,7 @@ impl Desktop {
             .when_some(max_w, |button, width| button.max_w(width))
             .when(max_w.is_none(), |button| button.flex_1())
             .px_2()
-            .text_color(rgb(MUTED))
+            .text_color(color(MUTED))
             .disabled(context.load_error.is_some())
             .icon(IconName::Folder)
             .accessibility_label(format!("保存到文件夹：{label}"))

@@ -96,7 +96,7 @@ impl Desktop {
                 "获取字幕和视频将使用此账号的访问权限。退出登录后停止后续使用，课程和笔记保留。"
             } else {
                 "公开课程可以直接读取；遇到账号权限限制时，再登录继续。"
-            }).text_sm().text_color(rgb(MUTED)))
+            }).text_sm().text_color(color(MUTED)))
             .child(
                 h_flex()
                     .gap_2()
@@ -179,7 +179,7 @@ impl Desktop {
                     .flex_1()
                     .min_w_0()
                     .text_sm()
-                    .text_color(rgb(MUTED)),
+                    .text_color(color(MUTED)),
             )
             .child(
                 control("source-account-refresh")
@@ -450,7 +450,7 @@ impl Desktop {
                     IconName::LoaderCircle
                 })
                 .size_8()
-                .text_color(rgb(if success { SUCCESS } else { MUTED })),
+                .text_color(color(if success { SUCCESS } else { MUTED })),
             );
         }
         v_flex()
@@ -467,7 +467,7 @@ impl Desktop {
                 view.child(
                     accessible_text("bilibili-login-detail", hint)
                         .text_sm()
-                        .text_color(rgb(MUTED)),
+                        .text_color(color(MUTED)),
                 )
             })
             .child(

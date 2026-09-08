@@ -9,11 +9,11 @@ impl Desktop {
             .w_full()
             .gap_2()
             .p_4()
-            .bg(rgb(SURFACE))
+            .bg(color(SURFACE))
             .border_1()
-            .border_color(rgb(CARD_LINE))
+            .border_color(color(CARD_LINE))
             .rounded(RADIUS_CARD)
-            .text_color(rgb(INK))
+            .text_color(color(INK))
             .child(
                 h_flex()
                     .gap_2()
@@ -31,14 +31,14 @@ impl Desktop {
                         row.child(
                             accessible_text("about-build", format!("构建 {commit}"))
                                 .text_size(TEXT_AUX)
-                                .text_color(rgb(GRAY)),
+                                .text_color(color(GRAY)),
                         )
                     }),
             )
             .child(
                 accessible_text("about-description", "把课程整理成笔记。")
                     .text_size(TEXT_AUX)
-                    .text_color(rgb(GRAY)),
+                    .text_color(color(GRAY)),
             )
             .child(
                 h_flex()
@@ -63,7 +63,7 @@ impl Desktop {
                     .child(
                         accessible_text("about-license-title", "开源许可")
                             .text_size(TEXT_AUX)
-                            .text_color(rgb(GRAY)),
+                            .text_color(color(GRAY)),
                     )
                     .child(
                         quiet("about-license").label("course2md · MIT").on_click(|_, _, cx| {

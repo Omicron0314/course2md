@@ -17,7 +17,7 @@ fn help(text: impl Into<SharedString>) -> Div {
     let text = text.into();
     div()
         .text_sm()
-        .text_color(rgb(MUTED))
+        .text_color(color(MUTED))
         .child(accessible_text(text_id("help", &text), text))
 }
 fn issue(message: impl Into<SharedString>) -> Div {
@@ -35,16 +35,16 @@ fn text_id(kind: &str, value: &str) -> SharedString {
     format!("import-{kind}-{:x}", hash.finish()).into()
 }
 /// Decorative platform capability marker (brand dot + label); not interactive.
-fn platform_badge(name: &'static str, color: u32) -> Div {
+fn platform_badge(name: &'static str, brand_color: u32) -> Div {
     h_flex()
         .gap(px(5.))
         .items_center()
         .flex_shrink_0()
-        .child(div().size(px(8.)).rounded_full().bg(rgb(color)))
+        .child(div().size(px(8.)).rounded_full().bg(rgb(brand_color)))
         .child(
             div()
                 .text_size(TEXT_AUX)
-                .text_color(rgb(GRAY))
+                .text_color(color(GRAY))
                 .child(name),
         )
 }
@@ -56,12 +56,12 @@ pub(crate) fn box_section(label: &'static str) -> Div {
         .gap_2()
         .pt_4()
         .border_t_1()
-        .border_color(rgb(CARD_LINE))
+        .border_color(color(CARD_LINE))
         .child(
             accessible_text(text_id("box-section", label), label)
                 .text_size(TEXT_AUX)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(GRAY)),
+                .text_color(color(GRAY)),
         )
 }
 /// One fact row inside the plan confirmation inset.
@@ -72,7 +72,7 @@ pub(crate) fn plan_row(value: impl Into<SharedString>, warning: bool) -> Statefu
         .min_w_0()
         .whitespace_normal()
         .text_size(TEXT_BODY)
-        .text_color(rgb(if warning { WARNING } else { INK }))
+        .text_color(color(if warning { WARNING } else { INK }))
         .when(warning, |row| row.font_weight(FontWeight::SEMIBOLD))
 }
 
@@ -543,7 +543,7 @@ impl Desktop {
                             .prefix(
                                 icons::link()
                                     .size(px(16.))
-                                    .text_color(rgb(FAINT)),
+                                    .text_color(color(FAINT)),
                             )
                             .suffix(
                                 h_flex()
@@ -563,7 +563,7 @@ impl Desktop {
                     .p_5()
                     .rounded(RADIUS_CARD)
                     .border_1()
-                    .border_color(rgb(CONTROL))
+                    .border_color(color(CONTROL))
                     .child(accessible_text(
                         "import-drop-instruction",
                         "把视频拖到这里，或选择文件。",
@@ -599,7 +599,7 @@ impl Desktop {
                         gpui_component::Icon::default()
                             .path("icons/loader-circle.svg")
                             .size(px(16.))
-                            .text_color(rgb(GRAY)),
+                            .text_color(color(GRAY)),
                     )
                     .child(help("正在读取视频信息与字幕…"))
                     .child(
@@ -628,7 +628,7 @@ impl Desktop {
                             .overflow_y_scroll()
                             .rounded(RADIUS_CARD)
                             .border_1()
-                            .border_color(rgb(CARD_LINE))
+                            .border_color(color(CARD_LINE))
                             .children(self.source_candidates.iter().enumerate().map(
                                 |(index, candidate)| {
                                     let input = candidate.input.clone();
@@ -831,7 +831,7 @@ impl Desktop {
                 .items_baseline()
                 .child(
                     div()
-                        .text_color(rgb(GRAY))
+                        .text_color(color(GRAY))
                         .flex_shrink_0()
                         .child("文字来源"),
                 )
@@ -880,11 +880,11 @@ impl Desktop {
                     .gap_2()
                     .p_3()
                     .rounded(RADIUS_CARD)
-                    .bg(rgb(WARNING_BG))
+                    .bg(color(WARNING_BG))
                     .child(
                         accessible_text("subtitle-failed", "字幕未读取成功，尚不能确认是否可用。")
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(WARNING)),
+                            .text_color(color(WARNING)),
                     )
                     .child(self.subtitle_issue("subtitle-read", error, cx)),
             );
@@ -955,7 +955,7 @@ impl Desktop {
                 div()
                     .rounded(RADIUS_CARD)
                     .border_1()
-                    .border_color(rgb(CARD_LINE))
+                    .border_color(color(CARD_LINE))
                     .p_2()
                     .child(
                         SingleChoiceGroup::new("import-text-source", "笔记的文字来源")
@@ -1092,13 +1092,13 @@ impl Desktop {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_color(rgb(FAINT))
+                                        .text_color(color(FAINT))
                                         .child("发送截图辅助校对"),
                                 )
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(FAINT))
+                                        .text_color(color(FAINT))
                                         .child("开启 AI 校对后可用；开启后文字及对应截图会发送到所选服务。"),
                                 ),
                         )
@@ -1134,11 +1134,11 @@ impl Desktop {
                             .gap_2()
                             .p_3()
                             .rounded(RADIUS_CARD)
-                            .bg(rgb(WARNING_BG))
+                            .bg(color(WARNING_BG))
                             .child(
                                 accessible_text("ai-service-missing", "AI 服务尚未设置。")
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(WARNING)),
+                                    .text_color(color(WARNING)),
                             )
                             .child(help("使用 AI 校对或生成摘要需要先把文字发送到一个 AI 服务。"))
                             .child(
@@ -1830,7 +1830,7 @@ impl Desktop {
                     div()
                         .text_size(TEXT_DISPLAY)
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(ACCENT))
+                        .text_color(color(ACCENT))
                         .child("2"),
                     div()
                         .text_size(TEXT_DISPLAY)
@@ -1840,7 +1840,7 @@ impl Desktop {
             )
             .child(
                 div()
-                    .text_color(rgb(GRAY))
+                    .text_color(color(GRAY))
                     .child("课程视频，整理成笔记。"),
             )
     }
@@ -1933,9 +1933,9 @@ impl Desktop {
             .min_w_0()
             .p_6()
             .gap_4()
-            .bg(rgb(SURFACE))
+            .bg(color(SURFACE))
             .border_1()
-            .border_color(rgb(HAIRLINE))
+            .border_color(color(HAIRLINE))
             .rounded(RADIUS_HERO)
             .shadow(shadow_hero());
         bx = bx.child(self.box_source_input(cx));
@@ -2017,14 +2017,14 @@ impl Desktop {
             .gap_2()
             .p_4()
             .rounded(RADIUS_CARD)
-            .bg(rgb(INSET))
+            .bg(color(INSET))
             .border_1()
-            .border_color(rgb(HAIRLINE))
+            .border_color(color(HAIRLINE))
             .child(
                 accessible_text("plan-inset-label", "本次计划")
                     .text_size(TEXT_AUX)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(GRAY)),
+                    .text_color(color(GRAY)),
             );
         if let Some(source) = &self.source_preview {
             inset = inset.child(plan_row(

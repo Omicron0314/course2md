@@ -37,7 +37,7 @@ impl RenderOnce for FocusRing {
             .flex_shrink_0()
             .border_2()
             .border_color(if active {
-                rgb(crate::theme::INK).into()
+                crate::theme::color(crate::theme::INK).into()
             } else {
                 transparent_black()
             })

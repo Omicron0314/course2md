@@ -59,7 +59,7 @@ impl Desktop {
             div()
                 .text_size(TEXT_BODY)
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(ACCENT))
+                .text_color(color(ACCENT))
                 .child("2"),
             div()
                 .text_size(TEXT_BODY)
@@ -97,12 +97,12 @@ impl Desktop {
                                 .items_center()
                                 .child(
                                     div()
-                                        .text_color(rgb(if active { INK } else { GRAY }))
+                                        .text_color(color(if active { INK } else { GRAY }))
                                         .when(active, |text| text.font_weight(FontWeight::SEMIBOLD))
                                         .child(label.to_owned()),
                                 )
                                 .child(div().h(px(2.)).w_full().rounded_full().bg(if active {
-                                    rgb(ACCENT)
+                                    color(ACCENT)
                                 } else {
                                     rgba(0x00000000)
                                 })),
@@ -130,17 +130,17 @@ impl Desktop {
             .selected(self.page == Page::Settings)
             .toggled(self.page == Page::Settings)
             .when(self.page == Page::Settings, |button| {
-                button.bg(rgb(BADGE_PROGRESS_BG))
+                button.bg(color(BADGE_PROGRESS_BG))
             })
             .when(settings_problem, |button| {
-                button.text_color(rgb(ACCENT_STRONG))
+                button.text_color(color(ACCENT_STRONG))
             })
             .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
         div()
             .w_full()
             .flex_shrink_0()
             .border_b_1()
-            .border_color(rgb(HAIRLINE))
+            .border_color(color(HAIRLINE))
             .child(
                 h_flex()
                     .w_full()
@@ -182,7 +182,7 @@ impl Desktop {
                     .gap_2()
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(TINT))
+                    .bg(color(TINT))
                     .child(
                         accessible_text(
                             "background-task-result",
@@ -267,6 +267,7 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::apply_preference(&self.preferences.application().appearance, window, cx);
         theme::apply_scale(self.preferences.application().font_scale, window, cx);
         let content = match self.page {
             Page::New => self.new_page(window, cx),
@@ -282,7 +283,7 @@ impl Render for Desktop {
                 v.child(
                     accessible_text("opening-note", "正在打开笔记…")
                         .role(Role::Status)
-                        .text_color(rgb(MUTED)),
+                        .text_color(color(MUTED)),
                 )
             })
             .child(content);
@@ -347,7 +348,7 @@ impl Render for Desktop {
                             .gap_3()
                             .p_3()
                             .rounded_md()
-                            .bg(rgb(TINT))
+                            .bg(color(TINT))
                             .child(
                                 accessible_text("app-message", message)
                                     .role(Role::Status)
@@ -388,16 +389,16 @@ impl Render for Desktop {
             );
         let background = v_flex()
             .size_full()
-            .bg(rgb(CANVAS))
-            .text_color(rgb(INK))
+            .bg(color(CANVAS))
+            .text_color(color(INK))
             .text_size(rems(1.))
             .when(!self.system_titlebar, |v| {
                 v.child(
-                    TitleBar::new().bg(rgb(SIDEBAR)).child(
+                    TitleBar::new().bg(color(SIDEBAR)).child(
                         h_flex().w_full().gap_3().child(
                             div()
                                 .text_size(px(12.))
-                                .text_color(rgb(MUTED))
+                                .text_color(color(MUTED))
                                 .child("course2md"),
                         ),
                     ),

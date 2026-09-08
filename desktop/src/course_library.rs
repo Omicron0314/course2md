@@ -68,7 +68,7 @@ impl Render for CourseRenameDialog {
                     "更改在课程库中显示的名称，已生成的正文和原视频保持完整。",
                 )
                 .text_sm()
-                .text_color(rgb(MUTED)),
+                .text_color(color(MUTED)),
             )
             .child(
                 h_flex()
@@ -472,7 +472,7 @@ impl Desktop {
             view = view.child(
                 accessible_text("library-search-coverage", message)
                     .text_sm()
-                    .text_color(rgb(MUTED)),
+                    .text_color(color(MUTED)),
             );
         }
         if !self.library_issues.is_empty()
@@ -519,7 +519,7 @@ impl Desktop {
                     ),
                 )
                 .text_sm()
-                .text_color(rgb(MUTED)),
+                .text_color(color(MUTED)),
             );
             view = view.child(
                 control("open-library-materials")
@@ -561,7 +561,7 @@ impl Desktop {
                         .child(
                             Icon::new(IconName::BookOpen)
                                 .size(px(32.))
-                                .text_color(rgb(MUTED)),
+                                .text_color(color(MUTED)),
                         )
                         .child(
                             accessible_text(
@@ -598,7 +598,7 @@ impl Desktop {
                                     "添加视频链接或本地视频，生成课程笔记。"
                                 },
                             )
-                            .text_color(rgb(MUTED)),
+                            .text_color(color(MUTED)),
                         )
                         .when(!query.is_empty(), |empty| {
                             empty.child(quiet("clear-search").label("清除搜索").on_click(
@@ -634,7 +634,7 @@ impl Desktop {
                     .child(
                         accessible_text("library-search-scope", scoped)
                             .text_size(TEXT_AUX)
-                            .text_color(rgb(GRAY)),
+                            .text_color(color(GRAY)),
                     )
                     .child(
                         quiet("clear-search-scope")
@@ -727,7 +727,7 @@ impl Desktop {
                                         IconName::ChevronDown
                                     })
                                     .size(px(12.))
-                                    .text_color(rgb(GRAY))
+                                    .text_color(color(GRAY))
                                     .flex_shrink_0(),
                                 )
                                 .child(
@@ -742,7 +742,7 @@ impl Desktop {
                                     div()
                                         .flex_shrink_0()
                                         .text_size(TEXT_AUX)
-                                        .text_color(rgb(GRAY))
+                                        .text_color(color(GRAY))
                                         .child(entries.len().to_string()),
                                 ),
                         )
@@ -900,8 +900,8 @@ impl Desktop {
                         .rounded(RADIUS_PILL)
                         .min_h(rems(2.286))
                         .px(px(12.))
-                        .bg(rgb(if group_on { BADGE_PROGRESS_BG } else { SURFACE }))
-                        .border_color(rgb(CONTROL))
+                        .bg(color(if group_on { BADGE_PROGRESS_BG } else { SURFACE }))
+                        .border_color(color(CONTROL))
                         .when(group_on, |button| button.font_weight(FontWeight::SEMIBOLD))
                         .disabled(self.library_error.is_some())
                         .accessibility_label(if group_on {
@@ -920,7 +920,7 @@ impl Desktop {
                                         .flex()
                                         .justify_center()
                                         .text_color(if group_on {
-                                            rgb(INK)
+                                            color(INK)
                                         } else {
                                             rgba(0x00000000)
                                         })
@@ -980,9 +980,9 @@ impl Desktop {
                             .min_h(rems(2.286))
                             .h_auto()
                             .rounded(RADIUS_PILL)
-                            .border_color(rgb(CONTROL))
+                            .border_color(color(CONTROL))
                             .text_size(TEXT_BODY)
-                            .prefix(icons::search().size(px(16.)).text_color(rgb(GRAY)))
+                            .prefix(icons::search().size(px(16.)).text_color(color(GRAY)))
                             .cleanable(true),
                     ),
             )
@@ -1063,7 +1063,7 @@ impl Desktop {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(TEXT_AUX)
-                                .text_color(rgb(GRAY))
+                                .text_color(color(GRAY))
                                 .child(Self::course_meta(course)),
                         ),
                 );
@@ -1072,9 +1072,9 @@ impl Desktop {
                     .items_center()
                     .p_3()
                     .gap(px(12.))
-                    .bg(rgb(SURFACE))
+                    .bg(color(SURFACE))
                     .border_1()
-                    .border_color(rgb(CARD_LINE))
+                    .border_color(color(CARD_LINE))
                     .rounded(RADIUS_CARD)
                     .child(
                         control(("read-course", *index))
@@ -1115,9 +1115,9 @@ impl Desktop {
                         let mut card = v_flex()
                             .flex_1()
                             .min_w_0()
-                            .bg(rgb(SURFACE))
+                            .bg(color(SURFACE))
                             .border_1()
-                            .border_color(rgb(CARD_LINE))
+                            .border_color(color(CARD_LINE))
                             .rounded(RADIUS_CARD)
                             .overflow_hidden();
                         if let Some(thumbnail) = &course.thumbnail {
@@ -1178,7 +1178,7 @@ impl Desktop {
                                         .whitespace_nowrap()
                                         .text_ellipsis()
                                         .text_size(TEXT_AUX)
-                                        .text_color(rgb(GRAY))
+                                        .text_color(color(GRAY))
                                         .child(Self::course_meta(course)),
                                 )
                                 .child(
@@ -1187,7 +1187,7 @@ impl Desktop {
                                         .whitespace_nowrap()
                                         .text_ellipsis()
                                         .text_size(TEXT_AUX)
-                                        .text_color(rgb(GRAY))
+                                        .text_color(color(GRAY))
                                         .child(course.description()),
                                 )
                                 .child(
@@ -1288,9 +1288,9 @@ impl Desktop {
                     .p_3()
                     .gap_3()
                     .items_center()
-                    .bg(rgb(SURFACE))
+                    .bg(color(SURFACE))
                     .border_1()
-                    .border_color(rgb(CARD_LINE))
+                    .border_color(color(CARD_LINE))
                     .rounded(RADIUS_CARD)
                     .child(
                         v_flex()
@@ -1314,7 +1314,7 @@ impl Desktop {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(GRAY))
+                                    .text_color(color(GRAY))
                                     .whitespace_nowrap()
                                     .text_ellipsis()
                                     .child(
@@ -1358,9 +1358,9 @@ impl Desktop {
             .p_3()
             .gap_3()
             .items_center()
-            .bg(rgb(SURFACE))
+            .bg(color(SURFACE))
             .border_1()
-            .border_color(rgb(CARD_LINE))
+            .border_color(color(CARD_LINE))
             .rounded(RADIUS_CARD);
         if let Some(thumbnail) = &course.thumbnail {
             row = row.child(
@@ -1398,7 +1398,7 @@ impl Desktop {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .text_sm()
-                            .text_color(rgb(GRAY))
+                            .text_color(color(GRAY))
                             .child(format!(
                                 "{} · {}",
                                 course.description(),

@@ -388,7 +388,7 @@ impl Desktop {
                         format!("本机已有缓存：{}", bytes(status.bytes)),
                     )
                     .text_sm()
-                    .text_color(rgb(MUTED)),
+                    .text_color(color(MUTED)),
                 );
             }
             for (index, part) in status.parts.iter().enumerate() {
@@ -400,7 +400,7 @@ impl Desktop {
                             format!("{}：{}", part.name, part.path.display()),
                         )
                         .text_sm()
-                        .text_color(rgb(MUTED)),
+                        .text_color(color(MUTED)),
                     )
                     .when(path.is_dir(), |view| {
                         view.child(
@@ -539,7 +539,7 @@ impl Desktop {
                     .text_sm(),
                 );
             }
-            view = view.child(accessible_text(SharedString::from(format!("model-network-scope-{key}")), "准备可能下载模型文件，不发送课程内容。没有网络时已有完整缓存仍可尝试加载；下载失败会保留具体原因。").text_sm().text_color(rgb(MUTED)));
+            view = view.child(accessible_text(SharedString::from(format!("model-network-scope-{key}")), "准备可能下载模型文件，不发送课程内容。没有网络时已有完整缓存仍可尝试加载；下载失败会保留具体原因。").text_sm().text_color(color(MUTED)));
         }
         view.child(actions)
     }
@@ -587,7 +587,7 @@ impl Desktop {
                 accessible_text("model-prepare-result", message.clone())
                     .role(Role::Status)
                     .text_sm()
-                    .text_color(rgb(if *error { 0xa32626 } else { INK })),
+                    .text_color(color(if *error { DANGER } else { INK })),
             );
         }
         if let Some(environment) = &self.environment {

@@ -189,7 +189,7 @@ fn group(id: &'static str, title: &'static str) -> Div {
         .gap_4()
         .pt_5()
         .border_t_1()
-        .border_color(rgb(LINE))
+        .border_color(color(LINE))
         .child(
             text(id, title)
                 .role(Role::Heading)
@@ -216,7 +216,7 @@ pub(super) fn preference(label: &'static str, hint: &'static str, control: Switc
                     view.child(
                         text(SharedString::from(format!("preference-hint-{label}")), hint)
                             .text_sm()
-                            .text_color(rgb(MUTED)),
+                            .text_color(color(MUTED)),
                     )
                 }),
         )
@@ -481,7 +481,7 @@ impl Desktop {
                         row.child(
                             text("settings-back-hint", "当前草稿与填写位置已保留")
                                 .text_size(TEXT_AUX)
-                                .text_color(rgb(FAINT)),
+                                .text_color(color(FAINT)),
                         )
                     }),
             )
@@ -515,7 +515,7 @@ impl Desktop {
                             .gap(px(2.))
                             .p(px(2.))
                             .rounded_full()
-                            .bg(rgb(SEGMENT_TRACK))
+                            .bg(color(SEGMENT_TRACK))
                             .max_w_full()
                             .children(
                                 ["生成笔记", "服务与账号", "存储", "应用"]
@@ -538,13 +538,13 @@ impl Desktop {
                                             .rounded(RADIUS_PILL)
                                             .border_2()
                                             .border_color(gpui::transparent_black())
-                                            .text_color(rgb(if selected { INK } else { GRAY }))
+                                            .text_color(color(if selected { INK } else { GRAY }))
                                             .when(selected, |tab| {
-                                                tab.bg(rgb(SURFACE))
+                                                tab.bg(color(SURFACE))
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .shadow(shadow_segment_selected())
                                             })
-                                            .focus(|style| style.border_color(rgb(INK)).shadow_sm())
+                                            .focus(|style| style.border_color(color(INK)).shadow_sm())
                                             .child(label)
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.select_settings_tab(index, window, cx)
@@ -616,9 +616,9 @@ impl Desktop {
             .child(banner_note("generation-default-scope", "这里的默认选项会同步到准备中笔记尚未单独修改的选项。已排队或开始生成的笔记保持原设置。"))
             .child(self.group_feedback(PreferenceGroup::Generation, cx))
             .child(group("language-settings", "文字来源")
-                .child(text("subtitle-policy", "优先使用可读取的字幕；需要识别时使用下面的方式。字幕读取失败不会被当成没有字幕。").text_sm().text_color(rgb(MUTED)))
+                .child(text("subtitle-policy", "优先使用可读取的字幕；需要识别时使用下面的方式。字幕读取失败不会被当成没有字幕。").text_sm().text_color(color(MUTED)))
                 .child(self.setting_field(EditField::Languages, "字幕优先语言", cx).max_w(rems(24.)))
-                .child(text("subtitle-language-help", "使用语言代码，以逗号分隔，例如 zh-Hans, en；留空按界面语言和来源语言选择。所有已发现的语言仍可选择。").text_sm().text_color(rgb(MUTED)))
+                .child(text("subtitle-language-help", "使用语言代码，以逗号分隔，例如 zh-Hans, en；留空按界面语言和来源语言选择。所有已发现的语言仍可选择。").text_sm().text_color(color(MUTED)))
                 .child(outline_pill("apply-languages").label("应用语言偏好").self_start().on_click(cx.listener(|this,_,_,cx|this.apply_language_preferences(cx)))))
             .child(group("asr-default-settings", "需要识别视频声音时")
                 .child(self.setting_choices("default-asr-device", "默认语音识别方式").options([
@@ -631,12 +631,12 @@ impl Desktop {
                             next.options.provider=match id.as_ref() {"coreml"=>Some(course2md::config::AsrProvider::Coreml),"gpu"=>Some(course2md::config::AsrProvider::Gpu),"cpu"=>Some(course2md::config::AsrProvider::Cpu),"npu"=>Some(course2md::config::AsrProvider::Npu),"api"=>Some(course2md::config::AsrProvider::Api),_=>None};
                             this.commit_generation(next,cx);
                         })))
-                .child(text("asr-fixed-choice-help","固定选择不可用时会保留原因。自动方式只在本机调度，不会改用网络服务。").text_sm().text_color(rgb(MUTED)))
+                .child(text("asr-fixed-choice-help","固定选择不可用时会保留原因。自动方式只在本机调度，不会改用网络服务。").text_sm().text_color(color(MUTED)))
                 .when(provider!="api",|view|{
                     let (settled, conclusion) = self.default_model_conclusion();
                     view.child(self.local_model_picker(cx))
                         .child(text("model-readiness-conclusion", conclusion).text_sm()
-                            .text_color(rgb(if settled { MUTED } else { 0xa32626 })))
+                            .text_color(color(if settled { MUTED } else { DANGER })))
                         .child(quiet("toggle-model-details").self_start()
                             .label(if self.settings_ui.model_details_open { "收起技术详情" } else { "技术详情 · 模型路径与缓存清单" })
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -659,8 +659,8 @@ impl Desktop {
             .child(quiet("show-proofread-rules").label(if value.prompt.is_some(){"查看自定义校对规则"}else{"查看校对规则"}).self_start()
                 .on_click(cx.listener(|this,_,_,cx|{this.settings_ui.show_prompt=!this.settings_ui.show_prompt;cx.notify();})))
             .when(self.settings_ui.show_prompt,|view|view
-                .child(text("standard-proofread-rule",course2md::llm::DEFAULT_PROMPT).text_sm().text_color(rgb(MUTED)))
-                .child(text("prompt-contract","自定义规则影响校对内容；段落 ID 对应和返回结构由软件固定，不会被这些规则覆盖。").text_sm().text_color(rgb(MUTED)))
+                .child(text("standard-proofread-rule",course2md::llm::DEFAULT_PROMPT).text_sm().text_color(color(MUTED)))
+                .child(text("prompt-contract","自定义规则影响校对内容；段落 ID 对应和返回结构由软件固定，不会被这些规则覆盖。").text_sm().text_color(color(MUTED)))
                 .child(Textarea::new(&self.settings_ui.prompt).h(px(160.)).w_full().aria_label("自定义校对规则"))
                 .child(h_flex().gap_2().flex_wrap()
                     .child(outline_pill("apply-proofread-rules").label("应用校对规则").on_click(cx.listener(|this,_,_,cx|{
@@ -673,14 +673,14 @@ impl Desktop {
                     }))))));
         let selected = value.options.formats.clone().unwrap_or_default();
         view.child(group("export-default-settings","同时导出文件")
-            .child(text("internal-note-policy","每次都会保存可阅读的笔记，完成后可随时导出。以下选择会同时生成额外文件。").text_sm().text_color(rgb(MUTED)))
+            .child(text("internal-note-policy","每次都会保存可阅读的笔记，完成后可随时导出。以下选择会同时生成额外文件。").text_sm().text_color(color(MUTED)))
             .child(h_flex().gap_2().flex_wrap().children([
                 (course2md::config::OutputFormat::Md,"Markdown 包"),(course2md::config::OutputFormat::Html,"网页文件"),(course2md::config::OutputFormat::Json,"JSON 数据")
             ].into_iter().enumerate().map(|(index,(format,label))|Checkbox::new(("default-export",index)).label(label).checked(selected.contains(&format)).min_h(rems(2.6))
                 .on_click(cx.listener(move|this,enabled,_,cx|{let mut next=this.generation_edit_base();let formats=next.options.formats.get_or_insert_with(Vec::new);
                     if !enabled{formats.retain(|value|*value!=format);}else if !formats.contains(&format){formats.push(format);}this.commit_generation(next,cx);
                 })))))
-            .child(text("export-format-purpose","Markdown 包包含图片资源；网页文件内嵌图片；JSON 数据供程序使用。全部不选也会生成内部笔记。").text_sm().text_color(rgb(MUTED)))
+            .child(text("export-format-purpose","Markdown 包包含图片资源；网页文件内嵌图片；JSON 数据供程序使用。全部不选也会生成内部笔记。").text_sm().text_color(color(MUTED)))
             .child(self.setting_preference("保留视频供离线播放","仅用于在线来源；生成后保留下载的视频，会占用额外空间。",Switch::new("default-keep-video").checked(value.options.keep_video.unwrap_or(false))
                 .on_click(cx.listener(|this,enabled,_,cx|{let mut next=this.generation_edit_base();next.options.keep_video=Some(*enabled);this.commit_generation(next,cx);}))))).into_any_element()
     }
@@ -736,7 +736,7 @@ impl Desktop {
                     "此识别方式使用 Qwen3-ASR-1.7B Q8_0 GGUF。模型缺失时会在生成前准备。",
                 )
                 .text_sm()
-                .text_color(rgb(MUTED)),
+                .text_color(color(MUTED)),
             );
         }
         if provider == Some(AsrProvider::Npu) {
@@ -777,7 +777,7 @@ impl Desktop {
 
     fn services_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut view=v_flex().w_full().min_w_0().gap_5().child(self.group_feedback(PreferenceGroup::Services,cx))
-            .child(text("service-purpose-help","服务配置保存后才会使用。测试是单独的主动操作，不会在保存或生成前暗中发送测试内容。").text_sm().text_color(rgb(MUTED)));
+            .child(text("service-purpose-help","服务配置保存后才会使用。测试是单独的主动操作，不会在保存或生成前暗中发送测试内容。").text_sm().text_color(color(MUTED)));
         // Keep the active form near the start of the page, including in a long service list.
         let inline_editor = self
             .settings_ui
@@ -803,7 +803,7 @@ impl Desktop {
             let mut section = v_flex().gap_2().w_full().child(
                 text(("services-heading", purpose as usize), heading)
                     .text_size(TEXT_AUX)
-                    .text_color(rgb(GRAY)),
+                    .text_color(color(GRAY)),
             );
             for version in latest
                 .values()
@@ -844,9 +844,9 @@ impl Desktop {
                     .items_center()
                     .w_full()
                     .p_3()
-                    .bg(rgb(SURFACE))
+                    .bg(color(SURFACE))
                     .border_1()
-                    .border_color(rgb(CARD_LINE))
+                    .border_color(color(CARD_LINE))
                     .rounded(RADIUS_CARD)
                     .child(
                         text(("saved-service-draft", index), label)
@@ -868,9 +868,9 @@ impl Desktop {
                     .w_full()
                     .gap_3()
                     .p_4()
-                    .bg(rgb(SURFACE))
+                    .bg(color(SURFACE))
                     .border_1()
-                    .border_color(rgb(CARD_LINE))
+                    .border_color(color(CARD_LINE))
                     .rounded(RADIUS_CARD)
                     .child(
                         text("account-card-title", "Bilibili 账号")
@@ -940,9 +940,9 @@ impl Desktop {
             .w_full()
             .gap_2()
             .p_4()
-            .bg(rgb(SURFACE))
+            .bg(color(SURFACE))
             .border_1()
-            .border_color(rgb(CARD_LINE))
+            .border_color(color(CARD_LINE))
             .rounded(RADIUS_CARD)
             .child(
                 h_flex()
@@ -999,7 +999,7 @@ impl Desktop {
                     ),
                 )
                 .text_size(TEXT_AUX)
-                .text_color(rgb(GRAY)),
+                .text_color(color(GRAY)),
             )
             .child(
                 text(
@@ -1011,7 +1011,7 @@ impl Desktop {
                     },
                 )
                 .text_size(TEXT_AUX)
-                .text_color(rgb(GRAY)),
+                .text_color(color(GRAY)),
             )
             .when(!stopped, |card| {
                 card.child(
@@ -1048,9 +1048,9 @@ impl Desktop {
             .w_full()
             .gap_3()
             .p_4()
-            .bg(rgb(SURFACE))
+            .bg(color(SURFACE))
             .border_1()
-            .border_color(rgb(CONTROL))
+            .border_color(color(CONTROL))
             .rounded(RADIUS_CARD)
             .child(text("service-editor-inline-title", title).font_weight(FontWeight::SEMIBOLD))
             .child(self.service_editor_content(true, window, cx))
@@ -1215,7 +1215,7 @@ impl Desktop {
                             "仅用于这次笔记",
                         )
                         .text_sm()
-                        .text_color(rgb(MUTED)),
+                        .text_color(color(MUTED)),
                     )
                     .child(
                         control(("inherit-default-service", purpose as usize))
@@ -1482,7 +1482,7 @@ impl Desktop {
                 },
             )
             .text_sm()
-            .text_color(rgb(MUTED)),
+            .text_color(color(MUTED)),
         );
         if let Some(old) = editor
             .draft
@@ -1509,7 +1509,7 @@ impl Desktop {
                     .w_full()
                     .p_3()
                     .rounded(RADIUS_CARD)
-                    .bg(rgb(WARNING_BG))
+                    .bg(color(WARNING_BG))
                     .text_sm()
                     .child(current),
             );
@@ -1562,7 +1562,7 @@ impl Desktop {
             view = view.child(
                 text("service-actual-endpoint", format!("将请求 {endpoint}"))
                     .text_sm()
-                    .text_color(rgb(MUTED)),
+                    .text_color(color(MUTED)),
             );
         }
         view = view
@@ -1648,7 +1648,7 @@ impl Desktop {
                         "API Key 已安全保存。填写新值可替换，留空保留原密钥。",
                     )
                     .text_sm()
-                    .text_color(rgb(MUTED)),
+                    .text_color(color(MUTED)),
                 );
             }
             view = view.child(
@@ -1700,7 +1700,7 @@ impl Desktop {
         view = view.child(
             text("service-test-notice", service_test::TEST_NOTICE)
                 .text_sm()
-                .text_color(rgb(MUTED)),
+                .text_color(color(MUTED)),
         );
         if protocol == ServiceProtocol::AiChat {
             view = view.child(
@@ -1744,7 +1744,7 @@ impl Desktop {
                 view = view.child(
                     text(("service-test-detail", index), detail.clone())
                         .text_sm()
-                        .text_color(rgb(MUTED)),
+                        .text_color(color(MUTED)),
                 );
             }
             if evidence.outcome == preferences::TestOutcome::Passed {
@@ -2364,7 +2364,7 @@ impl Desktop {
             view = view.child(
                 text(("settings-group-feedback", group as usize), message.clone())
                     .text_sm()
-                    .text_color(rgb(if error { 0xa32626 } else { MUTED })),
+                    .text_color(color(if error { DANGER } else { MUTED })),
             );
             let has_pending = match group {
                 PreferenceGroup::Generation => self.settings_ui.pending_generation.is_some(),
@@ -2416,7 +2416,7 @@ impl Desktop {
                     view = view.child(
                         text(("settings-feedback-technical", group as usize), detail)
                             .text_sm()
-                            .text_color(rgb(MUTED)),
+                            .text_color(color(MUTED)),
                     );
                 }
             }
@@ -2434,7 +2434,7 @@ impl Desktop {
         view
     }
     fn storage_settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut view=v_flex().gap_5().child(text("storage-policy","所有已登记位置的笔记都会保留在课程库中。更改默认位置只影响新建笔记，准备中的笔记和已提交任务保持原位置。").text_sm().text_color(rgb(MUTED)));
+        let mut view=v_flex().gap_5().child(text("storage-policy","所有已登记位置的笔记都会保留在课程库中。更改默认位置只影响新建笔记，准备中的笔记和已提交任务保持原位置。").text_sm().text_color(color(MUTED)));
         view = view.child(self.storage_status_panel(cx));
         if let Some(workspace) = &self.workspace {
             for (index, library) in workspace.state.libraries.iter().enumerate() {
@@ -2443,7 +2443,7 @@ impl Desktop {
                 let move_id = id.clone();
                 let default = workspace.state.default_library == id;
                 let offline = !root.is_dir();
-                view=view.child(v_flex().gap_2().w_full().p_4().bg(rgb(SURFACE)).border_1().border_color(rgb(CARD_LINE)).rounded(RADIUS_CARD)
+                view=view.child(v_flex().gap_2().w_full().p_4().bg(color(SURFACE)).border_1().border_color(color(CARD_LINE)).rounded(RADIUS_CARD)
                 .child(h_flex().gap_2().items_center().flex_wrap()
                     .child(text(("storage-location-name",index),library.name.clone()).font_weight(FontWeight::SEMIBOLD))
                     .when(default,|row|row.child(badge(BadgeKind::Neutral).child("默认保存位置")))
@@ -2459,13 +2459,13 @@ impl Desktop {
                         }cx.notify();
                     })))
                     .child(outline_pill(("move-storage-location",index)).label("移动课程库…").on_click(cx.listener(move|this,_,window,cx|this.begin_library_move(move_id.clone(),window,cx)))))
-                .child(text(("storage-location-path",index),root.display().to_string()).text_size(TEXT_AUX).text_color(rgb(GRAY)))
+                .child(text(("storage-location-path",index),root.display().to_string()).text_size(TEXT_AUX).text_color(color(GRAY)))
                 .child(h_flex().gap_2().flex_wrap()
                     .child(quiet(("open-storage-location",index)).label("打开位置").disabled(offline).on_click(move|_,_,cx|cx.open_with_system(&root)))));
             }
         }
         view = view.child(outline_pill("register-storage-location").label("添加课程库位置").self_start().on_click(cx.listener(|this,_,window,cx|this.register_storage_location(window,cx))))
-            .child(text("storage-managed-files","模型和恢复所需的临时素材由软件管理。普通生成不要求手动清缓存，也不会自动删除原视频。").text_sm().text_color(rgb(MUTED)));
+            .child(text("storage-managed-files","模型和恢复所需的临时素材由软件管理。普通生成不要求手动清缓存，也不会自动删除原视频。").text_sm().text_color(color(MUTED)));
         if let Some(workspace) = &self.workspace {
             let details: Vec<String> = workspace
                 .state
@@ -2501,7 +2501,7 @@ impl Desktop {
                         view.children(details.into_iter().enumerate().map(|(index, line)| {
                             text(("storage-detail", index), line)
                                 .text_size(TEXT_AUX)
-                                .text_color(rgb(GRAY))
+                                .text_color(color(GRAY))
                         }))
                     });
             }
@@ -2806,9 +2806,9 @@ impl Desktop {
             .w_full()
             .gap_2()
             .p_4()
-            .bg(rgb(SURFACE))
+            .bg(color(SURFACE))
             .border_1()
-            .border_color(rgb(CARD_LINE))
+            .border_color(color(CARD_LINE))
             .rounded(RADIUS_CARD)
             .child(
                 text(
@@ -2816,7 +2816,7 @@ impl Desktop {
                     "检查读取、识别与导出所需的工具和权限；结论就地显示，原始日志收在技术详情。",
                 )
                 .text_size(TEXT_AUX)
-                .text_color(rgb(GRAY)),
+                .text_color(color(GRAY)),
             );
         if let Some(e) = &self.environment {
             for (index, (name, purpose, found)) in [
@@ -2838,7 +2838,7 @@ impl Desktop {
                             div()
                                 .w(px(16.))
                                 .flex_shrink_0()
-                                .text_color(rgb(if found { SUCCESS } else { GRAY }))
+                                .text_color(color(if found { SUCCESS } else { GRAY }))
                                 .child(if found { "✓" } else { "○" }),
                         )
                         .child(
@@ -2882,7 +2882,7 @@ impl Desktop {
                             .child(
                                 text("install-media-tools-help", help)
                                     .text_size(TEXT_AUX)
-                                    .text_color(rgb(GRAY))
+                                    .text_color(color(GRAY))
                                     .flex_1()
                                     .min_w_0(),
                             )
@@ -2899,7 +2899,7 @@ impl Desktop {
                     .child(
                         text("install-media-tools-command", command)
                             .text_size(TEXT_AUX)
-                            .text_color(rgb(GRAY)),
+                            .text_color(color(GRAY)),
                     );
             }
         } else {

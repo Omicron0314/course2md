@@ -1083,7 +1083,7 @@ impl Desktop {
             let mut historical = v_flex()
                 .gap_3()
                 .p_4()
-                .bg(rgb(SURFACE))
+                .bg(color(SURFACE))
                 .child(accessible_text("historical-tasks", "历史任务材料").role(Role::Heading))
                 .child(accessible_text(
                     "historical-tasks-description",
@@ -1132,15 +1132,15 @@ impl Desktop {
                     )
                     .role(Role::Status)
                     .text_sm()
-                    .text_color(rgb(MUTED)),
+                    .text_color(color(MUTED)),
                 );
             let mut card = v_flex()
                 .gap_3()
                 .p_4()
                 .w_full()
-                .bg(rgb(SURFACE))
+                .bg(color(SURFACE))
                 .border_1()
-                .border_color(rgb(if is_selected { BLUE } else { LINE }))
+                .border_color(color(if is_selected { BLUE } else { LINE }))
                 .rounded_md()
                 .child(heading);
             if is_selected {
@@ -1163,13 +1163,13 @@ impl Desktop {
                         ),
                     )
                     .text_sm()
-                    .text_color(rgb(MUTED)),
+                    .text_color(color(MUTED)),
                 );
                 for (text_id, line) in self.stage_detail_lines(task) {
                     card = card.child(
                         h_flex()
                             .gap_3()
-                            .child(accessible_text(text_id, line).text_color(rgb(MUTED))),
+                            .child(accessible_text(text_id, line).text_color(color(MUTED))),
                     );
                 }
                 let uncertain: Vec<_> = task
@@ -1419,7 +1419,7 @@ impl Desktop {
                 .gap_2()
                 .p_3()
                 .rounded(RADIUS_CARD)
-                .bg(rgb(WARNING_BG))
+                .bg(color(WARNING_BG))
                 .children(uncertain.iter().enumerate().map(|(index, blocked)| {
                     accessible_text(
                         SharedString::from(format!("unknown-scope-{id}-{index}")),
@@ -1455,13 +1455,13 @@ impl Desktop {
             .h(px(6.))
             .w_full()
             .rounded_full()
-            .bg(rgb(PROGRESS_TRACK))
+            .bg(color(PROGRESS_TRACK))
             .child(
                 div()
                     .h_full()
                     .w(relative(fraction))
                     .rounded_full()
-                    .bg(rgb(PROGRESS_FILL)),
+                    .bg(color(PROGRESS_FILL)),
             )
     }
 
@@ -1513,14 +1513,14 @@ impl Desktop {
                 version.config.host()
             ));
         }
-        card = card.child(div().text_sm().text_color(rgb(GRAY)).child(meta));
+        card = card.child(div().text_sm().text_color(color(GRAY)).child(meta));
         let mut work = v_flex().gap_3();
         if active {
             if self.progress.is_empty() {
                 work = work.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(GRAY))
+                        .text_color(color(GRAY))
                         .child("正在启动任务…"),
                 );
             }
@@ -1532,11 +1532,11 @@ impl Desktop {
                         h_flex()
                             .gap_2()
                             .items_baseline()
-                            .child(div().text_color(rgb(SUCCESS)).child("✓"))
+                            .child(div().text_color(color(SUCCESS)).child("✓"))
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(GRAY))
+                                    .text_color(color(GRAY))
                                     .child(activity::title(stage)),
                             ),
                     );
@@ -1558,7 +1558,7 @@ impl Desktop {
                                 .flex_1()
                                 .min_w_0()
                                 .text_sm()
-                                .text_color(rgb(GRAY))
+                                .text_color(color(GRAY))
                                 .child(item.detail(stage, true)),
                         ),
                 );
@@ -1593,7 +1593,7 @@ impl Desktop {
             } else {
                 task.state.label().into()
             };
-            work = work.child(div().text_sm().text_color(rgb(GRAY)).child(fact));
+            work = work.child(div().text_sm().text_color(color(GRAY)).child(fact));
         }
         card = card.child(work);
         let mut actions = h_flex().gap_2().flex_wrap();
@@ -1624,7 +1624,7 @@ impl Desktop {
         card = card.child(actions).child(
             div()
                 .text_size(TEXT_AUX)
-                .text_color(rgb(GRAY))
+                .text_color(color(GRAY))
                 .child("关闭窗口后任务会继续；退出应用会暂停任务。"),
         );
         let more = self
@@ -1642,7 +1642,7 @@ impl Desktop {
             card = card.child(
                 div()
                     .text_size(TEXT_AUX)
-                    .text_color(rgb(GRAY))
+                    .text_color(color(GRAY))
                     .child(format!("队列中还有 {more} 个任务等待处理。")),
             );
         }
@@ -1707,7 +1707,7 @@ impl Desktop {
                 accessible_text(SharedString::from(format!("box-error-{id}")), error.clone())
                     .role(Role::Alert)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(DANGER)),
+                    .text_color(color(DANGER)),
             );
         }
         for (component, _, reason) in &partial_failures {
@@ -1723,7 +1723,7 @@ impl Desktop {
             card = card.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(GRAY))
+                    .text_color(color(GRAY))
                     .child(accessible_text(text_id, line)),
             );
         }

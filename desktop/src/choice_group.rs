@@ -200,7 +200,7 @@ impl RenderOnce for SingleChoiceGroup {
                 .gap(px(2.))
                 .p(px(2.))
                 .rounded_full()
-                .bg(rgb(super::SEGMENT_TRACK))
+                .bg(super::color(super::SEGMENT_TRACK))
                 .max_w_full()
                 .on_action(move |_: &NextChoice, window, cx| {
                     next.navigate(Direction::Next, window, cx)
@@ -239,19 +239,19 @@ impl RenderOnce for SingleChoiceGroup {
                         .border_2()
                         .border_color(gpui::transparent_black())
                         .text_size(rems(1.))
-                        .bg(rgb(if checked {
+                        .bg(super::color(if checked {
                             super::SURFACE
                         } else {
                             super::SEGMENT_TRACK
                         }))
-                        .text_color(rgb(if checked { super::INK } else { super::GRAY }))
+                        .text_color(super::color(if checked { super::INK } else { super::GRAY }))
                         .when(checked, |radio| {
                             radio
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .shadow(super::shadow_segment_selected())
                         })
                         .when(option.disabled, |radio| radio.opacity(0.55))
-                        .focus(|style| style.border_color(rgb(super::INK)).shadow_sm())
+                        .focus(|style| style.border_color(super::color(super::INK)).shadow_sm())
                         .child(option.label)
                         .on_change(move |_, _, window, cx| {
                             focus.focus(window, cx);

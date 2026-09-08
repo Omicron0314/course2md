@@ -373,7 +373,7 @@ fn paint_text_selection(layout: &gpui::TextLayout, range: Range<usize>, window: 
     for quad in quads {
         window.paint_quad(PaintQuad {
             bounds: quad,
-            background: rgb(SELECTION).into(),
+            background: color(SELECTION).into(),
             corner_radii: gpui::Corners::default(),
             border_widths: gpui::Edges::default(),
             border_color: transparent_black(),
@@ -1262,7 +1262,7 @@ impl Desktop {
                 .child(
                     theme::accessible_text("reader-back-hint", "保留当前筛选与阅读位置")
                         .text_size(TEXT_AUX)
-                        .text_color(rgb(FAINT)),
+                        .text_color(color(FAINT)),
                 ),
         );
         page = page.child(
@@ -1312,7 +1312,7 @@ impl Desktop {
             meta_facts = meta_facts.child(
                 theme::accessible_text("reader-facts", facts.join(" · "))
                     .text_size(TEXT_AUX)
-                    .text_color(rgb(GRAY)),
+                    .text_color(color(GRAY)),
             );
         }
         if let Some(source) = self.reader_source() {
@@ -1340,7 +1340,7 @@ impl Desktop {
                                 format!("原视频：{}", path.display()),
                             )
                             .text_size(TEXT_AUX)
-                            .text_color(rgb(GRAY))
+                            .text_color(color(GRAY))
                             .min_w_0(),
                         )
                         .when(exists, |row| {
@@ -1362,7 +1362,7 @@ impl Desktop {
                                     "原视频已移动或暂时不可访问；笔记仍可阅读。",
                                 )
                                 .text_size(TEXT_AUX)
-                                .text_color(rgb(GRAY)),
+                                .text_color(color(GRAY)),
                             )
                         })
                         .child(reveal(
@@ -1396,7 +1396,7 @@ impl Desktop {
                     format!("版本 {} · {date} 生成", manifest.revision),
                 )
                 .text_size(TEXT_AUX)
-                .text_color(rgb(GRAY)),
+                .text_color(color(GRAY)),
             );
             if self.reader_ui.versions.len() > 1 {
                 let weak = cx.weak_entity();
@@ -1463,7 +1463,7 @@ impl Desktop {
                 .gap(px(2.))
                 .p(px(2.))
                 .rounded_full()
-                .bg(rgb(SEGMENT_TRACK))
+                .bg(color(SEGMENT_TRACK))
                 .children(
                     ["笔记", "截图"]
                         .into_iter()
@@ -1484,13 +1484,13 @@ impl Desktop {
                                 .rounded(RADIUS_PILL)
                                 .border_2()
                                 .border_color(transparent_black())
-                                .text_color(rgb(if selected { INK } else { GRAY }))
+                                .text_color(color(if selected { INK } else { GRAY }))
                                 .when(selected, |tab| {
-                                    tab.bg(rgb(SURFACE))
+                                    tab.bg(color(SURFACE))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .shadow(shadow_segment_selected())
                                 })
-                                .focus(|style| style.border_color(rgb(INK)).shadow_sm())
+                                .focus(|style| style.border_color(color(INK)).shadow_sm())
                                 .child(label)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.select_reader_view(index, window, cx)
@@ -1517,8 +1517,8 @@ impl Desktop {
                     .rounded(RADIUS_PILL)
                     .min_h(rems(2.286))
                     .px(px(12.))
-                    .bg(rgb(if toc_on { BADGE_PROGRESS_BG } else { SURFACE }))
-                    .border_color(rgb(CONTROL))
+                    .bg(color(if toc_on { BADGE_PROGRESS_BG } else { SURFACE }))
+                    .border_color(color(CONTROL))
                     .when(toc_on, |button| button.font_weight(FontWeight::SEMIBOLD))
                     .accessibility_label(if toc_on { "目录：开" } else { "目录：关" })
                     .child(
@@ -1532,7 +1532,7 @@ impl Desktop {
                                     .flex()
                                     .justify_center()
                                     .text_color(if toc_on {
-                                        rgb(INK)
+                                        color(INK)
                                     } else {
                                         rgba(0x00000000)
                                     })
@@ -1742,14 +1742,14 @@ impl Desktop {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .bg(rgb(SURFACE))
+                    .bg(color(SURFACE))
                     .border_1()
-                    .border_color(rgb(CONTROL))
+                    .border_color(color(CONTROL))
                     .rounded_full()
                     .px(px(12.))
                     .py(px(6.))
                     .min_h(rems(2.571))
-                    .child(icons::search().size(px(16.)).text_color(rgb(GRAY)))
+                    .child(icons::search().size(px(16.)).text_color(color(GRAY)))
                     .child(
                         div().min_w(rems(6.)).flex_1().child(reveal(
                             "reveal-reader-find",
@@ -1766,7 +1766,7 @@ impl Desktop {
                         row.child(
                             theme::accessible_text("find-status", status)
                                 .text_size(TEXT_AUX)
-                                .text_color(rgb(GRAY))
+                                .text_color(color(GRAY))
                                 .flex_shrink_0(),
                         )
                     })
@@ -1918,7 +1918,7 @@ impl Desktop {
                                     detail.clone(),
                                 )
                                 .text_sm()
-                                .text_color(rgb(MUTED)),
+                                .text_color(color(MUTED)),
                             );
                     }
                 }
@@ -1936,7 +1936,7 @@ impl Desktop {
                         .map(|(index, issue)| {
                             theme::accessible_text(("reader-issue", index), issue.clone())
                                 .text_sm()
-                                .text_color(rgb(WARNING))
+                                .text_color(color(WARNING))
                         }),
                 ),
             );
@@ -2014,17 +2014,17 @@ impl Desktop {
                                 range.clone(),
                                 if *current {
                                     HighlightStyle {
-                                        background_color: Some(rgb(FIND_CURRENT).into()),
+                                        background_color: Some(color(FIND_CURRENT).into()),
                                         underline: Some(UnderlineStyle {
                                             thickness: px(1.),
-                                            color: Some(rgb(FIND_CURRENT_LINE).into()),
+                                            color: Some(color(FIND_CURRENT_LINE).into()),
                                             wavy: false,
                                         }),
                                         ..Default::default()
                                     }
                                 } else {
                                     HighlightStyle {
-                                        background_color: Some(rgb(FIND_HIGHLIGHT).into()),
+                                        background_color: Some(color(FIND_HIGHLIGHT).into()),
                                         ..Default::default()
                                     }
                                 },
@@ -2109,14 +2109,14 @@ impl Desktop {
                         .w_full()
                         .gap_2()
                         .p_4()
-                        .bg(rgb(SURFACE))
+                        .bg(color(SURFACE))
                         .border_1()
-                        .border_color(rgb(CARD_LINE))
+                        .border_color(color(CARD_LINE))
                         .rounded(RADIUS_CARD)
                         .child(
                             theme::accessible_text("reader-summary-label", "摘要")
                                 .text_size(TEXT_AUX)
-                                .text_color(rgb(GRAY))
+                                .text_color(color(GRAY))
                                 .font_weight(FontWeight::SEMIBOLD),
                         )
                         .children(summary_paragraphs.iter().map(|(index, text)| {
@@ -2204,10 +2204,10 @@ impl Desktop {
                                             .px(px(6.))
                                             .rounded(RADIUS_SMALL)
                                             .border_1()
-                                            .border_color(rgb(HAIRLINE))
-                                            .bg(rgb(SURFACE))
+                                            .border_color(color(HAIRLINE))
+                                            .bg(color(SURFACE))
                                             .text_size(TEXT_AUX)
-                                            .text_color(rgb(GRAY))
+                                            .text_color(color(GRAY))
                                             .flex_shrink_0()
                                             .whitespace_nowrap()
                                             .child(course2md::render::fmt_ts(seconds));
@@ -2255,7 +2255,7 @@ impl Desktop {
                                             ),
                                         )
                                         .text_sm()
-                                        .text_color(rgb(WARNING))
+                                        .text_color(color(WARNING))
                                     }),
                             )
                             .into_any_element()
@@ -2282,7 +2282,7 @@ impl Desktop {
                                     "这张截图无法读取；对应正文仍可阅读。",
                                 )
                                 .text_sm()
-                                .text_color(rgb(WARNING))
+                                .text_color(color(WARNING))
                                 .into_any_element(),
                             ));
                             continue;
@@ -2300,9 +2300,9 @@ impl Desktop {
                         });
                         v_flex()
                             .w_full()
-                            .bg(rgb(SURFACE))
+                            .bg(color(SURFACE))
                             .border_1()
-                            .border_color(rgb(CARD_LINE))
+                            .border_color(color(CARD_LINE))
                             .rounded(RADIUS_CARD)
                             .overflow_hidden()
                             .child(reveal_article(
@@ -2342,9 +2342,9 @@ impl Desktop {
                                     .px(px(12.))
                                     .py(px(8.))
                                     .border_t_1()
-                                    .border_color(rgb(CARD_LINE))
+                                    .border_color(color(CARD_LINE))
                                     .text_size(TEXT_AUX)
-                                    .text_color(rgb(GRAY))
+                                    .text_color(color(GRAY))
                                     .child(theme::accessible_text(
                                         ("figure-caption", index),
                                         seconds
@@ -2399,9 +2399,9 @@ impl Desktop {
                 let mut card = v_flex()
                     .id(SharedString::from(frame.anchor.clone()))
                     .w_full()
-                    .bg(rgb(SURFACE))
+                    .bg(color(SURFACE))
                     .border_1()
-                    .border_color(rgb(CARD_LINE))
+                    .border_color(color(CARD_LINE))
                     .rounded(RADIUS_CARD)
                     .overflow_hidden();
                 if let Some(path) = &frame.path {
@@ -2439,7 +2439,7 @@ impl Desktop {
                                 "这张图片无法读取；可继续阅读对应正文。",
                             )
                             .text_size(TEXT_AUX)
-                            .text_color(rgb(WARNING)),
+                            .text_color(color(WARNING)),
                         ),
                     );
                 }
@@ -2462,7 +2462,7 @@ impl Desktop {
                             .text_ellipsis()
                             .line_clamp(2)
                             .text_size(TEXT_AUX)
-                            .text_color(rgb(GRAY))
+                            .text_color(color(GRAY))
                             .child(format!("原图说明：{caption}")),
                     );
                 }
@@ -2474,7 +2474,7 @@ impl Desktop {
                             .text_ellipsis()
                             .line_clamp(3)
                             .text_size(TEXT_AUX)
-                            .text_color(rgb(GRAY))
+                            .text_color(color(GRAY))
                             .child(format!(
                                 "{}：{}",
                                 if frame.seconds.is_some() {
@@ -2594,9 +2594,9 @@ impl Desktop {
             .id("note-toc")
             .gap_1()
             .p_3()
-            .bg(rgb(SURFACE))
+            .bg(color(SURFACE))
             .border_1()
-            .border_color(rgb(CARD_LINE))
+            .border_color(color(CARD_LINE))
             .rounded(RADIUS_CARD)
             .overflow_y_scroll()
             .track_scroll(&self.reader_ui.toc_scroll);
@@ -2609,7 +2609,7 @@ impl Desktop {
             theme::accessible_text("toc-title", "目录")
                 .flex_shrink_0()
                 .text_size(TEXT_AUX)
-                .text_color(rgb(GRAY))
+                .text_color(color(GRAY))
                 .font_weight(FontWeight::SEMIBOLD),
         );
         for (index, label, seconds) in headings {
@@ -2627,7 +2627,7 @@ impl Desktop {
                     .justify_start()
                     .rounded(px(8.))
                     .when(on, |button| {
-                        button.bg(rgb(ACCENT_SOFT)).font_weight(FontWeight::SEMIBOLD)
+                        button.bg(color(ACCENT_SOFT)).font_weight(FontWeight::SEMIBOLD)
                     })
                     .accessibility_label(format!("转到 {label}"))
                     .child(
@@ -2642,7 +2642,7 @@ impl Desktop {
                                     .min_w_0()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
-                                    .text_color(rgb(if on { ACCENT_STRONG } else { INK }))
+                                    .text_color(color(if on { ACCENT_STRONG } else { INK }))
                                     .child(label.clone()),
                             )
                             .when_some(*seconds, |row, seconds| {
@@ -2650,7 +2650,7 @@ impl Desktop {
                                     div()
                                         .flex_shrink_0()
                                         .text_size(TEXT_AUX)
-                                        .text_color(rgb(if on { ACCENT_STRONG } else { GRAY }))
+                                        .text_color(color(if on { ACCENT_STRONG } else { GRAY }))
                                         .child(course2md::render::fmt_ts(seconds)),
                                 )
                             }),

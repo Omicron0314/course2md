@@ -14,6 +14,7 @@ mod icons;
 mod import_ui;
 mod legacy_settings;
 mod library_ui;
+mod motion;
 mod notes;
 mod organize;
 mod palettes;
@@ -614,10 +615,10 @@ impl Desktop {
                 Input::new(&self.inputs[&field])
                     .min_h(rems(2.6))
                     .aria_label(label)
-                    .when(error.is_some(), |input| input.border_color(rgb(0xa32626))),
+                    .when(error.is_some(), |input| input.border_color(theme::color(theme::DANGER))),
             )
             .when_some(error, |v, message| {
-                v.child(div().text_sm().text_color(rgb(0xa32626)).child(message))
+                v.child(div().text_sm().text_color(theme::color(theme::DANGER)).child(message))
             })
     }
     fn output(&self, _cx: &App) -> PathBuf {
@@ -1076,6 +1077,7 @@ fn main() {
             },
             |window, cx| {
                 window.set_window_title("course2md");
+                window.observe_window_appearance(|window, _| window.refresh()).detach();
                 let view = cx.new(|cx| Desktop::new(window, cx));
                 let weak = view.downgrade();
                 let quit_view = weak.clone();
