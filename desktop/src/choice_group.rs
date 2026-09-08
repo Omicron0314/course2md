@@ -216,16 +216,30 @@ impl RenderOnce for SingleChoiceGroup {
             0.
         };
         let icons = self.icons;
+        let selection_colors_id =
+            ElementId::NamedChild(self.id.clone().into(), "selection-colors".into());
         let radios = self.options.into_iter().enumerate().map(|(index, option)| {
             let checked = selected == Some(index);
             let on_change = self.on_change.clone();
             let focus = handles[index].clone();
             let icon = icons.get(&option.value).cloned();
-            let background = super::color(if checked {
-                super::SURFACE
+            let amount = if full_width {
+                if checked { 1. } else { 0. }
             } else {
-                super::SEGMENT_TRACK
-            });
+                // Value identity keeps differently sized options on their own
+                // channels when the selection or option order changes.
+                crate::motion::value(
+                    ElementId::NamedChild(selection_colors_id.clone().into(), option.value.clone()),
+                    if checked { 1. } else { 0. },
+                    window,
+                    cx,
+                )
+            };
+            let background = super::blend(
+                super::color(super::SEGMENT_TRACK),
+                super::color(super::SURFACE),
+                amount,
+            );
             let hover_background = if full_width {
                 super::color(super::HOVER_WARM).opacity(0.5)
             } else {
@@ -258,11 +272,22 @@ impl RenderOnce for SingleChoiceGroup {
                 .border_color(gpui::transparent_black())
                 .text_size(rems(1.))
                 .bg(background)
-                .text_color(super::color(if checked { super::INK } else { super::GRAY }))
-                .when(checked && !full_width, |radio| {
+                .text_color(super::blend(
+                    super::color(super::GRAY),
+                    super::color(super::INK),
+                    amount,
+                ))
+                .when(!full_width, |radio| {
                     radio
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .shadow(super::shadow_segment_selected())
+                        .font_weight(FontWeight::MEDIUM)
+                        .when(checked, |radio| {
+                            radio.shadow(super::shadow_segment_selected())
+                        })
+                        .when(cfg!(test), |radio| {
+                            radio.debug_selector(move || {
+                                format!("content-choice-option-{index}").into()
+                            })
+                        })
                 })
                 .when(full_width, |radio| {
                     radio
@@ -400,8 +425,8 @@ impl RenderOnce for SingleChoiceGroup {
 mod tests {
     use super::{Direction, SingleChoiceGroup, destination};
     use gpui::{
-        Bounds, Context, IntoElement, Modifiers, ParentElement as _, Pixels, Render, SharedString,
-        Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+        Bounds, Context, Hsla, IntoElement, Modifiers, ParentElement as _, Pixels, Render,
+        SharedString, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
     };
     use std::time::Duration;
 
@@ -410,6 +435,30 @@ mod tests {
         selected: usize,
         width: Pixels,
         changes: usize,
+    }
+
+    struct ContentWidthHarness {
+        selected: SharedString,
+        changes: usize,
+    }
+
+    impl Render for ContentWidthHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(600.)).child(
+                SingleChoiceGroup::new("content-width-choice", "语音服务")
+                    .options([
+                        ("auto", "Auto"),
+                        ("local", "Whisper"),
+                        ("remote", "Cloud transcription service"),
+                    ])
+                    .selected(self.selected.clone())
+                    .on_change(cx.listener(|this, next: &SharedString, _, cx| {
+                        this.selected = next.clone();
+                        this.changes += 1;
+                        cx.notify();
+                    })),
+            )
+        }
     }
 
     impl Render for FullWidthHarness {
@@ -447,6 +496,87 @@ mod tests {
         cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear(cx);
+        });
+    }
+
+    fn choice_background(cx: &mut VisualTestContext, selector: &'static str) -> Hsla {
+        let bounds = choice_bounds(cx, selector);
+        cx.update(|window, _| {
+            let bounds = bounds.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.bounds == bounds)
+                .find_map(|quad| quad.background.as_solid().filter(|color| color.a > 0.))
+                .unwrap_or_else(|| panic!("missing painted background for {selector}"))
+        })
+    }
+
+    #[gpui::test]
+    fn content_width_choices_crossfade_without_moving_unequal_options(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| ContentWidthHarness {
+            selected: "auto".into(),
+            changes: 0,
+        });
+        draw_choice(cx);
+        let selectors = [
+            "content-choice-option-0",
+            "content-choice-option-1",
+            "content-choice-option-2",
+        ];
+        let before = selectors.map(|selector| choice_bounds(cx, selector));
+        assert!(before[0].size.width < before[1].size.width);
+        assert!(before[1].size.width < before[2].size.width);
+        let selected_color = choice_background(cx, selectors[0]);
+        let unselected_color = choice_background(cx, selectors[2]);
+        assert_ne!(selected_color, unselected_color);
+
+        cx.simulate_click(before[2].center(), Modifiers::default());
+        // Inspect the selection paint without the pointer's independent hover tint.
+        cx.simulate_mouse_move(point(px(580.), px(100.)), None, Modifiers::default());
+        cx.update(|window, cx| {
+            assert_eq!(view.read(cx).selected.as_ref(), "remote");
+            assert_eq!(view.read(cx).changes, 1);
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(choice_background(cx, selectors[2]), unselected_color);
+        for (selector, bounds) in selectors.into_iter().zip(before) {
+            assert_eq!(choice_bounds(cx, selector), bounds);
+        }
+
+        cx.executor().advance_clock(Duration::from_millis(70));
+        draw_choice(cx);
+        let middle = choice_background(cx, selectors[2]);
+        assert_ne!(
+            middle, unselected_color,
+            "the new selection must begin fading in"
+        );
+        assert_ne!(
+            middle, selected_color,
+            "the fade must paint an intermediate color"
+        );
+        for (selector, bounds) in selectors.into_iter().zip(before) {
+            assert_eq!(choice_bounds(cx, selector), bounds);
+        }
+        draw_choice(cx);
+        assert_eq!(choice_background(cx, selectors[2]), middle);
+
+        cx.executor().advance_clock(Duration::from_millis(230));
+        draw_choice(cx);
+        assert_eq!(choice_background(cx, selectors[0]), unselected_color);
+        assert_eq!(choice_background(cx, selectors[2]), selected_color);
+        for (selector, bounds) in selectors.into_iter().zip(before) {
+            assert_eq!(choice_bounds(cx, selector), bounds);
+        }
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            assert_eq!(
+                window.simulate_next_frame(cx),
+                0,
+                "settled choices stop requesting frames"
+            );
         });
     }
 
