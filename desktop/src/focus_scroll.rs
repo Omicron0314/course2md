@@ -1,11 +1,57 @@
 //! Reveal newly focused form rows without pinning them during manual scrolling.
 use gpui::{prelude::*, *};
 
+/// Draw a visible outline around a component whose focus handle is internal.
+/// The wrapper observes descendants without adding a keyboard stop of its own.
+#[derive(IntoElement)]
+pub struct FocusRing {
+    id: ElementId,
+    child: AnyElement,
+}
+
+impl FocusRing {
+    pub fn new(id: impl Into<ElementId>, child: impl IntoElement) -> Self {
+        Self {
+            id: id.into(),
+            child: child.into_any_element(),
+        }
+    }
+}
+
+impl RenderOnce for FocusRing {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| (cx.focus_handle(), false));
+        let (focus, active) = state.read(cx).clone();
+        let observed = state.clone();
+        window.defer(cx, move |window, cx| {
+            let active = observed.read(cx).0.contains_focused(window, cx);
+            if active != observed.read(cx).1 {
+                observed.update(cx, |state, _| state.1 = active);
+                window.refresh();
+            }
+        });
+        div()
+            .id(self.id)
+            .track_focus(&focus)
+            .tab_stop(false)
+            .flex_shrink_0()
+            .border_2()
+            .border_color(if active {
+                rgb(crate::theme::INK).into()
+            } else {
+                transparent_black()
+            })
+            .rounded_full()
+            .child(self.child)
+    }
+}
+
 #[derive(IntoElement)]
 pub struct RevealFocus {
     id: ElementId,
     child: AnyElement,
     scroll: ScrollHandle,
+    full_width: bool,
 }
 
 struct State {
@@ -20,7 +66,13 @@ impl RevealFocus {
             id: id.into(),
             child: child.into_any_element(),
             scroll,
+            full_width: true,
         }
+    }
+
+    pub fn inline(mut self) -> Self {
+        self.full_width = false;
+        self
     }
 }
 
@@ -74,7 +126,9 @@ impl RenderOnce for RevealFocus {
             })
             .id(self.id)
             .track_focus(&focus)
-            .w_full()
+            .tab_stop(false)
+            .when(self.full_width, |view| view.w_full())
+            .when(!self.full_width, |view| view.flex_shrink_0())
             .min_w_0()
             .child(self.child)
     }

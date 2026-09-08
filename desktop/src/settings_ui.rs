@@ -216,7 +216,10 @@ pub(super) fn preference(label: &'static str, hint: &'static str, control: Switc
                     )
                 }),
         )
-        .child(coral_switch(control).accessibility_label(label).p_2())
+        .child(crate::focus_scroll::FocusRing::new(
+            SharedString::from(format!("preference-focus-{label}")),
+            coral_switch(control).accessibility_label(label).p_2(),
+        ))
 }
 
 impl Desktop {
