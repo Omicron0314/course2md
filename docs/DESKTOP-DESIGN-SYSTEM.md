@@ -1,3 +1,5 @@
+> 2026-09-08：本文件保留为历史设计记录。当前强制规范为 [course2md-design skill](../.agents/skills/course2md-design/SKILL.md)，已取代固定奶油色、网页式双层导航与全胶囊控件方向。
+
 # 桌面工作区规范
 
 依据 Apple HIG 的 Layout、Toolbars、Progress indicators、Settings、Motion；采用 GPUI Component 的跨平台 TitleBar，遵循用户要求提供系统标题栏选项。参考：

@@ -4,7 +4,7 @@
 
 ## 安装与首次使用
 
-普通用户请阅读 [GUI 安装指南](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8)（[English](https://github.com/mizorewww/course2md/wiki/GUI-Installation)）。Homebrew GUI 使用 `brew install --cask mizorewww/tap/course2md-gui`；AUR GUI 使用 `yay -S course2md-gui-bin`。首次启动按向导完成设置。
+普通用户请阅读 [GUI 安装指南](https://github.com/mizorewww/course2md/wiki/%E5%AE%89%E8%A3%85%E6%A1%8C%E9%9D%A2%E5%BA%94%E7%94%A8)（[English](https://github.com/mizorewww/course2md/wiki/GUI-Installation)）。Homebrew GUI 使用 `brew install --cask mizorewww/tap/course2md-gui`；AUR GUI 使用 `yay -S course2md-gui-bin`。首次启动可直接选择视频，需要时在设置中配置识别与 AI 服务。
 
 本页其余内容面向开发者，无需为使用应用安装 Rust 或执行构建命令。所有用户文档见 [Wiki](https://github.com/mizorewww/course2md/wiki)。
 
@@ -61,27 +61,31 @@ cargo test --features integration
 cargo test --manifest-path desktop/Cargo.toml
 ```
 
-实际操作记录与已知边界见 [工作区验收](../docs/DESKTOP-WORKSPACE-ACCEPTANCE.md)。布局、状态与动效约定见 [设计规范](../docs/DESKTOP-DESIGN-SYSTEM.md)。开发验收使用独立 `XDG_CONFIG_HOME`，不修改个人 API 配置。
+实际操作记录与已知边界见 [工作区验收](../docs/DESKTOP-WORKSPACE-ACCEPTANCE.md)。所有桌面界面修改必须遵循 [项目设计 skill](../.agents/skills/course2md-design/SKILL.md)；旧网页原型只作历史参考。开发验收使用独立 `XDG_CONFIG_HOME`，不修改个人 API 配置。
 
 首次使用流程、能力检测与对比度验收见 [首次设置引导](../docs/DESKTOP-FIRST-RUN.md)。
 
 
 ## 界面与操作
 
-- 首次打开自动显示设置引导，自动选择本机识别方式并选择笔记目录；完成或稍后设置后不再自动出现，可从「设置 → 通用」重新打开。缺少视频处理工具时直接进入安装帮助。
-- 添加页粘贴在线链接或选择本地视频，确认封面后选择文件夹并生成；字幕策略、识别方式、导出格式与 AI 整理集中在可展开的转换选项中。
-- 生成、取消等操作固定在顶部工具栏；底栏仅在任务运行时显示真实进度，并可进入任务详情。
-- 任务分别显示真实工作项、并行数量及下载/转写进度和 ETA；未知进度显示已用时间，日志默认收起。
-- 任务在后台运行；完成时正在查看任务页会自动进入阅读，在其他页面时不会打断当前操作。
-- 课程库显示缩略图与内容数量；阅读页提供文稿、截图、文件分区，复制后明确反馈。
-- 设置按通用、语音识别、AI 整理、运行环境、关于分组，有效输入防抖自动保存；无效输入保留并提示，不覆盖上次有效配置。默认设置供下一次任务使用，单次转换选项独立。
-- 默认自定义标题栏，可在设置中改用系统标题栏（重启生效）；减少动态效果选项即时应用。
+- 标题栏提供工作台、我的笔记、任务与设置。macOS 保留原生窗口控制和拖动区域。
+- 工作台的来源类型与输入区分开。粘贴视频链接或选择本地文件，确认字幕、笔记名称和保存位置后生成；高级识别、导出和计划详情按需展开。
+- 任务显示当前步骤、真实进度或已用时间，并提供暂停、继续与取消；完成后可直接阅读笔记。后台完成提示不会打断当前页面。
+- 课程库支持列表、卡片、文件夹和搜索；标题、封面与明确的阅读按钮均可打开笔记。阅读器提供正文、截图、目录、查找、版本及导出。
+- 设置分为外观、生成笔记、服务与账号、存储、应用。新笔记默认选项与单篇草稿的修改分别保存；服务测试由用户主动发起，测试结果与保存状态分别显示。
+- 页面、选项展开、加载、进度与主题切换使用共享动效。外观页中的减少动态效果可立即显示最终状态。
+
+## 主题
+
+在「设置 → 外观」选择跟随系统、浅色或深色，再选择配色。浅色和深色偏好分别保存，跟随系统时使用对应配色；重启后保留选择。
+
+内置 Paper、Ink、Nord Snow、Nord、Tokyo Day、Tokyo Night，以及 Catppuccin Latte、Frappé、Macchiato、Mocha，共 10 套。主题覆盖标题栏、表单、菜单、对话框、阅读高亮和状态提示。颜色角色与来源见 [主题资源](assets/themes/SOURCES.md)。
 
 ## 界面图标
 
 内嵌 Google Material Icons Rounded SVG，运行时无需网络或安装图标字体。
 导航图标统一为 20px，任务、刷新和加载使用各自对应的图标；共享组件中的
 复选框、展开箭头、密码可见性和窗口控制也使用同套资源。
-来源、版本和 Apache-2.0 许可证见 [图标资源](assets/material/README.md)。
+来源、版本和 Apache-2.0 许可证见 [图标资源](assets/material/README.md)。YouTube 与 Bilibili 使用独立的 [原品牌标识](assets/brands/SOURCES.md)；主题与品牌资源的许可证随应用打包。
 
 设置与首次引导的独立子代理实机复审见 [验收记录](../docs/DESKTOP-SETTINGS-REVIEW.md)。关于页及应用菜单可查看版本与构建提交。
