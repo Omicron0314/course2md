@@ -11,20 +11,27 @@ pub fn start(window: &mut Window, cx: &App) {
         return;
     };
     let executor = cx.background_executor().clone();
+    let trace_frames = std::env::var_os("COURSE2MD_FRAME_TRACE").is_some();
+    if trace_frames {
+        gpui::profiler::set_trace_enabled(true);
+    }
+    let mut collector = gpui::profiler::FrameTimingCollector::new();
     window
         .spawn(cx, async move |cx| {
             let started = std::time::Instant::now();
             loop {
                 smol::Timer::after(Duration::from_secs(1)).await;
-                let Ok((frames, inputs)) = cx.update(|window, _| {
+                let Ok((frames, inputs, active)) = cx.update(|window, _| {
                     (
                         window.frame_duration_snapshot(),
                         window.input_latency_snapshot(),
+                        window.is_window_active(),
                     )
                 }) else {
                     break;
                 };
                 let elapsed_ms = started.elapsed().as_millis();
+                let events = collector.collect_unseen();
                 let path = path.clone();
                 let result = executor
                     .spawn(async move {
@@ -43,7 +50,24 @@ pub fn start(window: &mut Window, cx: &App) {
                         }};
                     }
                         let sample = json!({
+                            "pid": std::process::id(),
+                            "unix_ms": std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
                             "elapsed_ms": elapsed_ms,
+                            "window_active_at_sample": active,
+                            "frame_events": events.into_iter().map(|event| match event {
+                                gpui::profiler::FrameEvent::Draw(frame) => json!({
+                                    "kind": "draw",
+                                    "age_ms": frame.draw_start.elapsed().as_secs_f64() * 1000.,
+                                    "draw_ms": frame.draw_duration().as_secs_f64() * 1000.,
+                                    "dirty_to_draw_ms": frame.dirty_to_draw_duration().map(|value| value.as_secs_f64() * 1000.),
+                                }),
+                                gpui::profiler::FrameEvent::Present(frame) => json!({
+                                    "kind": "present",
+                                    "age_ms": frame.present_start.elapsed().as_secs_f64() * 1000.,
+                                    "present_ms": frame.present_duration().as_secs_f64() * 1000.,
+                                }),
+                            }).collect::<Vec<_>>(),
                             "draw": histogram!(frames.draw_duration_histogram),
                             "dirty_to_present": histogram!(frames.dirty_to_present_histogram),
                             "animation_interval": histogram!(frames.present_interval_histogram),
