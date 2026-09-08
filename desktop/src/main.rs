@@ -16,6 +16,7 @@ mod legacy_settings;
 mod library_ui;
 mod notes;
 mod organize;
+mod palettes;
 mod preferences;
 mod reader_navigation;
 mod reader_ui;

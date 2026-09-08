@@ -239,12 +239,14 @@ impl GenerationPreferences {
 pub struct ApplicationPreferences {
     pub desktop: DesktopSettings,
     pub font_scale: f32,
+    pub appearance: crate::palettes::ThemePreferences,
 }
 
 impl Default for ApplicationPreferences {
     fn default() -> Self {
         Self {
             font_scale: 1.0,
+            appearance: Default::default(),
             desktop: DesktopSettings {
                 system_titlebar: true,
                 setup_completed: true,
@@ -608,6 +610,9 @@ impl Validate for GenerationPreferences {
 
 impl Validate for ApplicationPreferences {
     fn validate_value(&self) -> Result<()> {
+        if !self.appearance.valid() {
+            bail!("请为浅色和深色外观分别选择对应的主题");
+        }
         if ![1.0, 1.25, 1.5, 2.0].contains(&self.font_scale) {
             bail!("请选择 100%、125%、150% 或 200% 的文字大小");
         }
@@ -2047,6 +2052,54 @@ mod tests {
         assert!(store.save_application(app).is_err());
         assert_eq!(store.application().font_scale, 1.0);
         assert!(!store.unsaved_intents_are_preserved());
+    }
+
+    #[test]
+    fn theme_changes_survive_restart_without_changing_generation_defaults() {
+        use crate::palettes::{Appearance, PaletteId};
+        let (directory, mut store) = isolated();
+        let generation = store.generation().clone();
+        let mut app = store.application().clone();
+        app.appearance.mode = Appearance::System;
+        app.appearance.select(PaletteId::CatppuccinLatte);
+        app.appearance.select(PaletteId::TokyoNight);
+        store.save_application(app.clone()).unwrap();
+        let reopened = Store::open(directory.path(), store.vault());
+        assert_eq!(reopened.application(), &app);
+        assert_eq!(reopened.generation(), &generation);
+        assert_eq!(
+            reopened.application().appearance.resolve(false),
+            PaletteId::CatppuccinLatte
+        );
+        assert_eq!(
+            reopened.application().appearance.resolve(true),
+            PaletteId::TokyoNight
+        );
+    }
+
+    #[test]
+    fn failed_theme_save_preserves_active_palette_and_recovers_the_unapplied_choice() {
+        use crate::palettes::PaletteId;
+        let (directory, mut store) = isolated();
+        store.save_application(store.application().clone()).unwrap();
+        std::fs::remove_file(directory.path().join("application.json")).unwrap();
+        std::fs::create_dir(directory.path().join("application.json")).unwrap();
+        let active = store.application().clone();
+        let mut edit = active.clone();
+        edit.appearance.select(PaletteId::Nord);
+        assert!(store.save_application(edit.clone()).is_err());
+        assert_eq!(store.application(), &active);
+        assert_eq!(store.application_intent(), Some(&edit));
+    }
+
+    #[test]
+    fn pre_theme_application_preferences_get_defaults_without_losing_user_settings() {
+        let app: ApplicationPreferences =
+            serde_json::from_str(r#"{"font_scale":1.25,"desktop":{"reduce_motion":true}}"#)
+                .unwrap();
+        assert_eq!(app.font_scale, 1.25);
+        assert!(app.desktop.reduce_motion);
+        assert_eq!(app.appearance, crate::palettes::ThemePreferences::default());
     }
 
     #[test]
