@@ -524,6 +524,7 @@ impl Desktop {
             Ok(plan) => plan,
             Err(error) => {
                 self.source_validation = Some(format!("{error:#}"));
+                self.validation_attempt = self.validation_attempt.wrapping_add(1);
                 let subtitle_attention = self.subtitle_attention_required();
                 if self.source_preview.is_some() && !subtitle_attention {
                     // Name, destination and processing controls must exist in

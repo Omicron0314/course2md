@@ -1139,30 +1139,12 @@ impl Desktop {
                 .map(|subtitle| subtitle.track_id.clone());
             let mut choices: Vec<_> = tracks
                 .iter()
-                .map(|track| {
-                    let mut label = track.label();
-                    if !speech
-                        && source
-                            .subtitle_request
-                            .as_ref()
-                            .is_some_and(|pending| pending.id == track.id)
-                    {
-                        label.push_str(if self.subtitle_loading {
-                            "（正在读取正文）"
-                        } else {
-                            "（正文尚未确认）"
-                        });
-                    }
-                    (format!("track:{}", track.id), label)
-                })
+                .map(|track| (format!("track:{}", track.id), track.label()))
                 .collect();
             if let Some(cached) = &source.selected_subtitle
                 && !tracks.iter().any(|track| track.id == cached.track_id)
             {
-                choices.push((
-                    format!("track:{}", cached.track_id),
-                    format!("{}（已读正文）", cached.label),
-                ));
+                choices.push((format!("track:{}", cached.track_id), cached.label.clone()));
             }
             choices.push(("speech".into(), "识别视频声音".into()));
             let selected = if speech {
@@ -1176,29 +1158,24 @@ impl Desktop {
                     .map(|id| format!("track:{id}"))
             };
             let mut options = v_flex().gap_2().child(
-                div()
-                    .rounded(RADIUS_CARD)
-                    .border_1()
-                    .border_color(color(CARD_LINE))
-                    .p_2()
-                    .child(
-                        SingleChoiceGroup::new("import-text-source", "笔记的文字来源")
-                            .options(choices)
-                            .when_some(selected, |group, value| group.selected(value))
-                            .on_change(cx.listener(move |this, value: &SharedString, _, cx| {
-                                if value.as_ref() == "speech" {
-                                    this.use_speech(cx);
-                                } else if let Some(id) = value.strip_prefix("track:") {
-                                    if cached_id.as_deref() == Some(id) {
-                                        this.use_confirmed_subtitle(cx);
-                                    } else if let Some(track) =
-                                        tracks.iter().find(|track| track.id == id)
-                                    {
-                                        this.confirm_subtitle(track.clone(), true, cx);
-                                    }
+                div().child(
+                    SingleChoiceGroup::new("import-text-source", "笔记的文字来源")
+                        .options(choices)
+                        .when_some(selected, |group, value| group.selected(value))
+                        .on_change(cx.listener(move |this, value: &SharedString, _, cx| {
+                            if value.as_ref() == "speech" {
+                                this.use_speech(cx);
+                            } else if let Some(id) = value.strip_prefix("track:") {
+                                if cached_id.as_deref() == Some(id) {
+                                    this.use_confirmed_subtitle(cx);
+                                } else if let Some(track) =
+                                    tracks.iter().find(|track| track.id == id)
+                                {
+                                    this.confirm_subtitle(track.clone(), true, cx);
                                 }
-                            })),
-                    ),
+                            }
+                        })),
+                ),
             );
             if self.subtitle_error.is_none()
                 && let SubtitleEvidence::Found {
@@ -1643,7 +1620,11 @@ impl Desktop {
             .iter()
             .find(|library| Some(&library.id) == current.as_ref())
             .cloned();
-        let mut view = box_section("名称与保存").child(self.input(Field::Title, "笔记名称", cx));
+        let mut view = box_section("名称与保存").child(crate::focus_scroll::RevealFocus::new(
+            ("import-title-focus", self.validation_attempt),
+            self.input(Field::Title, "笔记名称", cx),
+            self.scrolls[Page::New as usize].clone(),
+        ));
         view = view.child(
             accessible_text("import-destination-label", "保存到").font_weight(FontWeight::MEDIUM),
         );

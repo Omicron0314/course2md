@@ -207,6 +207,7 @@ struct Desktop {
     settings_tab: usize,
     source_editor_open: bool,
     generation_options_open: bool,
+    validation_attempt: usize,
     show_options: bool,
     show_export_options: bool,
     show_logs: bool,
@@ -359,6 +360,12 @@ impl Desktop {
                     if matches!(field, Field::Source | Field::Title) {
                         this.draft_deadline = Some(Instant::now() + Duration::from_millis(350));
                     }
+                    if field == Field::Title
+                        && !this.value(Field::Title, cx).is_empty()
+                        && this.source_validation.as_deref() == Some("请填写笔记名称")
+                    {
+                        this.source_validation = None;
+                    }
                     if field == Field::Search {
                         this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
                     }
@@ -475,6 +482,7 @@ impl Desktop {
             settings_tab: 4,
             source_editor_open: false,
             generation_options_open: false,
+            validation_attempt: 0,
             show_options: false,
             show_export_options: false,
             show_logs: false,
