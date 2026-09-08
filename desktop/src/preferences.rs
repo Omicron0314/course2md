@@ -4,7 +4,7 @@
 //! Calling `apply_defaults` or submitting a task cannot publish a service editor draft.
 
 use crate::credentials::{CredentialRef, CredentialVault, Secret};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use course2md::config::{AsrProvider, TranscriptSource};
 use course2md::settings::{AsrApiMode, ConfigFile, Defaults, DesktopSettings};
 use serde::de::DeserializeOwned;
@@ -806,6 +806,11 @@ impl Store {
         self.services.stopped.contains_key(service_id)
             || self.root.join("stopped-services").join(service_id).exists()
     }
+    /// Display the currently loaded state without probing the filesystem.
+    /// Actual publication, submission and execution still use dispatch checks.
+    pub fn service_stopped_in_snapshot(&self, service_id: &str) -> bool {
+        self.services.stopped.contains_key(service_id)
+    }
     pub fn test_evidence(
         &self,
         config: &ServiceConfiguration,
@@ -1101,6 +1106,42 @@ impl Store {
         base: &ConfigFile,
         references: &ServiceRefs,
     ) -> Result<ConfigFile> {
+        self.config_for_refs_with_dispatch_check(base, references, true)
+    }
+
+    /// Non-secret configuration for rendering a plan from the loaded settings.
+    /// This does not authorize dispatch or read external stop markers.
+    pub fn config_for_preview(
+        &self,
+        base: &ConfigFile,
+        references: &ServiceRefs,
+    ) -> Result<ConfigFile> {
+        self.config_for_refs_with_dispatch_check(base, references, false)
+    }
+
+    fn config_for_refs_with_dispatch_check(
+        &self,
+        base: &ConfigFile,
+        references: &ServiceRefs,
+        verify_dispatch: bool,
+    ) -> Result<ConfigFile> {
+        let check = |id: &str| -> Result<&ServiceVersion> {
+            if verify_dispatch {
+                return self.check_dispatch(id);
+            }
+            ensure!(
+                !self.is_blocked(PreferenceGroup::Services),
+                "服务记录暂时不可用，已保留原文件"
+            );
+            let version = self
+                .version(id)
+                .context("找不到任务使用的服务版本，请选择服务后建立新尝试")?;
+            ensure!(
+                !self.service_stopped_in_snapshot(&version.service_id),
+                "所选服务已停用，尚未发送新的请求"
+            );
+            Ok(version)
+        };
         let mut config = base.clone();
         clear_service_fields(&mut config);
         let required = references.required_for(base);
@@ -1111,7 +1152,7 @@ impl Store {
                 .asr
                 .as_deref()
                 .ok_or_else(|| anyhow!("请为这次笔记设置语音服务"))?;
-            let version = self.check_dispatch(id)?;
+            let version = check(id)?;
             if version.config.protocol.purpose() != ServicePurpose::Speech {
                 bail!("所选服务不支持语音识别");
             }
@@ -1127,7 +1168,7 @@ impl Store {
                 .llm
                 .as_deref()
                 .ok_or_else(|| anyhow!("请为这次笔记设置 AI 服务"))?;
-            let version = self.check_dispatch(id)?;
+            let version = check(id)?;
             if version.config.protocol.purpose() != ServicePurpose::Ai {
                 bail!("所选服务不支持 AI 校对或摘要");
             }
@@ -2021,6 +2062,30 @@ mod tests {
         assert!(recovered.version(&version.id).is_some());
         assert!(recovered.is_service_stopped(&version.service_id));
         assert!(recovered.check_dispatch(&version.id).is_err());
+    }
+
+    #[test]
+    fn preview_uses_loaded_services_but_dispatch_rechecks_external_stop_markers() {
+        let (directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "model");
+        let version = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        let mut config = ConfigFile::default();
+        config.llm.enabled = true;
+        let refs = store.default_refs();
+        let preview = store.config_for_preview(&config, &refs).unwrap();
+        assert_eq!(preview.llm.model, "model");
+        let markers = directory.path().join("stopped-services");
+        std::fs::create_dir_all(&markers).unwrap();
+        std::fs::write(markers.join(&version.service_id), b"stopped externally\n").unwrap();
+        // The renderer has a snapshot; it cannot authorize sending. Both real
+        // submission and execution must observe the independently written stop.
+        assert!(store.config_for_preview(&config, &refs).is_ok());
+        assert!(store.config_for_refs(&config, &refs).is_err());
+        assert!(store.resolve_for_execution(&config, &refs).is_err());
+        store.stop_service(&version.service_id).unwrap();
+        assert!(store.config_for_preview(&config, &refs).is_err());
     }
 
     #[test]

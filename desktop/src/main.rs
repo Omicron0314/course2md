@@ -191,6 +191,7 @@ struct Desktop {
     library_issues: Vec<String>,
     library_materials: Vec<PathBuf>,
     library_indexes: BTreeMap<PathBuf, organize::Library>,
+    library_view_cache: course_library::LibraryViewCache,
     library_generation: u64,
     folder_filter: Option<u64>, // None = all; 0 = unfiled
     target_folder: Option<u64>,
@@ -457,6 +458,7 @@ impl Desktop {
             library_issues: Vec::new(),
             library_materials: Vec::new(),
             library_indexes: BTreeMap::new(),
+            library_view_cache: Default::default(),
             library_generation: 0,
             folder_filter: None,
             target_folder: None,
@@ -866,30 +868,55 @@ impl Desktop {
         }
     }
     fn refresh_library(&mut self, cx: &mut Context<Self>) {
-        let locations = self
-            .workspace
-            .as_ref()
-            .map(|w| w.state.libraries.clone())
-            .unwrap_or_else(|| {
-                vec![workspace::LibraryLocation {
-                    id: "legacy".into(),
-                    name: "课程库".into(),
-                    root: self.library_root.clone(),
-                    previous_roots: Vec::new(),
-                }]
-            });
+        let locations = self.registered_storage_locations();
         self.library_generation = self.library_generation.wrapping_add(1);
         let generation = self.library_generation;
+        self.storage_ui
+            .begin_location_checks(generation, &locations);
         self.loading = true;
-        let task = cx.background_executor().spawn(async move {
-            locations
-                .into_iter()
-                .map(|location| {
-                    let scan = backend::scan_library(&location.root);
-                    let organization = organize::Library::load(&location.root);
-                    (location, scan, organization)
+        let missing_outcomes = self
+            .workspace
+            .as_ref()
+            .map(|workspace| {
+                workspace
+                    .state
+                    .tasks
+                    .iter()
+                    .filter(|task| task.outcomes.is_none())
+                    .filter_map(|task| {
+                        Some((
+                            task.id.clone(),
+                            task.plan.source_id.clone(),
+                            task.plan.library_id.clone(),
+                            task.artifact.clone()?,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let task = storage_ui::scan_locations(locations, move |location| {
+            let scan = backend::scan_library(&location.root);
+            let organization = organize::Library::load(&location.root);
+            let cache = course_library::LibraryViewCache::inspect(location, scan.as_ref().ok());
+            let outcomes = missing_outcomes
+                .iter()
+                .filter(|(_, _, library_id, _)| library_id == &location.id)
+                .filter_map(|(id, source, library, path)| {
+                    let manifest =
+                        course2md::artifact::read_manifest(&path.join("manifest.json")).ok()?;
+                    if manifest.task_id != *id || manifest.source_id != *source {
+                        return None;
+                    }
+                    Some((
+                        id.clone(),
+                        source.clone(),
+                        library.clone(),
+                        path.clone(),
+                        serde_json::to_value(manifest.outcomes).ok()?,
+                    ))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (scan, organization, cache, outcomes)
         });
         cx.spawn(async move |this, cx| {
             let results = task.await;
@@ -897,12 +924,39 @@ impl Desktop {
                 if this.library_generation != generation {
                     return;
                 }
+                let current = this.registered_storage_locations();
+                let checks = results
+                    .iter()
+                    .map(|(location, check, _)| (location.clone(), check.clone()))
+                    .collect();
+                if !this
+                    .storage_ui
+                    .finish_location_checks(generation, &current, checks)
+                {
+                    this.refresh_library(cx);
+                    return;
+                }
                 this.loading = false;
                 this.courses.clear();
                 this.library_issues.clear();
                 this.library_materials.clear();
                 this.library_indexes.clear();
-                for (location, scan, organization) in results {
+                this.library_view_cache = Default::default();
+                for (location, _, (scan, organization, cache, outcomes)) in results {
+                    this.library_view_cache.merge(cache);
+                    if let Some(workspace) = &mut this.workspace {
+                        for (id, source, library, path, outcomes) in outcomes {
+                            if let Some(task) = workspace.state.tasks.iter_mut().find(|task| {
+                                task.id == id
+                                    && task.plan.source_id == source
+                                    && task.plan.library_id == library
+                                    && task.artifact.as_ref() == Some(&path)
+                                    && task.outcomes.is_none()
+                            }) {
+                                task.outcomes = Some(outcomes);
+                            }
+                        }
+                    }
                     match scan {
                         Ok(scan) => {
                             this.courses.extend(scan.courses);
@@ -953,19 +1007,24 @@ impl Desktop {
     }
 
     fn course_location(&self, course: &Course) -> Option<&workspace::LibraryLocation> {
+        let cached = self
+            .library_view_cache
+            .locations
+            .get(&course.storage_dir())?;
         self.workspace
             .as_ref()?
             .state
             .libraries
             .iter()
-            .filter(|lib| organize::relative_key(&lib.root, &course.storage_dir()).is_ok())
-            .max_by_key(|lib| lib.root.components().count())
+            .find(|lib| lib.id == cached.id && lib.root == cached.root)
     }
     fn course_folder(&self, course: &Course) -> Option<u64> {
         let root = &self.course_location(course)?.root;
-        self.library_indexes
-            .get(root)?
-            .folder(root, &course.storage_dir())
+        let cached = self
+            .library_view_cache
+            .locations
+            .get(&course.storage_dir())?;
+        self.library_indexes.get(root)?.folder_key(&cached.relative)
     }
     fn open_course(&mut self, course: Course, cx: &mut Context<Self>) {
         self.save_reading_position(cx);

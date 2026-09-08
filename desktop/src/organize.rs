@@ -223,8 +223,12 @@ impl Library {
         self.courses.retain(|_, folder| *folder != id);
     }
     pub fn folder(&self, root: &Path, course: &Path) -> Option<u64> {
+        self.folder_key(&relative_key(root, course).ok()?)
+    }
+    /// Query a relative key already validated by the background library scan.
+    pub fn folder_key(&self, key: &Path) -> Option<u64> {
         self.courses
-            .get(&relative_key(root, course).ok()?)
+            .get(key)
             .copied()
             .filter(|id| self.folders.contains_key(id))
     }

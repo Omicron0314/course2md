@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{Context as _, Result, ensure};
 use gpui_component::button::*;
 use std::{
+    collections::BTreeMap,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -25,9 +26,135 @@ pub struct State {
     resume_task: Option<String>,
     cleanup: bool,
     association: bool,
+    location_checks: LocationChecks,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct LocationCheck {
+    pub available: bool,
+    pub needs_reassociation: bool,
+    pub problem: Option<String>,
+}
+
+#[derive(Default)]
+struct LocationChecks {
+    generation: u64,
+    expected: BTreeMap<String, PathBuf>,
+    results: BTreeMap<String, (PathBuf, LocationCheck)>,
+}
+
+fn location_paths(locations: &[workspace::LibraryLocation]) -> BTreeMap<String, PathBuf> {
+    locations
+        .iter()
+        .map(|location| (location.id.clone(), location.root.clone()))
+        .collect()
+}
+
+impl LocationChecks {
+    fn begin(&mut self, generation: u64, locations: &[workspace::LibraryLocation]) {
+        self.generation = generation;
+        self.expected = location_paths(locations);
+        // A refresh can keep useful facts about the same path. A new path must
+        // remain unknown until its own check returns.
+        self.results
+            .retain(|id, (root, _)| self.expected.get(id) == Some(root));
+    }
+
+    fn get(&self, location: &workspace::LibraryLocation) -> Option<&LocationCheck> {
+        self.results
+            .get(&location.id)
+            .filter(|(root, _)| root == &location.root)
+            .map(|(_, check)| check)
+    }
+
+    fn finish(
+        &mut self,
+        generation: u64,
+        current: &[workspace::LibraryLocation],
+        checks: Vec<(workspace::LibraryLocation, LocationCheck)>,
+    ) -> bool {
+        if generation != self.generation
+            || location_paths(current) != self.expected
+            || checks.len() != self.expected.len()
+            || checks
+                .iter()
+                .any(|(location, _)| self.expected.get(&location.id) != Some(&location.root))
+        {
+            return false;
+        }
+        self.results = checks
+            .into_iter()
+            .map(|(location, check)| (location.id, (location.root, check)))
+            .collect();
+        true
+    }
+}
+
+fn inspect_location(location: &workspace::LibraryLocation) -> LocationCheck {
+    let available = std::fs::read_dir(&location.root).is_ok();
+    let mut check = LocationCheck {
+        available,
+        needs_reassociation: false,
+        problem: None,
+    };
+    if !available || location.id == "legacy" {
+        return check;
+    }
+    match std::fs::read_to_string(location.root.join(".course2md-library-id")) {
+        Ok(identity) if identity.trim() == location.id => {}
+        Ok(_) => {
+            check.problem =
+                Some("保存位置对应其他课程库，请恢复原位置或在存储设置中重新登记".into())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            check.needs_reassociation = true
+        }
+        Err(error) => check.problem = Some(format!("无法读取课程库关联记录：{error}")),
+    }
+    check
+}
+
+/// All filesystem probes and the caller's library scan run on the blocking
+/// pool, even when this future is polled by the UI executor.
+pub(super) async fn scan_locations<T, F>(
+    locations: Vec<workspace::LibraryLocation>,
+    scan: F,
+) -> Vec<(workspace::LibraryLocation, LocationCheck, T)>
+where
+    T: Send + 'static,
+    F: Fn(&workspace::LibraryLocation) -> T + Send + 'static,
+{
+    smol::unblock(move || {
+        locations
+            .into_iter()
+            .map(|location| {
+                let check = inspect_location(&location);
+                let result = scan(&location);
+                (location, check, result)
+            })
+            .collect()
+    })
+    .await
 }
 
 impl State {
+    pub(super) fn begin_location_checks(
+        &mut self,
+        generation: u64,
+        locations: &[workspace::LibraryLocation],
+    ) {
+        self.location_checks.begin(generation, locations);
+    }
+
+    pub(super) fn finish_location_checks(
+        &mut self,
+        generation: u64,
+        current: &[workspace::LibraryLocation],
+        checks: Vec<(workspace::LibraryLocation, LocationCheck)>,
+    ) -> bool {
+        self.location_checks.finish(generation, current, checks)
+    }
+
     fn title(&self) -> &'static str {
         if self.association {
             "重新关联保存位置"
@@ -52,6 +179,53 @@ impl Render for StorageDialog {
                 .aria_label(desktop.storage_ui.title())
                 .child(desktop.storage_operation_view(window, cx))
         })
+    }
+}
+
+impl Desktop {
+    pub(super) fn registered_storage_locations(&self) -> Vec<workspace::LibraryLocation> {
+        self.workspace
+            .as_ref()
+            .map(|workspace| workspace.state.libraries.clone())
+            .unwrap_or_else(|| {
+                vec![workspace::LibraryLocation {
+                    id: "legacy".into(),
+                    name: "课程库".into(),
+                    root: self.library_root.clone(),
+                    previous_roots: Vec::new(),
+                }]
+            })
+    }
+
+    pub(super) fn cached_location_check(
+        &self,
+        location: &workspace::LibraryLocation,
+    ) -> Option<&LocationCheck> {
+        self.storage_ui.location_checks.get(location)
+    }
+
+    /// None means that at least one current path has not been checked yet. It
+    /// must be shown as checking, never as an offline or empty library.
+    pub(super) fn cached_library_access(&self) -> Option<storage::LibraryAccess> {
+        let locations = self.registered_storage_locations();
+        let mut access = storage::LibraryAccess {
+            available: Vec::new(),
+            unavailable: Vec::new(),
+        };
+        for location in &locations {
+            let check = self.cached_location_check(location)?;
+            if access.available.contains(&location.root)
+                || access.unavailable.contains(&location.root)
+            {
+                continue;
+            }
+            if check.available {
+                access.available.push(location.root.clone());
+            } else {
+                access.unavailable.push(location.root.clone());
+            }
+        }
+        Some(access)
     }
 }
 
@@ -112,12 +286,6 @@ fn validate_registered_destination(
         "目标与另一个已登记课程库重叠，请选择独立的空文件夹"
     );
     Ok(())
-}
-
-pub fn needs_reassociation(location: &workspace::LibraryLocation) -> bool {
-    location.root.is_dir()
-        && std::fs::symlink_metadata(location.root.join(".course2md-library-id"))
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Apply only after the destination copy is verified. Keeping the library ID
@@ -368,13 +536,13 @@ impl Desktop {
                             "已重新关联「{}」。已有笔记保持完整，可以继续原任务。",
                             location.name
                         ));
-                        this.refresh_library(cx);
                     }
                     Err(error) => {
                         this.storage_ui.error = Some(format!("尚未重新关联：{error:#}"));
                         this.open_storage_dialog(window, cx);
                     }
                 }
+                this.refresh_library(cx);
                 this.start_next_task(cx);
                 cx.notify();
             });
@@ -755,6 +923,7 @@ impl Desktop {
         self.storage_ui.cancel = None;
         self.storage_ui.error = Some(message);
         self.restore_storage_state(cx);
+        self.refresh_library(cx);
         self.poll_storage(cx);
         self.start_next_task(cx);
         cx.notify();
@@ -887,14 +1056,7 @@ impl Desktop {
 
     pub fn storage_status_panel(&self, cx: &mut Context<Self>) -> Div {
         let mut view = v_flex().gap_3();
-        if let Some(workspace) = &self.workspace {
-            let access = storage::library_access(
-                workspace
-                    .state
-                    .libraries
-                    .iter()
-                    .map(|library| library.root.clone()),
-            );
+        if let Some(access) = self.cached_library_access() {
             let message = match access.coverage() {
                 storage::LibraryCoverage::Unavailable => Some(
                     "已登记的保存位置暂时都无法访问，笔记内容尚未读取；草稿和任务记录仍保留。"
@@ -914,6 +1076,16 @@ impl Desktop {
                         .text_color(color(MUTED)),
                 );
             }
+        } else {
+            view = view.child(
+                h_flex()
+                    .gap_2()
+                    .child(crate::motion::spinner("storage-locations-checking", cx))
+                    .child(
+                        accessible_text("storage-locations-checking-label", "正在检查保存位置…")
+                            .text_sm(),
+                    ),
+            );
         }
         if let Some(error) = &self.storage_ui.error {
             view = view.child(
@@ -924,16 +1096,17 @@ impl Desktop {
         }
         if let Some(workspace) = &self.workspace {
             for (index, location) in workspace.state.libraries.iter().enumerate() {
-                if needs_reassociation(location) {
+                let Some(check) = self.cached_location_check(location) else {
+                    continue;
+                };
+                if check.needs_reassociation {
                     let id = location.id.clone();
                     view = view.child(v_flex().gap_2()
                         .child(accessible_text(("storage-association-needed", index), format!("「{}」的关联记录缺失。重新关联后可继续使用这个位置，已有文件会保留。", location.name)))
                         .child(accessible_text(("storage-association-path", index), location.root.display().to_string()).text_sm().text_color(color(MUTED)))
                         .child(control(("reassociate-storage-location", index)).icon(icons::storage()).label("重新关联此保存位置").self_start().disabled(self.storage_ui.busy)
                             .on_click(cx.listener(move |this, _, window, cx| this.begin_library_reassociation(id.clone(), window, cx)))));
-                } else if location.root.is_dir()
-                    && let Err(error) = workspace::check_library(location)
-                {
+                } else if let Some(error) = &check.problem {
                     view = view.child(
                         accessible_text(
                             ("storage-association-error", index),
@@ -1147,6 +1320,7 @@ impl Desktop {
                     }
                     Err(error) => this.storage_ui.error = Some(format!("{error:#}")),
                 }
+                this.refresh_library(cx);
                 this.start_next_task(cx);
                 cx.notify();
             });
@@ -1157,9 +1331,103 @@ impl Desktop {
 
 #[cfg(test)]
 mod tests {
-    use super::{publish_location, validate_registered_destination};
+    use super::{
+        LocationChecks, inspect_location, publish_location, scan_locations,
+        validate_registered_destination,
+    };
     use crate::{ConversionOptions, source, storage, workspace};
     use std::{path::PathBuf, sync::atomic::AtomicBool};
+
+    fn test_location(root: PathBuf) -> workspace::LibraryLocation {
+        workspace::LibraryLocation {
+            id: "test-library".into(),
+            name: "课程库".into(),
+            root,
+            previous_roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn slow_library_scan_runs_outside_the_calling_thread() {
+        let directory = tempfile::tempdir().unwrap();
+        let location = test_location(directory.path().to_owned());
+        std::fs::write(directory.path().join(".course2md-library-id"), &location.id).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let caller = std::thread::current().id();
+        smol::block_on(async {
+            let mut scan = Box::pin(scan_locations(vec![location.clone()], move |_| {
+                started_tx.send(std::thread::current().id()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+            }));
+            // Polling the real scan boundary returns while the worker remains
+            // blocked. This checks thread isolation, not a native hang fixture.
+            assert!(smol::future::poll_once(&mut scan).await.is_none());
+            let worker = started_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            assert_ne!(worker, caller);
+            let mut cache = LocationChecks::default();
+            cache.begin(1, std::slice::from_ref(&location));
+            assert!(cache.get(&location).is_none());
+            release_tx.send(()).unwrap();
+            let result = scan.await;
+            assert!(result[0].1.available);
+            assert!(!result[0].1.needs_reassociation);
+        });
+    }
+
+    #[test]
+    fn location_checks_reject_old_generations_and_changed_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = test_location(directory.path().join("old"));
+        let new = test_location(directory.path().join("new"));
+        std::fs::create_dir(&old.root).unwrap();
+        std::fs::create_dir(&new.root).unwrap();
+        std::fs::write(old.root.join(".course2md-library-id"), &old.id).unwrap();
+        let mut cache = LocationChecks::default();
+        cache.begin(1, std::slice::from_ref(&old));
+        assert!(cache.finish(
+            1,
+            std::slice::from_ref(&old),
+            vec![(old.clone(), inspect_location(&old))]
+        ));
+        assert!(cache.get(&old).unwrap().available);
+        cache.begin(2, std::slice::from_ref(&old));
+        assert!(
+            cache.get(&old).is_some(),
+            "same-path refresh keeps the last checked result"
+        );
+        assert!(!cache.finish(
+            1,
+            std::slice::from_ref(&old),
+            vec![(old.clone(), inspect_location(&old))]
+        ));
+        assert!(!cache.finish(
+            2,
+            std::slice::from_ref(&new),
+            vec![(old.clone(), inspect_location(&old))]
+        ));
+        assert!(
+            cache.get(&new).is_none(),
+            "a new path is pending, not offline"
+        );
+        cache.begin(3, std::slice::from_ref(&new));
+        assert!(cache.get(&old).is_none());
+        assert!(!cache.finish(
+            2,
+            std::slice::from_ref(&new),
+            vec![(old.clone(), inspect_location(&old))]
+        ));
+        assert!(cache.finish(
+            3,
+            std::slice::from_ref(&new),
+            vec![(new.clone(), inspect_location(&new))]
+        ));
+        assert!(cache.get(&new).unwrap().needs_reassociation);
+    }
 
     #[test]
     fn registry_commit_preserves_ids_and_moves_only_library_owned_paths() {

@@ -8,7 +8,6 @@ use gpui_component::{
 use std::{
     cell::RefCell,
     ops::Range,
-    path::Path,
     rc::Rc,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -73,6 +72,7 @@ struct ImageViewer {
     index: usize,
     title: String,
     source: Option<nav::SourceTarget>,
+    source_available: bool,
     version: PathBuf,
     zoom: Option<f32>,
     return_focus: Option<FocusHandle>,
@@ -107,6 +107,8 @@ pub(crate) struct State {
     viewer: Option<ImageViewer>,
     exports: BTreeMap<PathBuf, PathBuf>,
     source_loading: bool,
+    source: Option<nav::SourceTarget>,
+    source_available: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl State {
@@ -173,6 +175,8 @@ impl State {
             viewer: None,
             exports: BTreeMap::new(),
             source_loading: false,
+            source: None,
+            source_available: false,
             _subscriptions: vec![subscription],
         }
     }
@@ -627,6 +631,8 @@ impl Desktop {
         self.reader_ui.frames.clear();
         self.reader_ui.versions.clear();
         self.reader_ui.issues.clear();
+        self.reader_ui.source = None;
+        self.reader_ui.source_available = false;
         self.reader_ui.matches.clear();
         self.reader_ui.find_open = false;
         self.reader_ui.info_open = false;
@@ -641,13 +647,38 @@ impl Desktop {
             return;
         };
         let path = preview.course.dir.clone();
+        let source = self.unmapped_reader_source();
+        let locations = self
+            .workspace
+            .as_ref()
+            .map(|workspace| {
+                workspace
+                    .state
+                    .libraries
+                    .iter()
+                    .map(|library| (library.root.clone(), library.previous_roots.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         self.reader_ui.generation += 1;
         let generation = self.reader_ui.generation;
         self.reader_ui.data_loading = true;
         cx.spawn(async move |this, cx| {
-            let data = cx
+            let (data, source, source_available) = cx
                 .background_executor()
-                .spawn(async move { load_reader_data(&preview) })
+                .spawn(async move {
+                    let source = source.map(|source| match source {
+                        nav::SourceTarget::Local(path) => {
+                            nav::SourceTarget::Local(nav::relocated_source(&path, &locations))
+                        }
+                        other => other,
+                    });
+                    let available = source.as_ref().is_some_and(|source| match source {
+                        nav::SourceTarget::Web(_) => true,
+                        nav::SourceTarget::Local(path) => path.is_file(),
+                    });
+                    (load_reader_data(&preview), source, available)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.reader_ui.generation != generation
@@ -664,6 +695,8 @@ impl Desktop {
                 this.reader_ui.frames = data.frames;
                 this.reader_ui.versions = data.versions;
                 this.reader_ui.issues = data.issues;
+                this.reader_ui.source = source;
+                this.reader_ui.source_available = source_available;
                 this.reader_ui.data_loading = false;
                 this.reader_ui.layout = None;
                 this.reader_ui.restore_generation += 1;
@@ -691,11 +724,14 @@ impl Desktop {
         )
     }
     fn reader_source(&self) -> Option<nav::SourceTarget> {
+        self.reader_ui.source.clone()
+    }
+    fn unmapped_reader_source(&self) -> Option<nav::SourceTarget> {
         if let Some(path) = self
             .reader_source_key()
             .and_then(|key| self.workspace.as_ref()?.state.reader_sources.get(&key))
         {
-            return Some(nav::SourceTarget::Local(self.map_reader_source(path)));
+            return Some(nav::SourceTarget::Local(path.clone()));
         }
         let preview = self.preview.as_ref()?;
         let raw = preview
@@ -709,27 +745,7 @@ impl Desktop {
                     .find(|(key, _)| key == "来源")
                     .map(|(_, value)| (value.as_str(), false))
             })?;
-        nav::source_target(raw.0, raw.1).map(|target| match target {
-            nav::SourceTarget::Local(path) => {
-                nav::SourceTarget::Local(self.map_reader_source(&path))
-            }
-            other => other,
-        })
-    }
-    fn map_reader_source(&self, path: &Path) -> PathBuf {
-        let locations = self
-            .workspace
-            .as_ref()
-            .map(|workspace| {
-                workspace
-                    .state
-                    .libraries
-                    .iter()
-                    .map(|library| (library.root.clone(), library.previous_roots.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        nav::relocated_source(path, &locations)
+        nav::source_target(raw.0, raw.1)
     }
     fn open_reader_source(&mut self, seconds: Option<f64>, cx: &mut Context<Self>) {
         let Some(source) = self.reader_source() else {
@@ -836,7 +852,10 @@ impl Desktop {
                         })
                 });
                 this.message = Some(match result {
-                    Ok(()) => format!("已定位原视频：{}", path.display()),
+                    Ok(()) => {
+                        this.refresh_reader_data(cx);
+                        format!("已定位原视频：{}", path.display())
+                    }
                     Err(error) => format!("原视频位置没有更改：{error:#}"),
                 });
                 cx.notify();
@@ -1340,7 +1359,7 @@ impl Desktop {
                     ));
                 }
                 nav::SourceTarget::Local(path) => {
-                    let exists = path.is_file();
+                    let exists = self.reader_ui.source_available;
                     meta_facts = meta_facts
                         .child(
                             theme::accessible_text(
@@ -2095,13 +2114,7 @@ impl Desktop {
                 .into_any_element(),
             ));
         }
-        if let Some(path) = self
-            .reader_ui
-            .exports
-            .get(&preview.course.dir)
-            .filter(|path| path.is_file())
-            .cloned()
-        {
+        if let Some(path) = self.reader_ui.exports.get(&preview.course.dir).cloned() {
             let label = format!(
                 "已导出：{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
@@ -2740,10 +2753,7 @@ impl Desktop {
                         .into_any_element(),
                         false,
                     ));
-                } else if source.as_ref().is_some_and(|source| match source {
-                    nav::SourceTarget::Web(_) => true,
-                    nav::SourceTarget::Local(path) => path.is_file(),
-                }) {
+                } else if source.is_some() && self.reader_ui.source_available {
                     actions = actions.child(reveal_article(
                         ("reveal-frame-open-original", index).into(),
                         (quiet(("frame-open-original", index))
@@ -2782,8 +2792,8 @@ impl Desktop {
                 .min_h_0()
                 .w_full()
                 .gap(px(24.))
-                .items_start()
-                .child(article)
+                .items_stretch()
+                .child(article.h_full())
                 .child(self.reader_toc_panel(&headings, current_chapter, true, cx))
                 .into_any_element()
         } else if toc_open {
@@ -2911,6 +2921,7 @@ impl Desktop {
             index,
             title: preview.course.title.clone(),
             source: self.reader_source(),
+            source_available: self.reader_ui.source_available,
             version: preview.course.dir.clone(),
             zoom: None,
             return_focus: window.focused(cx),
@@ -3295,10 +3306,7 @@ impl Desktop {
                     .on_click(move |_, _, cx| cx.open_url(&url)))
                 .into_any_element(),
             ));
-        } else if let Some(source) = original_source.filter(|source| match source {
-            nav::SourceTarget::Web(_) => true,
-            nav::SourceTarget::Local(path) => path.is_file(),
-        }) {
+        } else if let Some(source) = original_source.filter(|_| viewer.source_available) {
             actions = actions.child(reveal(
                 "reveal-image-open-original",
                 (control("image-open-original")

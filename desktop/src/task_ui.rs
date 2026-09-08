@@ -9,6 +9,62 @@ use crate::{
 use anyhow::{Context as _, Result, ensure};
 use gpui_component::button::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlanValidation {
+    Preview,
+    Submission,
+}
+
+fn validate_plan_storage(
+    validation: PlanValidation,
+    library: &workspace::LibraryLocation,
+    folder: Option<u64>,
+    cached: Option<&crate::storage_ui::LocationCheck>,
+    index: Option<&organize::Library>,
+) -> Result<()> {
+    let folder_exists = match validation {
+        PlanValidation::Preview => {
+            let check = cached.context("正在检查保存位置，请稍候")?;
+            ensure!(
+                check.available,
+                "保存位置暂时不可访问。请连接对应磁盘，或在设置的存储中选择其他位置。当前输入和已有任务仍保留。"
+            );
+            ensure!(
+                !check.needs_reassociation,
+                "这个保存位置尚未重新关联，请在设置的存储中选择“重新关联此保存位置”。原任务和文件仍保留。"
+            );
+            if let Some(problem) = &check.problem {
+                anyhow::bail!("{problem}");
+            }
+            match folder {
+                Some(folder) => index
+                    .context("正在读取文件夹信息，请稍候")?
+                    .folders
+                    .contains_key(&folder),
+                None => true,
+            }
+        }
+        PlanValidation::Submission => {
+            ensure!(
+                library.root.is_dir(),
+                "保存位置暂时不可访问。请连接对应磁盘，或在设置的存储中选择其他位置。当前输入和已有任务仍保留。"
+            );
+            workspace::check_library(library)?;
+            match folder {
+                Some(folder) => organize::Library::load(&library.root)?
+                    .folders
+                    .contains_key(&folder),
+                None => true,
+            }
+        }
+    };
+    ensure!(
+        folder_exists,
+        "文件夹已删除。请选择其他文件夹，或保存到未分类。"
+    );
+    Ok(())
+}
+
 fn update_draft_source_title(
     draft: &mut workspace::Draft,
     input: String,
@@ -110,7 +166,8 @@ impl Desktop {
             Some(environment) if environment.gpu.is_some() && environment.llama => AsrProvider::Gpu,
             Some(environment) if environment.npu && !environment.llama => AsrProvider::Npu,
             Some(_) => AsrProvider::Cpu,
-            None => course2md::config::default_provider_hint(),
+            None if course2md::config::apple_native_available() => AsrProvider::Coreml,
+            None => AsrProvider::Cpu,
         }
     }
 
@@ -290,10 +347,10 @@ impl Desktop {
         }
     }
 
-    fn build_plan(&self) -> Result<TaskPlan> {
+    fn build_plan(&self, validation: PlanValidation) -> Result<TaskPlan> {
         self.ordinary_preferences_ready_for_submit()?;
-        let workspace = self.workspace.as_ref().context("草稿与任务记录尚未恢复")?;
-        let draft = workspace.state.draft().context("没有当前草稿")?;
+        let workspace = self.workspace.as_ref().context("输入与任务记录尚未恢复")?;
+        let draft = workspace.state.draft().context("当前输入尚未准备好")?;
         ensure!(
             !draft.input.is_empty(),
             if draft.online {
@@ -345,19 +402,13 @@ impl Desktop {
             .state
             .library(&draft.library_id)
             .context("保存位置已不在课程库中，请选择保存位置")?;
-        ensure!(
-            library.root.is_dir(),
-            "保存位置暂时不可访问。请连接对应磁盘，或在设置的存储中选择其他位置。草稿和已有任务仍保留。"
-        );
-        workspace::check_library(library)?;
-        if let Some(folder) = draft.folder {
-            ensure!(
-                organize::Library::load(&library.root)?
-                    .folders
-                    .contains_key(&folder),
-                "文件夹已删除。请选择其他文件夹，或保存到未分类。"
-            );
-        }
+        validate_plan_storage(
+            validation,
+            library,
+            draft.folder,
+            self.cached_location_check(library),
+            self.library_indexes.get(&library.root),
+        )?;
         let mut config = draft
             .base_config
             .clone()
@@ -436,9 +487,17 @@ impl Desktop {
             asr: draft.asr_service.clone().or(defaults.asr),
             llm: draft.ai_service.clone().or(defaults.llm),
         };
-        let config = self.preferences.config_for_refs(&config, &refs)?;
-        validate_plan_config(&source.input, &config)?;
-        if !source.online {
+        let config = match validation {
+            PlanValidation::Preview => self.preferences.config_for_preview(&config, &refs)?,
+            PlanValidation::Submission => self.preferences.config_for_refs(&config, &refs)?,
+        };
+        let mut validation_config = config.clone();
+        validation_config
+            .defaults
+            .provider
+            .get_or_insert_with(|| self.recommended_local_provider());
+        validate_plan_config(&source.input, &validation_config)?;
+        if validation == PlanValidation::Submission && !source.online {
             ensure!(
                 std::path::Path::new(&source.input).is_file(),
                 "原视频已移动或无法读取，请重新选择视频"
@@ -459,13 +518,16 @@ impl Desktop {
         })
     }
 
-    /// The form and submission use the same static checks; no service request is made.
+    /// The form uses loaded snapshots. Submission rechecks live storage, local
+    /// source and dispatch markers before a task can enter the queue.
     pub fn submission_issue(&self) -> Option<String> {
-        self.build_plan().err().map(|error| format!("{error:#}"))
+        self.build_plan(PlanValidation::Preview)
+            .err()
+            .map(|error| format!("{error:#}"))
     }
 
     pub fn matching_current_task(&self) -> Option<&TaskRecord> {
-        let plan = self.build_plan().ok()?;
+        let plan = self.build_plan(PlanValidation::Preview).ok()?;
         self.workspace.as_ref()?.state.tasks.iter().find(|task| {
             !task.state.finished() && task.handled_by.is_none() && task.plan.same_work(&plan)
         })
@@ -476,7 +538,7 @@ impl Desktop {
             return;
         }
         self.message = None;
-        let plan = match self.build_plan() {
+        let plan = match self.build_plan(PlanValidation::Submission) {
             Ok(plan) => plan,
             Err(error) => {
                 self.source_validation = Some(format!("{error:#}"));
@@ -1088,7 +1150,7 @@ impl Desktop {
         let selected = workspace.state.selected_task.clone();
         let tasks = workspace.state.tasks.clone();
         let pending = tasks.iter().filter(|task| !task.state.finished()).count();
-        let mut content = v_flex().gap_4().child(
+        let mut content = v_flex().pt(px(24.)).gap_4().child(
             h_flex()
                 .gap_3()
                 .items_center()
@@ -1333,8 +1395,9 @@ impl Desktop {
                     .workspace
                     .as_ref()
                     .and_then(|workspace| workspace.state.library(&task.plan.library_id))
-                    && library.root.is_dir()
-                    && !library.root.join(".course2md-library-id").exists()
+                    && self
+                        .cached_location_check(library)
+                        .is_some_and(|check| check.needs_reassociation)
                 {
                     let library_id = library.id.clone();
                     actions = actions.child(
@@ -1995,8 +2058,9 @@ impl Desktop {
                 .workspace
                 .as_ref()
                 .and_then(|workspace| workspace.state.library(&task.plan.library_id))
-                && library.root.is_dir()
-                && !library.root.join(".course2md-library-id").exists()
+                && self
+                    .cached_location_check(library)
+                    .is_some_and(|check| check.needs_reassociation)
             {
                 let library_id = library.id.clone();
                 actions = actions.child(
@@ -2201,7 +2265,76 @@ fn validate_plan_config(source: &str, config: &course2md::settings::ConfigFile) 
 
 #[cfg(test)]
 mod tests {
-    use super::{update_draft_source_title, validate_plan_config};
+    use super::{
+        PlanValidation, update_draft_source_title, validate_plan_config, validate_plan_storage,
+    };
+
+    #[test]
+    fn plan_preview_uses_loaded_storage_but_submission_rechecks_identity_and_folders() {
+        let directory = tempfile::tempdir().unwrap();
+        let location = crate::workspace::LibraryLocation {
+            id: "library".into(),
+            name: "课程库".into(),
+            root: directory.path().to_owned(),
+            previous_roots: Vec::new(),
+        };
+        let cached = crate::storage_ui::LocationCheck {
+            available: true,
+            needs_reassociation: false,
+            problem: None,
+        };
+        let mut index = crate::organize::Library::default();
+        index.folders.insert(7, "复习".into());
+        std::fs::write(
+            location.root.join(".course2md-library-id"),
+            "different-library",
+        )
+        .unwrap();
+        validate_plan_storage(
+            PlanValidation::Preview,
+            &location,
+            Some(7),
+            Some(&cached),
+            Some(&index),
+        )
+        .unwrap();
+        assert!(
+            validate_plan_storage(
+                PlanValidation::Submission,
+                &location,
+                Some(7),
+                Some(&cached),
+                Some(&index)
+            )
+            .is_err()
+        );
+        std::fs::write(location.root.join(".course2md-library-id"), &location.id).unwrap();
+        validate_plan_storage(
+            PlanValidation::Submission,
+            &location,
+            None,
+            Some(&cached),
+            Some(&index),
+        )
+        .unwrap();
+        assert!(
+            validate_plan_storage(
+                PlanValidation::Submission,
+                &location,
+                Some(7),
+                Some(&cached),
+                Some(&index)
+            )
+            .is_err(),
+            "a removed folder cannot be authorized by an old preview"
+        );
+        assert!(
+            validate_plan_storage(PlanValidation::Preview, &location, None, None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("正在检查")
+        );
+    }
 
     fn source(input: &str, title: &str) -> crate::source::Source {
         crate::source::Source {
@@ -2322,14 +2455,10 @@ mod tests {
 }
 pub(crate) fn task_component_outcomes(
     task: &TaskRecord,
-    path: &std::path::Path,
+    _path: &std::path::Path,
 ) -> Vec<(String, String, course2md::artifact::Outcome)> {
-    let value = task.outcomes.clone().or_else(|| {
-        course2md::artifact::read_manifest(&path.join("manifest.json"))
-            .ok()
-            .and_then(|m| serde_json::to_value(m.outcomes).ok())
-    });
-    let Some(value) = value else {
+    // Missing legacy outcomes are hydrated by the background library refresh.
+    let Some(value) = &task.outcomes else {
         return Vec::new();
     };
     let mut results = Vec::new();

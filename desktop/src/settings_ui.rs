@@ -1337,7 +1337,9 @@ impl Desktop {
 
     /// One saved service as a mock 服务行卡: name + status badge + meta + quiet actions.
     fn service_card(&self, version: &ServiceVersion, cx: &mut Context<Self>) -> Div {
-        let stopped = self.preferences.is_service_stopped(&version.service_id);
+        let stopped = self
+            .preferences
+            .service_stopped_in_snapshot(&version.service_id);
         let id = version.id.clone();
         let service_id = version.service_id.clone();
         let purpose = version.config.protocol.purpose();
@@ -1554,7 +1556,7 @@ impl Desktop {
         let mut latest = BTreeMap::<String, ServiceVersion>::new();
         for version in self.preferences.versions().filter(|v| {
             v.config.protocol.purpose() == purpose
-                && !self.preferences.is_service_stopped(&v.service_id)
+                && !self.preferences.service_stopped_in_snapshot(&v.service_id)
         }) {
             if latest
                 .get(&version.service_id)
@@ -1580,7 +1582,10 @@ impl Desktop {
                         version.config.host(),
                         version.config.model,
                         version.number,
-                        if self.preferences.is_service_stopped(&version.service_id) {
+                        if self
+                            .preferences
+                            .service_stopped_in_snapshot(&version.service_id)
+                        {
                             " · 已停用"
                         } else {
                             ""
@@ -1618,7 +1623,10 @@ impl Desktop {
                             "{} · 版本 {}{}",
                             version.config.name,
                             version.number,
-                            if self.preferences.is_service_stopped(&version.service_id) {
+                            if self
+                                .preferences
+                                .service_stopped_in_snapshot(&version.service_id)
+                            {
                                 " · 已停用"
                             } else {
                                 ""
@@ -1631,7 +1639,10 @@ impl Desktop {
                     this.bind_service(purpose, Some(id.to_string()), current_task, cx);
                 }));
             for version in &choices {
-                if self.preferences.is_service_stopped(&version.service_id) {
+                if self
+                    .preferences
+                    .service_stopped_in_snapshot(&version.service_id)
+                {
                     picker = picker.disable_option(&version.id);
                 }
             }
@@ -3008,12 +3019,29 @@ impl Desktop {
     }
     fn storage_settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut view = v_flex().gap_5().child(
-            text(
-                "storage-policy",
-                "在这些位置保存笔记。更改默认位置只影响新建笔记。",
-            )
-            .text_sm()
-            .text_color(color(MUTED)),
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_3()
+                .flex_wrap()
+                .child(
+                    text(
+                        "storage-policy",
+                        "在这些位置保存笔记。更改默认位置只影响新建笔记。",
+                    )
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(color(MUTED)),
+                )
+                .child(
+                    quiet("refresh-storage-locations")
+                        .icon(icons::refresh())
+                        .label("刷新")
+                        .loading(self.loading)
+                        .disabled(self.loading)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
+                ),
         );
         view = view.child(self.storage_status_panel(cx));
         if let Some(workspace) = &self.workspace {
@@ -3022,7 +3050,9 @@ impl Desktop {
                 let id = library.id.clone();
                 let move_id = id.clone();
                 let default = workspace.state.default_library == id;
-                let offline = !root.is_dir();
+                let offline = self
+                    .cached_location_check(library)
+                    .is_some_and(|check| !check.available);
                 view=view.child(v_flex().gap_2().w_full().p_4().bg(color(SURFACE)).border_1().border_color(color(CARD_LINE)).rounded(RADIUS_CARD)
                 .child(h_flex().gap_2().items_center().flex_wrap()
                     .child(text(("storage-location-name",index),library.name.clone()).font_weight(FontWeight::SEMIBOLD))

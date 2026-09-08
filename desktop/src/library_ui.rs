@@ -544,17 +544,10 @@ impl Desktop {
         });
         let origin = if let Some(path) = &storage {
             let root = self
-                .workspace
-                .as_ref()
-                .and_then(|workspace| {
-                    workspace
-                        .state
-                        .libraries
-                        .iter()
-                        .filter(|library| organize::relative_key(&library.root, path).is_ok())
-                        .max_by_key(|library| library.root.components().count())
-                })
-                .map(|library| library.root.clone())
+                .library_view_cache
+                .locations
+                .get(path)
+                .map(|location| location.root.clone())
                 .unwrap_or_else(|| self.library_root.clone());
             FolderOrigin {
                 root,
@@ -563,15 +556,15 @@ impl Desktop {
         } else {
             self.current_folder_origin()
         };
-        let loaded = organize::Library::load(&origin.root);
-        let load_error = loaded
-            .as_ref()
-            .err()
-            .map(|error| format!("无法读取文件夹：{error:#}"));
-        let organization = loaded.unwrap_or_default();
+        let loaded = self.library_indexes.get(&origin.root);
+        let checking = loaded.is_none() && self.loading;
+        let load_error =
+            (loaded.is_none() && !checking).then(|| "文件夹暂不可用，请刷新课程库。".to_owned());
         let folder = storage
             .as_ref()
-            .and_then(|path| organization.folder(&origin.root, path))
+            .and_then(|path| self.library_view_cache.locations.get(path))
+            .filter(|location| location.root == origin.root)
+            .and_then(|location| loaded?.folder_key(&location.relative))
             .or_else(|| {
                 if storage.is_none() {
                     self.target_folder
@@ -579,12 +572,13 @@ impl Desktop {
                     None
                 }
             });
-        let label = if load_error.is_some() {
+        let label = if checking {
+            "正在读取文件夹…".to_owned()
+        } else if load_error.is_some() {
             "文件夹暂不可用".to_owned()
         } else if let Some(id) = folder {
-            organization
-                .folders
-                .get(&id)
+            loaded
+                .and_then(|organization| organization.folders.get(&id))
                 .cloned()
                 .unwrap_or_else(|| "文件夹已删除，请重新选择".into())
         } else {
@@ -596,7 +590,9 @@ impl Desktop {
             folder,
             load_error,
             label,
-            folders: organization.folders,
+            folders: loaded
+                .map(|organization| organization.folders.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -745,7 +741,7 @@ impl Desktop {
             .h_auto()
             .min_h(rems(2.6))
             .py_2()
-            .disabled(load_error.is_some())
+            .disabled(self.loading || load_error.is_some())
             .icon(IconName::Folder)
             .accessibility_label(format!("保存到文件夹：{label}"))
             .tooltip(label.clone())
@@ -801,7 +797,7 @@ impl Desktop {
             .when(max_w.is_none(), |button| button.flex_1())
             .px_2()
             .text_color(color(MUTED))
-            .disabled(context.load_error.is_some())
+            .disabled(self.loading || context.load_error.is_some())
             .icon(IconName::Folder)
             .accessibility_label(format!("保存到文件夹：{label}"))
             .tooltip(label.clone())

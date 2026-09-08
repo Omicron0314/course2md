@@ -16,6 +16,9 @@ use std::sync::{
 fn help(text: impl Into<SharedString>) -> Div {
     let text = text.into();
     div()
+        .min_w_0()
+        .max_w_full()
+        .whitespace_normal()
         .text_sm()
         .text_color(color(MUTED))
         .child(accessible_text(text_id("help", &text), text))
@@ -47,6 +50,14 @@ fn platform_mark(name: &'static str, icon: Icon) -> Div {
                 .text_color(color(GRAY))
                 .child(name),
         )
+}
+
+/// Align an option's icon with the first text line, even when its hint wraps.
+fn preference_icon(icon: Icon) -> Div {
+    h_flex()
+        .h(rems(1.5))
+        .flex_shrink_0()
+        .child(icon.size_5().text_color(color(GRAY)))
 }
 /// A consistent heading and spacing for one part of the import plan.
 pub(crate) fn box_section(label: &'static str) -> Div {
@@ -120,6 +131,8 @@ impl Render for PlanDialog {
                     .children(sections.into_iter().map(|(title, lines)| {
                         box_section(title).children(lines.into_iter().map(|line| {
                             accessible_text(text_id("full-plan-line", &line), line)
+                                .w_full()
+                                .min_w_0()
                                 .whitespace_normal()
                                 .text_size(TEXT_BODY)
                         }))
@@ -571,7 +584,9 @@ impl Desktop {
                     .child(
                         Input::new(&self.inputs[&Field::Source])
                             .aria_label("视频链接")
-                            .min_h(px(40.))
+                            .w_full()
+                            .min_w_0()
+                            .min_h(rems(40. / 14.))
                             .h_auto()
                             .text_size(TEXT_BODY)
                             .prefix(icons::link().size(px(20.)).text_color(color(GRAY)))
@@ -616,10 +631,13 @@ impl Desktop {
                             .size(px(32.))
                             .text_color(color(ACCENT_STRONG)),
                     )
-                    .child(accessible_text(
-                        "import-drop-instruction",
-                        "拖入视频，开始整理笔记",
-                    ))
+                    .child(
+                        accessible_text("import-drop-instruction", "拖入视频，开始整理笔记")
+                            .w_full()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_center(),
+                    )
                     .child(
                         (if input.is_empty() {
                             primary_pill("choose-video")
@@ -636,7 +654,7 @@ impl Desktop {
                     )
                     .when_some(
                         filename.filter(|name| !name.is_empty()),
-                        |view, filename| view.child(help(filename)),
+                        |view, filename| view.child(help(filename).w_full().text_center()),
                     )
                     .on_drop(
                         cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
@@ -1211,7 +1229,8 @@ impl Desktop {
         let vision_options = h_flex()
             .gap_3()
             .items_start()
-            .child(icons::image().size(px(20.)).mt_2().text_color(color(GRAY)))
+            .line_height(rems(1.5))
+            .child(preference_icon(icons::image()))
             .child(
                 crate::settings_ui::preference(
                     "发送截图辅助校对",
@@ -1252,12 +1271,8 @@ impl Desktop {
                     h_flex()
                         .gap_3()
                         .items_start()
-                        .child(
-                            icons::auto_fix()
-                                .size(px(20.))
-                                .mt_2()
-                                .text_color(color(GRAY)),
-                        )
+                        .line_height(rems(1.5))
+                        .child(preference_icon(icons::auto_fix()))
                         .child(
                             crate::settings_ui::preference(
                                 "AI 校对",
@@ -1281,12 +1296,8 @@ impl Desktop {
                     h_flex()
                         .gap_3()
                         .items_start()
-                        .child(
-                            icons::summarize()
-                                .size(px(20.))
-                                .mt_2()
-                                .text_color(color(GRAY)),
-                        )
+                        .line_height(rems(1.5))
+                        .child(preference_icon(icons::summarize()))
                         .child(
                             crate::settings_ui::preference(
                                 "生成摘要",
@@ -1584,8 +1595,18 @@ impl Desktop {
                 control("import-library")
                     .icon(IconName::FolderOpen)
                     .w_full()
-                    .justify_start()
-                    .label(label)
+                    .min_w_0()
+                    .accessibility_label(format!("保存到：{label}"))
+                    .tooltip(label.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label),
+                    )
+                    .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
                     .dropdown_menu(move |menu, _, _| {
                         libraries.iter().fold(menu, |menu, library| {
                             let id = library.id.clone();
@@ -1634,7 +1655,7 @@ impl Desktop {
                             .size(px(18.))
                             .text_color(color(GRAY)),
                     )
-                    .child(help(library.name.clone())),
+                    .child(help(library.name.clone()).flex_1()),
             );
         }
         view = view.child(
@@ -1706,6 +1727,10 @@ impl Desktop {
         .into_iter()
         .enumerate()
         {
+            // The icon, indicator and title share a first-line height. The
+            // description lives in the title's column, independent of the
+            // Checkbox component's own indicator/label spacing.
+            let first_line_height = rems(32. / 14.);
             let icon = match index {
                 0 => Icon::new(IconName::File),
                 1 => icons::web(),
@@ -1713,26 +1738,57 @@ impl Desktop {
             };
             options = options.child(
                 h_flex()
-                    .gap_3()
+                    .min_w_0()
+                    .gap_2()
                     .items_start()
-                    .child(icon.size(px(20.)).text_color(color(GRAY)))
+                    .child(
+                        h_flex()
+                            .debug_selector(move || format!("import-export-icon-{index}").into())
+                            .h(first_line_height)
+                            .flex_shrink_0()
+                            .child(icon.size(px(20.)).text_color(color(GRAY))),
+                    )
+                    .child(
+                        Checkbox::new(("import-export", index))
+                            .debug_selector(move || {
+                                format!("import-export-checkbox-{index}").into()
+                            })
+                            .accessibility_label(label)
+                            .checked(self.task_options.formats[index])
+                            .h(first_line_height)
+                            .items_center()
+                            .flex_shrink_0()
+                            .on_click(cx.listener(move |this, value, _, cx| {
+                                this.task_options.formats[index] = *value;
+                                this.save_current_draft(cx);
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         v_flex()
+                            .id(("import-export-text", index))
                             .gap_1()
                             .flex_1()
                             .min_w_0()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.task_options.formats[index] =
+                                    !this.task_options.formats[index];
+                                this.save_current_draft(cx);
+                                cx.notify();
+                            }))
                             .child(
-                                Checkbox::new(("import-export", index))
-                                    .label(label)
-                                    .checked(self.task_options.formats[index])
-                                    .min_h(px(32.))
-                                    .on_click(cx.listener(move |this, value, _, cx| {
-                                        this.task_options.formats[index] = *value;
-                                        this.save_current_draft(cx);
-                                        cx.notify();
-                                    })),
+                                h_flex()
+                                    .debug_selector(move || {
+                                        format!("import-export-title-{index}").into()
+                                    })
+                                    .min_w_0()
+                                    .min_h(first_line_height)
+                                    .child(accessible_text(("import-export-label", index), label)),
                             )
-                            .child(help(description)),
+                            .child(help(description).debug_selector(move || {
+                                format!("import-export-description-{index}").into()
+                            })),
                     ),
             );
         }
@@ -1748,7 +1804,8 @@ impl Desktop {
                 h_flex()
                     .gap_3()
                     .items_start()
-                    .child(icons::movie().size(px(20.)).mt_2().text_color(color(GRAY)))
+                    .line_height(rems(1.5))
+                    .child(preference_icon(icons::movie()))
                     .child(
                         crate::settings_ui::preference(
                             "保留视频供离线播放",
@@ -1852,10 +1909,14 @@ impl Desktop {
                 if let Some(library) = workspace.state.library(&draft.library_id) {
                     let folder = match draft.folder {
                         None => "未分类".into(),
-                        Some(id) => crate::organize::Library::load(&library.root)
-                            .ok()
-                            .and_then(|organization| organization.folders.get(&id).cloned())
-                            .unwrap_or_else(|| "原文件夹已不可用，请重新选择".into()),
+                        Some(id) => match self.library_indexes.get(&library.root) {
+                            Some(organization) => organization
+                                .folders
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or_else(|| "原文件夹已不可用，请重新选择".into()),
+                            None => "正在读取文件夹".into(),
+                        },
                     };
                     lines.push(format!("保存到：{} / {folder}", library.name));
                 }
@@ -2017,7 +2078,7 @@ impl Desktop {
             .cloned()
             .collect();
         let current = workspace.state.current_draft.clone();
-        let mut row = h_flex().gap_2().flex_wrap();
+        let mut row = h_flex().min_w_0().max_w_full().gap_2().flex_wrap();
         if drafts.len() > 1 {
             let label = workspace
                 .state
@@ -2029,9 +2090,13 @@ impl Desktop {
             row = row.child(
                 control("import-drafts")
                     .icon(IconName::File)
+                    .min_w_0()
+                    .max_w_full()
                     .tooltip(label.clone())
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .max_w(rems(14.))
                             .text_ellipsis()
                             .whitespace_nowrap()
@@ -2177,12 +2242,15 @@ impl Desktop {
         let entity = cx.entity().downgrade();
         quiet("subtitle-language")
             .icon(icons::subtitles())
+            .min_w_0()
+            .max_w_full()
             .h_auto()
             .min_h(rems(2.286))
             .accessibility_label(format!("字幕语言：{label}"))
             .tooltip(label.clone())
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
                     .whitespace_nowrap()
                     .text_ellipsis()
@@ -2217,6 +2285,7 @@ impl Desktop {
             self.ensure_model_diagnostic(provider, Some(&model), &root, cx);
         }
         let mut view = v_flex()
+            .pt(px(24.))
             .gap_6()
             .w_full()
             .min_w_0()
@@ -2407,7 +2476,10 @@ impl Desktop {
                     .draft()
                     .and_then(|draft| workspace.state.library(&draft.library_id))
             })
-            .filter(|library| crate::storage_ui::needs_reassociation(library))
+            .filter(|library| {
+                self.cached_location_check(library)
+                    .is_some_and(|check| check.needs_reassociation)
+            })
         {
             let id = library.id.clone();
             actions = actions.child(

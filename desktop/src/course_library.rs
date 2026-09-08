@@ -6,14 +6,107 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 
-/// Geometry shared by the list and card layouts, mirroring docs/ux-mock: rem-based
-/// dimensions resolve to `14 * scale` px; hairlines, paddings and gaps stay fixed.
+/// Geometry shared by list and card layouts; rem-based spacing scales with text.
 #[derive(Clone, Copy)]
 struct LibraryLayout {
     columns: usize,
     chip_max: Pixels,
     card_chip_max: Pixels,
     compact: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct CourseLocation {
+    pub id: String,
+    pub root: PathBuf,
+    pub relative: PathBuf,
+}
+
+/// Filesystem facts are collected by the library worker and read by the UI.
+#[derive(Default)]
+pub(super) struct LibraryViewCache {
+    pub locations: BTreeMap<PathBuf, CourseLocation>,
+    pub materials: BTreeMap<PathBuf, PathBuf>,
+    pub recovery: BTreeMap<PathBuf, organize::Recovery>,
+    pub title_recovery: BTreeMap<PathBuf, organize::Recovery>,
+    aliases: BTreeMap<PathBuf, BTreeMap<PathBuf, String>>,
+    alias_issues: Vec<String>,
+}
+
+impl LibraryViewCache {
+    pub fn inspect(
+        location: &workspace::LibraryLocation,
+        scan: Option<&notes::LibraryScan>,
+    ) -> Self {
+        let mut cache = Self::default();
+        if let Ok(Some(recovery)) = organize::recovery(&location.root) {
+            cache.recovery.insert(location.root.clone(), recovery);
+        }
+        if let Ok(Some(recovery)) = organize::title_recovery(&location.root) {
+            cache.title_recovery.insert(location.root.clone(), recovery);
+        }
+        match organize::title_aliases(&location.root) {
+            Ok(names) => {
+                cache.aliases.insert(location.root.clone(), names);
+            }
+            Err(error) => cache
+                .alias_issues
+                .push(format!("{}的显示名称尚未读取：{error:#}", location.name)),
+        }
+        if let Some(scan) = scan {
+            for course in &scan.courses {
+                let storage = course.storage_dir();
+                let Ok(relative) = organize::relative_key(&location.root, &storage) else {
+                    continue;
+                };
+                let membership = CourseLocation {
+                    id: location.id.clone(),
+                    root: location.root.clone(),
+                    relative: relative.clone(),
+                };
+                // Imported versions can use canonical paths while a registered
+                // root uses a symlink or /tmp alias. Resolve once in this worker.
+                let mut paths = vec![
+                    course.dir.clone(),
+                    storage.clone(),
+                    location.root.join(relative),
+                ];
+                paths.extend(storage.canonicalize().ok());
+                paths.extend(course.dir.canonicalize().ok());
+                for path in paths {
+                    cache.locations.insert(path, membership.clone());
+                }
+            }
+            for path in &scan.materials {
+                cache.materials.insert(path.clone(), location.root.clone());
+            }
+        }
+        cache
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        for (path, location) in other.locations {
+            let replace = self.locations.get(&path).is_none_or(|previous| {
+                location.root.components().count() > previous.root.components().count()
+            });
+            if replace {
+                self.locations.insert(path, location);
+            }
+        }
+        for (path, root) in other.materials {
+            let replace = self
+                .materials
+                .get(&path)
+                .is_none_or(|previous| root.components().count() > previous.components().count());
+            if replace {
+                self.materials.insert(path, root);
+            }
+        }
+        self.recovery.extend(other.recovery);
+        self.title_recovery.extend(other.title_recovery);
+        self.aliases.extend(other.aliases);
+        self.alias_issues.extend(other.alias_issues);
+    }
 }
 
 struct CourseRenameDialog {
@@ -31,7 +124,7 @@ impl CourseRenameDialog {
         match organize::rename_course(&self.root, &self.course.storage_dir(), &name) {
             Ok(()) => {
                 self.desktop.update(cx, |desktop, cx| {
-                    desktop.apply_course_title_aliases();
+                    desktop.refresh_library(cx);
                     desktop.message = Some(format!("笔记已更名为「{}」。", name.trim()));
                     cx.notify();
                 });
@@ -97,39 +190,19 @@ impl Desktop {
             .unwrap_or_else(|| course.title.clone())
     }
 
-    /// Call after a library scan, and after a name edit. Each library's small index
-    /// is read once; the published notes themselves are left byte-for-byte intact.
+    /// Apply the names already read by the library worker. The UI does no I/O.
     pub fn apply_course_title_aliases(&mut self) {
-        let locations = self
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.state.libraries.clone())
-            .unwrap_or_default();
-        let mut aliases = BTreeMap::new();
-        for location in locations {
-            match organize::title_aliases(&location.root) {
-                Ok(names) => {
-                    aliases.insert(location.root, names);
-                }
-                Err(error) => self
-                    .library_issues
-                    .push(format!("{}的显示名称尚未读取：{error:#}", location.name)),
-            }
-        }
+        self.library_issues
+            .extend(self.library_view_cache.alias_issues.clone());
         for course in &mut self.courses {
-            let storage = course.storage_dir();
-            if let Some((_, names, relative)) = aliases
-                .iter()
-                .filter_map(|(root, names)| {
-                    organize::relative_key(root, &storage)
-                        .ok()
-                        .map(|relative| (root, names, relative))
-                })
-                .max_by_key(|(root, _, _)| root.components().count())
+            if let Some(location) = self.library_view_cache.locations.get(&course.storage_dir())
+                && let Some(name) = self
+                    .library_view_cache
+                    .aliases
+                    .get(&location.root)
+                    .and_then(|names| names.get(&location.relative))
             {
-                if let Some(name) = names.get(&relative) {
-                    course.title = name.clone();
-                }
+                course.title = name.clone();
             }
         }
         let title = self
@@ -299,7 +372,7 @@ impl Desktop {
                 );
                 continue;
             }
-            if let Ok(Some(recovery)) = organize::recovery(&location.root) {
+            if let Some(recovery) = self.library_view_cache.recovery.get(&location.root) {
                 has_notice = true;
                 let restore = location.root.clone();
                 let rebuild = location.root.clone();
@@ -336,7 +409,7 @@ impl Desktop {
                     .child(accessible_text(("classification-recovery", index), format!("{} 的分类记录无法读取。现有笔记文件会保留；重建分类后可重新整理到文件夹。", location.name)))
                     .child(row));
             }
-            if let Ok(Some(recovery)) = organize::title_recovery(&location.root) {
+            if let Some(recovery) = self.library_view_cache.title_recovery.get(&location.root) {
                 has_notice = true;
                 let mut row = h_flex().gap_2().flex_wrap();
                 for reset in [false, true] {
@@ -415,19 +488,19 @@ impl Desktop {
             compact: content < 336. * scale,
         };
         let query = self.value(Field::Search, cx).to_lowercase();
-        let roots = self
-            .workspace
-            .as_ref()
-            .map(|workspace| {
-                workspace
-                    .state
-                    .libraries
-                    .iter()
-                    .map(|library| library.root.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| vec![self.library_root.clone()]);
-        let all_access = crate::storage::library_access(roots);
+        let Some(all_access) = self.cached_library_access() else {
+            return h_flex()
+                .w_full()
+                .gap_2()
+                .items_center()
+                .py_6()
+                .child(crate::motion::spinner("library-location-check-spinner", cx))
+                .child(accessible_text(
+                    "library-location-checking-label",
+                    "正在检查保存位置…",
+                ))
+                .into_any_element();
+        };
         let in_scope =
             |root: &&PathBuf| self.folder_filter.is_none() || **root == self.library_root;
         let scope = crate::storage::LibraryAccess {
@@ -454,9 +527,11 @@ impl Desktop {
                     .map(|location| scope.available.contains(&location.root))
                     .unwrap_or_else(|| {
                         self.workspace.is_none()
-                            && scope.available.iter().any(|root| {
-                                organize::relative_key(root, &course.storage_dir()).is_ok()
-                            })
+                            && self
+                                .library_view_cache
+                                .locations
+                                .get(&course.storage_dir())
+                                .is_some_and(|location| scope.available.contains(&location.root))
                     })
                     && course.title.to_lowercase().contains(&query)
                     && self.folder_filter.is_none_or(|id| {
@@ -546,11 +621,10 @@ impl Desktop {
             .library_materials
             .iter()
             .filter(|path| {
-                path.is_dir()
-                    && scope
-                        .available
-                        .iter()
-                        .any(|root| organize::relative_key(root, path).is_ok())
+                self.library_view_cache
+                    .materials
+                    .get(*path)
+                    .is_some_and(|root| scope.available.contains(root))
             })
             .cloned()
             .collect::<Vec<_>>();
