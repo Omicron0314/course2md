@@ -627,7 +627,7 @@ impl Validate for ServicesState {
                 || !valid_id(id, "service-draft-")
                 || !valid_id(&draft.service_id, "service-")
             {
-                bail!("服务草稿记录不完整");
+                bail!("服务设置记录不完整");
             }
         }
         for (id, version) in &self.versions {
@@ -775,7 +775,8 @@ impl Store {
         });
         generation && application
     }
-    pub fn is_recovery_draft(&self, id: &str) -> bool {
+    #[cfg(test)]
+    fn is_recovery_draft(&self, id: &str) -> bool {
         self.recovery_drafts.contains(id)
     }
     pub fn application(&self) -> &ApplicationPreferences {
@@ -790,7 +791,8 @@ impl Store {
     pub fn default_refs(&self) -> ServiceRefs {
         self.services.defaults.clone()
     }
-    pub fn service_drafts(&self) -> impl Iterator<Item = &ServiceDraft> {
+    #[cfg(test)]
+    fn service_drafts(&self) -> impl Iterator<Item = &ServiceDraft> {
         self.services.drafts.values()
     }
     pub fn draft(&self, id: &str) -> Option<&ServiceDraft> {
@@ -928,10 +930,10 @@ impl Store {
         }
         if let Some(current) = self.services.drafts.get(&draft.id) {
             if current.revision != draft.revision {
-                bail!("这份服务草稿已更新，请保留当前输入并重新载入最新版本");
+                bail!("服务编辑已发生变化，请重新打开服务后再试");
             }
         } else if draft.revision != 0 {
-            bail!("找不到这份服务草稿，请保留当前输入后重新保存");
+            bail!("当前服务编辑已结束，请重新打开服务后再试");
         }
         let created_credential = match new_key {
             Some(secret) => {
@@ -969,6 +971,9 @@ impl Store {
     }
 
     pub fn discard_service_draft(&mut self, id: &str) -> Result<()> {
+        if !self.services.drafts.contains_key(id) && !self.recovery_drafts.contains(id) {
+            return Ok(());
+        }
         let mut next = self.services.clone();
         next.drafts.remove(id);
         next.discarded_drafts.insert(id.to_owned());
@@ -988,7 +993,7 @@ impl Store {
             .services
             .drafts
             .get(draft_id)
-            .ok_or_else(|| anyhow!("找不到这份服务草稿"))?;
+            .ok_or_else(|| anyhow!("当前服务编辑已结束，请重新打开服务后再试"))?;
         if self.is_service_stopped(&draft.service_id) {
             bail!("此服务已停止使用。请添加新的服务，原任务不会自动恢复外发");
         }
@@ -1515,14 +1520,8 @@ impl Store {
                 self.services.drafts.insert(draft.id.clone(), draft);
             }
         }
-        if !self.recovery_drafts.is_empty() {
-            self.issues.push(SettingsIssue {
-                group: PreferenceGroup::Services,
-                kind: SettingsIssueKind::SaveFailed,
-                message: "已从恢复记录找回服务草稿，正在使用的服务版本保持不变".into(),
-                detail: None,
-            });
-        }
+        // Keep legacy private edits readable for compatibility, but they are
+        // neither active services nor a user-facing recovery collection.
     }
 
     fn persist<T: Serialize + DeserializeOwned + Validate>(
@@ -1732,6 +1731,51 @@ mod tests {
         assert_eq!(runtime.llm.api_key, "test-only-secret");
         let saved = store.config_for_refs(&config, &old_refs).unwrap();
         assert!(saved.llm.api_key.is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_service_edit_preserves_active_and_submitted_configuration() {
+        let (directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "active-model");
+        let active = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        let submitted_refs = store.default_refs();
+        let mut edit = ServiceDraft::from_version(&active);
+        edit.model = "cancelled-model".into();
+        // An explicit test may stage credentials without publishing the edit.
+        let staged = store
+            .save_service_draft(edit, Some(Secret::new("cancelled-test-key")))
+            .unwrap();
+        store.discard_service_draft(&staged.id).unwrap();
+        assert!(store.draft(&staged.id).is_none());
+        assert!(
+            store
+                .publish_service(&staged.id, BindingScope::Defaults)
+                .is_err()
+        );
+        assert!(store.save_service_draft(staged, None).is_err());
+
+        let reopened = Store::open(directory.path(), store.vault());
+        assert_eq!(reopened.default_refs().llm, Some(active.id.clone()));
+        assert_eq!(reopened.versions().count(), 1);
+        let mut config = ConfigFile::default();
+        config.llm.enabled = true;
+        let runtime = reopened
+            .resolve_for_execution(&config, &submitted_refs)
+            .unwrap()
+            .into_config();
+        assert_eq!(runtime.llm.model, "active-model");
+        assert_eq!(runtime.llm.api_key, "test-only-secret");
+    }
+
+    #[test]
+    fn cancelling_an_unstaged_service_edit_does_not_write_settings() {
+        let (directory, mut store) = isolated();
+        let edit = ServiceDraft::new(ServicePurpose::Ai);
+        store.discard_service_draft(&edit.id).unwrap();
+        assert!(!directory.path().join("services.json").exists());
+        assert!(store.services.discarded_drafts.is_empty());
     }
 
     #[test]

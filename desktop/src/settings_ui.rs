@@ -117,26 +117,13 @@ impl State {
         let mut subscriptions = Vec::new();
         for (field, input) in &inputs {
             let field = *field;
-            subscriptions.push(cx.subscribe_in(
-                input,
-                window,
-                move |this, _, event, window, cx| {
+            subscriptions.push(
+                cx.subscribe_in(input, window, move |this, _, event, _, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.setting_input_changed(field, cx);
                     }
-                    if matches!(event, InputEvent::Blur)
-                        && matches!(
-                            field,
-                            EditField::Name
-                                | EditField::Address
-                                | EditField::Model
-                                | EditField::Key
-                        )
-                    {
-                        this.save_open_service_draft(true, window, cx);
-                    }
-                },
-            ));
+                }),
+            );
         }
         let prompt = cx.new(|cx| TextareaState::new(window, cx).rows(6));
         subscriptions.push(cx.subscribe(&prompt, |this, _, event, cx| {
@@ -283,25 +270,6 @@ impl Desktop {
             .or_else(|| self.preferences.application_intent())
             .unwrap_or_else(|| self.preferences.application())
             .clone()
-    }
-    fn service_draft_changed(&self, draft: &ServiceDraft) -> bool {
-        if let Some(old) = draft
-            .based_on
-            .as_deref()
-            .and_then(|id| self.preferences.version(id))
-        {
-            return match draft.configuration() {
-                Err(_) => true,
-                Ok(config) => {
-                    config.fingerprint("editor") != old.config.fingerprint("editor")
-                        || config.name != old.config.name
-                }
-            };
-        }
-        !draft.name.is_empty()
-            || !draft.address.is_empty()
-            || !draft.model.is_empty()
-            || draft.credential.is_some()
     }
     fn setting_value(&self, field: EditField, cx: &App) -> String {
         self.settings_ui.inputs[&field].read(cx).value().to_string()
@@ -1064,7 +1032,7 @@ impl Desktop {
             .child(
                 text(
                     "generation-default-scope",
-                    "用于新笔记，也会更新草稿中未单独修改的选项。",
+                    "用于新建笔记，也会更新当前未单独修改的选项。",
                 )
                 .text_sm()
                 .text_color(color(MUTED)),
@@ -1230,7 +1198,9 @@ impl Desktop {
             .as_ref()
             .filter(|editor| editor.target.is_none());
         if inline_editor.is_some() {
-            view = view.child(self.service_editor_card(window, cx));
+            return view
+                .child(self.service_editor_card(window, cx))
+                .into_any_element();
         }
         let mut latest = BTreeMap::<String, ServiceVersion>::new();
         for version in self.preferences.versions() {
@@ -1266,48 +1236,6 @@ impl Desktop {
                     })),
             );
             view = view.child(section);
-        }
-        for (index, draft) in self.preferences.service_drafts().cloned().enumerate() {
-            if inline_editor.is_some_and(|editor| editor.draft.id == draft.id) {
-                continue;
-            }
-            let id = draft.id.clone();
-            let label = if draft.name.is_empty() {
-                format!(
-                    "{}草稿",
-                    if draft.protocol.purpose() == ServicePurpose::Speech {
-                        "语音服务"
-                    } else {
-                        "AI 服务"
-                    }
-                )
-            } else {
-                format!("{} · 草稿", draft.name)
-            };
-            view = view.child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .w_full()
-                    .p_3()
-                    .bg(color(SURFACE))
-                    .border_1()
-                    .border_color(color(CARD_LINE))
-                    .rounded(RADIUS_CARD)
-                    .child(
-                        text(("saved-service-draft", index), label)
-                            .flex_1()
-                            .min_w_0(),
-                    )
-                    .child(
-                        quiet(("continue-service-draft", index))
-                            .icon(icons::edit())
-                            .label("继续填写")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_existing_service_draft(&id, None, window, cx)
-                            })),
-                    ),
-            );
         }
         view.child(
             group("account-settings-heading", "来源账号").child(
@@ -1491,8 +1419,7 @@ impl Desktop {
             })
     }
 
-    /// Inline editor card on the settings page (mock 编辑卡): warning banner when a
-    /// saved version stays in effect, existing fields and validation unchanged.
+    /// Ordinary service editing with explicit Save and Cancel actions.
     fn service_editor_card(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let Some(editor) = &self.settings_ui.editor else {
             return v_flex();
@@ -1504,7 +1431,7 @@ impl Desktop {
             "AI 服务"
         };
         let title = if editor.draft.based_on.is_some() {
-            format!("编辑 {kind} · {}", editor.draft.name)
+            format!("编辑{kind}")
         } else {
             format!("添加 {kind}")
         };
@@ -1722,10 +1649,10 @@ impl Desktop {
         let result = if current_task {
             self.workspace
                 .as_mut()
-                .ok_or_else(|| anyhow!("草稿记录暂时不可用"))
+                .ok_or_else(|| anyhow!("当前笔记信息暂时不可用"))
                 .and_then(|workspace| {
                     workspace.transaction(|state| {
-                        let draft = state.draft_mut().context("找不到当前草稿")?;
+                        let draft = state.draft_mut().context("找不到当前笔记")?;
                         match purpose {
                             ServicePurpose::Speech => draft.asr_service = id,
                             ServicePurpose::Ai => draft.ai_service = id,
@@ -1791,17 +1718,6 @@ impl Desktop {
             .unwrap_or_else(|| ServiceDraft::new(purpose));
         self.open_service_draft(draft, None, window, cx)
     }
-    fn open_existing_service_draft(
-        &mut self,
-        id: &str,
-        target: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(draft) = self.preferences.draft(id).cloned() {
-            self.open_service_draft(draft, target, window, cx);
-        }
-    }
     fn open_service_draft(
         &mut self,
         draft: ServiceDraft,
@@ -1822,7 +1738,7 @@ impl Desktop {
                 return true;
             }
             // A second action must not reuse the previous editor's endpoint or scope.
-            // Preserve that draft before replacing its fields, including an unsaved key.
+            // Switching forms cancels the earlier edit; only Save can publish it.
             if !self.close_service_editor(window, cx) {
                 self.settings_tab = 1;
                 self.navigate(Page::Settings, cx);
@@ -1873,7 +1789,6 @@ impl Desktop {
             test_details_open: false,
             save_failed: false,
         });
-        self.save_open_service_draft(false, window, cx);
         if inline {
             self.settings_tab = 1;
             self.navigate(Page::Settings, cx);
@@ -1931,8 +1846,6 @@ impl Desktop {
         let auth = editor.draft.authentication;
         let busy = editor.test_running.is_some();
         let awaiting_binding = editor.pending_binding.is_some();
-        let changed = self.service_draft_changed(&editor.draft)
-            || !self.setting_value(EditField::Key, cx).is_empty();
         let mut view = v_flex()
             .id("service-editor-body")
             .role(if inline { Role::Group } else { Role::Dialog })
@@ -1952,44 +1865,14 @@ impl Desktop {
             text(
                 "service-editor-scope",
                 if editor.target.is_some() {
-                    "保存后仅用于这份准备中的笔记，已提交任务保持原版本。"
+                    "保存后用于本次笔记。已提交的任务不受影响。"
                 } else {
-                    "保存后设为默认服务；已排队和开始生成的笔记保持原版本。"
+                    "保存后设为默认服务。已提交的任务不受影响。"
                 },
             )
             .text_sm()
             .text_color(color(MUTED)),
         );
-        if let Some(old) = editor
-            .draft
-            .based_on
-            .as_deref()
-            .and_then(|id| self.preferences.version(id))
-        {
-            let current = format!(
-                "{}{} · {} · 版本 {}",
-                if changed {
-                    "修改尚未启用；当前仍使用 "
-                } else {
-                    "当前使用 "
-                },
-                old.config.host(),
-                old.config.model,
-                old.number,
-            );
-            view = view.child(
-                div()
-                    .id("service-previous-version")
-                    .role(Role::Label)
-                    .aria_label(current.clone())
-                    .w_full()
-                    .p_3()
-                    .rounded(RADIUS_CARD)
-                    .bg(color(WARNING_BG))
-                    .text_sm()
-                    .child(current),
-            );
-        }
         view = view
             .child(self.setting_field(EditField::Name, "服务名称", cx))
             .child(
@@ -2012,25 +1895,23 @@ impl Desktop {
                             )
                             .selected(protocol.label())
                             .disabled(awaiting_binding)
-                            .on_change(cx.listener(
-                                move |this, selected: &SharedString, window, cx| {
-                                    let Some(candidate) = [
-                                        ServiceProtocol::SpeechTranscriptions,
-                                        ServiceProtocol::SpeechChat,
-                                        ServiceProtocol::AiChat,
-                                    ]
-                                    .into_iter()
-                                    .find(|candidate| candidate.label() == selected.as_ref()) else {
-                                        return;
-                                    };
-                                    if let Some(editor) = &mut this.settings_ui.editor {
-                                        editor.draft.protocol = candidate;
-                                        editor.errors.clear();
-                                        editor.evidence = None;
-                                    }
-                                    this.save_open_service_draft(false, window, cx);
-                                },
-                            )),
+                            .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
+                                let Some(candidate) = [
+                                    ServiceProtocol::SpeechTranscriptions,
+                                    ServiceProtocol::SpeechChat,
+                                    ServiceProtocol::AiChat,
+                                ]
+                                .into_iter()
+                                .find(|candidate| candidate.label() == selected.as_ref()) else {
+                                    return;
+                                };
+                                if let Some(editor) = &mut this.settings_ui.editor {
+                                    editor.draft.protocol = candidate;
+                                    editor.errors.clear();
+                                    editor.evidence = None;
+                                }
+                                cx.notify();
+                            })),
                     ),
             )
             .child(self.setting_field(EditField::Address, "服务地址", cx));
@@ -2058,21 +1939,19 @@ impl Desktop {
                                 "none"
                             })
                             .disabled(awaiting_binding)
-                            .on_change(cx.listener(
-                                move |this, selected: &SharedString, window, cx| {
-                                    let mode = if selected.as_ref() == "api_key" {
-                                        Authentication::ApiKey
-                                    } else {
-                                        Authentication::None
-                                    };
-                                    if let Some(editor) = &mut this.settings_ui.editor {
-                                        editor.draft.authentication = mode;
-                                        editor.errors.clear();
-                                        editor.evidence = None;
-                                    }
-                                    this.save_open_service_draft(false, window, cx);
-                                },
-                            )),
+                            .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
+                                let mode = if selected.as_ref() == "api_key" {
+                                    Authentication::ApiKey
+                                } else {
+                                    Authentication::None
+                                };
+                                if let Some(editor) = &mut this.settings_ui.editor {
+                                    editor.draft.authentication = mode;
+                                    editor.errors.clear();
+                                    editor.evidence = None;
+                                }
+                                cx.notify();
+                            })),
                     ),
             );
         if auth == Authentication::ApiKey {
@@ -2103,9 +1982,8 @@ impl Desktop {
                                         editor.draft = draft;
                                         editor.evidence = None;
                                         editor.save_failed = false;
-                                        editor.status = Some(
-                                            "已将所选环境变量保存为安全凭据；保存服务后生效".into(),
-                                        );
+                                        editor.status =
+                                            Some("已使用环境变量中的密钥，点击保存后生效".into());
                                     }
                                     this.settings_ui.inputs[&EditField::Key]
                                         .update(cx, |input, cx| input.set_value("", window, cx));
@@ -2316,18 +2194,25 @@ impl Desktop {
         }
         if let Some(status) = &editor.status
             && !busy
-            && (changed
-                || !matches!(
-                    status.as_str(),
-                    "修改尚未启用" | "草稿已保存，修改尚未启用" | "密钥修改尚未保存"
-                ))
         {
             view = view.child(text("service-editor-status", status.clone()).text_sm());
         }
         view.child(
             h_flex()
+                .w_full()
                 .gap_2()
                 .flex_wrap()
+                .child(
+                    quiet("close-service-editor")
+                        .icon(icons::close())
+                        .label("取消")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if this.close_service_editor(window, cx) && !inline {
+                                window.close_dialog(cx);
+                            }
+                        })),
+                )
+                .child(div().flex_1())
                 .child(
                     outline_pill("run-service-test")
                         .icon(icons::science())
@@ -2344,38 +2229,14 @@ impl Desktop {
                         .label(if awaiting_binding {
                             "重试保存本次选择"
                         } else {
-                            "保存服务"
+                            "保存"
                         })
                         .on_click(
                             cx.listener(|this, _, window, cx| {
                                 this.publish_open_service(window, cx)
                             }),
                         ),
-                )
-                .child(
-                    quiet("close-service-editor")
-                        .icon(icons::close())
-                        .label("取消")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if this.close_service_editor(window, cx) && !inline {
-                                window.close_dialog(cx);
-                            }
-                        })),
-                )
-                .when(editor.save_failed, |view| {
-                    view.child(
-                        quiet("discard-unsaved-service-changes")
-                            .label("放弃未保存的修改并返回")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.settings_ui.inputs[&EditField::Key]
-                                    .update(cx, |input, cx| input.set_value("", window, cx));
-                                this.restore_service_focus(window, cx);
-                                if !inline {
-                                    window.close_dialog(cx);
-                                }
-                            })),
-                    )
-                }),
+                ),
         )
         .into_any_element()
     }
@@ -2420,14 +2281,7 @@ impl Desktop {
             if field != EditField::Name {
                 editor.evidence = None;
             }
-            editor.status = Some(
-                if field == EditField::Key {
-                    "密钥修改尚未保存"
-                } else {
-                    "修改尚未启用"
-                }
-                .into(),
-            );
+            editor.status = None;
         }
         cx.notify();
     }
@@ -2461,7 +2315,7 @@ impl Desktop {
                 self.settings_ui.pending_generation = None;
                 self.set_settings_feedback(
                     PreferenceGroup::Generation,
-                    "草稿已保存，应用后生效".into(),
+                    "点击应用后生效".into(),
                     false,
                 );
                 if had_pending {
@@ -2515,14 +2369,7 @@ impl Desktop {
                 if let Some(editor) = &mut self.settings_ui.editor {
                     editor.draft = draft;
                     editor.save_failed = false;
-                    editor.status = Some(
-                        if self.preferences.is_recovery_draft(&editor.draft.id) {
-                            "草稿已保存到恢复记录，修改尚未启用"
-                        } else {
-                            "草稿已保存，修改尚未启用"
-                        }
-                        .into(),
-                    );
+                    editor.status = None;
                 }
                 if include_key {
                     self.settings_ui.inputs[&EditField::Key]
@@ -2651,14 +2498,14 @@ impl Desktop {
             let binding = self
                 .workspace
                 .as_mut()
-                .ok_or_else(|| anyhow!("草稿记录暂时不可用"))
+                .ok_or_else(|| anyhow!("当前笔记信息暂时不可用"))
                 .and_then(|workspace| {
                     workspace.transaction(|state| {
                         let draft = state
                             .drafts
                             .iter_mut()
                             .find(|draft| draft.id == target)
-                            .context("原笔记草稿已不存在；服务已保存，但未改变其他笔记")?;
+                            .context("原笔记已关闭；服务已保存，但未用于其他笔记")?;
                         match version.config.protocol.purpose() {
                             ServicePurpose::Speech => draft.asr_service = Some(version.id.clone()),
                             ServicePurpose::Ai => draft.ai_service = Some(version.id.clone()),
@@ -2684,10 +2531,14 @@ impl Desktop {
         cx.notify();
     }
     fn close_service_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.save_open_service_draft(true, window, cx) {
-            return false;
+        if let Some(editor) = &self.settings_ui.editor {
+            // Tests can stage a private edit, but cancelling never publishes
+            // it. A cleanup failure cannot make these hidden records active.
+            let _ = self.preferences.discard_service_draft(&editor.draft.id);
         }
         self.restore_service_focus(window, cx);
+        self.settings_ui.inputs[&EditField::Key]
+            .update(cx, |input, cx| input.set_value("", window, cx));
         true
     }
     fn restore_service_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3653,7 +3504,7 @@ impl Desktop {
         if self.preferences.is_blocked(PreferenceGroup::Generation) {
             return Some(OrdinaryPreferenceIssue {
                 group,
-                message: "生成选项暂时无法读取，原文件与本次草稿已保留。".into(),
+                message: "生成选项暂时无法读取，原文件与当前输入已保留。".into(),
                 can_retry: false,
             });
         }
@@ -3666,7 +3517,7 @@ impl Desktop {
                     .settings_group_notice(group)
                     .filter(|(_, error)| *error)
                     .map(|(message, _)| message)
-                    .unwrap_or_else(|| "生成选项的修改尚未保存，本次草稿已保留。".into()),
+                    .unwrap_or_else(|| "生成选项的修改尚未保存，当前输入已保留。".into()),
                 can_retry: true,
             });
         }
@@ -3791,38 +3642,12 @@ impl Desktop {
         cx.notify();
         result
     }
-    /// Called before app quit. A recoverable ordinary edit need not block exit; a new key
-    /// or service edit that cannot be saved anywhere must stay visible for the user.
+    /// Ordinary preferences save immediately. Service form edits become active
+    /// only through Save and do not create a separate quit-time save workflow.
     pub fn flush_settings_for_exit(&mut self, cx: &mut Context<Self>) -> bool {
-        if let Some(editor) = &self.settings_ui.editor
-            && editor.pending_binding.is_none()
-        {
-            let mut draft = editor.draft.clone();
-            draft.name = self.setting_value(EditField::Name, cx);
-            draft.address = self.setting_value(EditField::Address, cx);
-            draft.model = self.setting_value(EditField::Model, cx);
-            let key = self.setting_value(EditField::Key, cx);
-            if !key.trim().is_empty() || self.preferences.draft(&draft.id) != Some(&draft) {
-                match self
-                    .preferences
-                    .save_service_draft(draft, (!key.trim().is_empty()).then(|| Secret::new(key)))
-                {
-                    Ok(saved) => {
-                        if let Some(editor) = &mut self.settings_ui.editor {
-                            editor.draft = saved;
-                            editor.save_failed = false;
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(editor) = &mut self.settings_ui.editor {
-                            editor.status =
-                                Some(format!("这些修改尚未保存，窗口已保留：{error:#}"));
-                            editor.save_failed = true;
-                        }
-                        cx.notify();
-                        return false;
-                    }
-                }
+        if let Some(editor) = &self.settings_ui.editor {
+            if let Some(cancel) = &editor.test_running {
+                cancel.store(true, Ordering::Release);
             }
         }
         if let Some(next) = self.settings_ui.pending_generation.clone() {
