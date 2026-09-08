@@ -623,6 +623,9 @@ impl State {
         task.updated = now();
         task.state = match intent {
             Intent::Run => TaskState::Queued,
+            Intent::Quit if matches!(task.state, TaskState::NeedsAttention | TaskState::Uncertain) => {
+                task.state
+            }
             Intent::Cancel if matches!(task.state, TaskState::Running | TaskState::Pausing) => {
                 TaskState::Pausing
             }
@@ -1870,6 +1873,7 @@ mod tests {
             Intent::Quit,
             Intent::Cancel,
             Intent::Run,
+            Intent::Run,
         ]
         .into_iter()
         .enumerate()
@@ -1884,6 +1888,11 @@ mod tests {
             if index == 4 {
                 write_unknown(task, 1);
             }
+            if index == 5 {
+                task.state = TaskState::NeedsAttention;
+                task.error = Some("保留这次失败原因".into());
+                task.unread = true;
+            }
             ids.push(id);
         }
         ws.transaction(|_| Ok(())).unwrap();
@@ -1894,7 +1903,7 @@ mod tests {
             .map(|task| task.plan.clone())
             .collect::<Vec<_>>();
         drop(ws);
-        let reopened = test_workspace(dir.path());
+        let mut reopened = test_workspace(dir.path());
         for ((id, expected), plan) in ids
             .iter()
             .zip([
@@ -1903,6 +1912,7 @@ mod tests {
                 TaskState::Paused,
                 TaskState::Cancelled,
                 TaskState::Uncertain,
+                TaskState::NeedsAttention,
             ])
             .zip(plans)
         {
@@ -1914,6 +1924,24 @@ mod tests {
         let unknown = reopened.state.task(&ids[4]).unwrap();
         assert_eq!(unknown.blocked.len(), 1);
         assert!(unknown.unread && unknown.resend.is_empty());
+        reopened
+            .transaction(|state| {
+                state.stop_session();
+                Ok(())
+            })
+            .unwrap();
+        drop(reopened);
+        let stopped = test_workspace(dir.path());
+        assert!(stopped.state.next_task().is_none());
+        let unknown = stopped.state.task(&ids[4]).unwrap();
+        assert_eq!(unknown.state, TaskState::Uncertain);
+        assert_eq!(unknown.intent, Intent::Quit);
+        assert!(unknown.unread && unknown.resend.is_empty());
+        let failed = stopped.state.task(&ids[5]).unwrap();
+        assert_eq!(failed.state, TaskState::NeedsAttention);
+        assert_eq!(failed.intent, Intent::Quit);
+        assert_eq!(failed.error.as_deref(), Some("保留这次失败原因"));
+        assert!(failed.unread);
     }
 
     fn test_workspace(dir: &Path) -> Workspace {
