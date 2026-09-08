@@ -140,6 +140,16 @@ pub fn preserve_for_import(path: &Path) -> Result<PreservedImport> {
     Ok(PreservedImport { config, original })
 }
 
+/// Shared UI entry point: no preference transaction may precede the verified original copy.
+pub fn import_preferences(
+    path: &Path,
+    preferences: &mut crate::preferences::Store,
+) -> Result<PathBuf> {
+    let preserved = preserve_for_import(path)?;
+    preferences.import_legacy(&preserved.config)?;
+    Ok(preserved.original)
+}
+
 pub fn restore_backup(path: &Path) -> Result<PathBuf> {
     let backup = path.with_extension("toml.bak");
     let (replacement, _) = read(&backup)?
@@ -236,6 +246,51 @@ pub fn failure_message(error: &anyhow::Error) -> &'static str {
 mod tests {
     use super::{Inspection, ensure_unchanged, preserve_for_import, reset_preserving_original, restore_backup, startup_output};
     use std::path::PathBuf;
+
+    #[test]
+    fn import_entry_requires_backup_and_preserves_hidden_options_across_restart() {
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let original = b"# edited legacy settings\n[defaults]\nprovider = \"coreml\"\nasr_model = \"qwen3-0.6b\"\n[llm]\nenabled = false\nsummarize = true\nvision = true\nprompt = \"Keep UX-RULE-42 terms.\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"legacy-model\"\napi_key = \"synthetic-import-secret\"\n";
+        std::fs::write(&path, original).unwrap();
+        let group_root = root.path().join("preferences");
+        let vault = Arc::new(crate::credentials::MemoryCredentialVault::default());
+        let mut preferences = crate::preferences::Store::open(&group_root, vault.clone());
+        let recovery = root.path().join("legacy-config-recovery");
+        std::fs::write(&recovery, b"cannot create a backup here").unwrap();
+        assert!(super::import_preferences(&path, &mut preferences).is_err());
+        assert!(!preferences.legacy_imported());
+        assert!(!group_root.join("generation.json").exists());
+        assert!(!group_root.join("services.json").exists());
+        std::fs::remove_file(recovery).unwrap();
+        let preserved = super::import_preferences(&path, &mut preferences).unwrap();
+        assert_eq!(std::fs::read(&preserved).unwrap(), original);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let config = preferences.defaults_config();
+        assert_eq!(config.defaults.asr_model.as_deref(), Some("qwen3-0.6b"));
+        assert!(!config.llm.enabled && config.llm.summarize && !config.llm.vision);
+        assert!(preferences.generation().vision);
+        assert_eq!(config.llm.prompt.as_deref(), Some("Keep UX-RULE-42 terms."));
+        let files: Vec<_> = ["generation.json", "services.json", "application.json"]
+            .into_iter()
+            .map(|name| {
+                (
+                    group_root.join(name),
+                    std::fs::read(group_root.join(name)).unwrap(),
+                )
+            })
+            .collect();
+        for _ in 0..2 {
+            let mut reopened = crate::preferences::Store::open(&group_root, vault.clone());
+            super::import_preferences(&path, &mut reopened).unwrap();
+            assert_eq!(reopened.versions().count(), 1);
+            for (path, bytes) in &files {
+                assert_eq!(&std::fs::read(path).unwrap(), bytes);
+                assert!(!String::from_utf8_lossy(bytes).contains("synthetic-import-secret"));
+            }
+        }
+    }
 
     #[test]
     fn damaged_primary_restores_verified_backup_and_preserves_both_originals() {
