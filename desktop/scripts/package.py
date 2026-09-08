@@ -113,6 +113,7 @@ def main():
         verify_windows_icon(binaries / "course2md-desktop.exe")
     shutil.copy2(PROJECT / "LICENSE", base / "LICENSE")
     shutil.copy2(ROOT / "assets/material/LICENSE", base / "LICENSE-material-icons")
+    shutil.copytree(ROOT / "assets/themes/licenses", base / "design-licenses", dirs_exist_ok=True)
     shutil.copy2(ROOT / "README.md", base / "README.md")
     # A development archive follows main and must not claim the previous release
     # revisions. Release builds have already checked this snapshot against the lock.
@@ -120,6 +121,7 @@ def main():
     if system == "Darwin":
         shutil.copy2(PROJECT / "LICENSE", resources / "LICENSE")
         shutil.copy2(ROOT / "assets/material/LICENSE", resources / "LICENSE-material-icons")
+        shutil.copytree(ROOT / "assets/themes/licenses", resources / "design-licenses", dirs_exist_ok=True)
         shutil.copy2(base / "sources.lock.json", resources / "sources.lock.json")
         identity = os.environ.get("APPLE_SIGNING_IDENTITY", "-")
         signing = ["--force", "--sign", identity]
