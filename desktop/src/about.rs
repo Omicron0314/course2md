@@ -6,69 +6,85 @@ use crate::theme::*;
 impl Desktop {
     pub fn about_page(&self, _: &mut Context<Self>) -> AnyElement {
         let commit = env!("COURSE2MD_DESKTOP_COMMIT");
+        let version = if commit.is_empty() {
+            env!("CARGO_PKG_VERSION").to_owned()
+        } else {
+            format!("{} · 构建 {commit}", env!("CARGO_PKG_VERSION"))
+        };
         v_flex()
             .w_full()
             .min_w_0()
-            .gap_4()
+            .gap_6()
             .text_color(color(INK))
             .child(
-                v_flex()
+                h_flex()
                     .w_full()
                     .min_w_0()
-                    .gap_1()
+                    .items_start()
+                    .gap_4()
+                    .child(img("images/course2md.png").size(rems(64. / 14.)).flex_shrink_0())
                     .child(
-                        h_flex()
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
                             .gap_3()
-                            .items_baseline()
-                            .flex_wrap()
                             .child(
-                                accessible_text(
-                                    "about-name",
-                                    format!("course2md {}", env!("CARGO_PKG_VERSION")),
-                                )
-                                .role(Role::Heading)
-                                .text_size(TEXT_BODY)
-                                .font_weight(FontWeight::SEMIBOLD),
+                                v_flex()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        accessible_text("about-name", "course2md")
+                                            .role(Role::Heading)
+                                            .text_size(TEXT_DISPLAY)
+                                            .font_weight(FontWeight::SEMIBOLD),
+                                    )
+                                    .child(
+                                        accessible_text("about-build", version)
+                                            .min_w_0()
+                                            .whitespace_normal()
+                                            .text_size(TEXT_AUX)
+                                            .text_color(color(MUTED)),
+                                    ),
                             )
-                            .when(!commit.is_empty(), |row| {
-                                row.child(
-                                    accessible_text("about-build", format!("构建 {commit}"))
-                                        .text_size(TEXT_AUX)
-                                        .text_color(color(MUTED)),
-                                )
-                            }),
-                    )
-                    .child(
-                        accessible_text("about-description", "把课程整理成笔记。")
-                            .text_size(TEXT_BODY)
-                            .text_color(color(MUTED)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        quiet("about-project")
-                            .icon(icons::external_link())
-                            .label("项目主页")
-                            .on_click(|_, _, cx| {
-                                cx.open_url("https://github.com/mizorewww/course2md");
-                            }),
-                    )
-                    .child(
-                        quiet("about-issue")
-                            .icon(icons::edit())
-                            .label("发送反馈")
-                            .on_click(|_, _, cx| {
-                                cx.open_url("https://github.com/mizorewww/course2md/issues");
-                            }),
+                            .child(
+                                accessible_text("about-description", "把课程整理成笔记。")
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .text_size(TEXT_BODY)
+                                    .text_color(color(MUTED)),
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .flex_wrap()
+                                    .child(
+                                        quiet("about-project")
+                                            .icon(icons::external_link())
+                                            .label("项目主页")
+                                            .on_click(|_, _, cx| {
+                                                cx.open_url("https://github.com/mizorewww/course2md");
+                                            }),
+                                    )
+                                    .child(
+                                        quiet("about-issue")
+                                            .icon(icons::edit())
+                                            .label("发送反馈")
+                                            .on_click(|_, _, cx| {
+                                                cx.open_url("https://github.com/mizorewww/course2md/issues");
+                                            }),
+                                    ),
+                            ),
                     ),
             )
             .child(
                 settings_detail_group("about-license-title", "开源许可")
                     .child(
                         h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .pl(rems(28. / 14.))
                             .gap_2()
                             .flex_wrap()
                             .child(

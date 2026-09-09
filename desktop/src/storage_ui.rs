@@ -1310,13 +1310,15 @@ impl Desktop {
     }
 
     pub fn storage_status_panel(&self, cx: &mut Context<Self>) -> Div {
-        let mut view = v_flex().gap_3();
+        let mut view = v_flex().w_full().min_w_0().flex_shrink_0().gap_3();
+        let mut has_content = false;
         if self.storage_ui.relocation.is_some()
             && !self.storage_ui.busy
             && self.storage_ui.error.is_none()
             && self.storage_ui.progress.completed > 0
             && self.storage_ui.progress.completed == self.storage_ui.progress.total
         {
+            has_content = true;
             view = view.child(
                 h_flex()
                     .gap_2()
@@ -1353,6 +1355,7 @@ impl Desktop {
                 storage::LibraryCoverage::Complete => None,
             };
             if let Some(message) = message {
+                has_content = true;
                 view = view.child(
                     accessible_text("storage-access-coverage", message)
                         .text_sm()
@@ -1360,6 +1363,7 @@ impl Desktop {
                 );
             }
         } else {
+            has_content = true;
             view = view.child(
                 h_flex()
                     .gap_2()
@@ -1371,6 +1375,7 @@ impl Desktop {
             );
         }
         if let Some(error) = &self.storage_ui.error {
+            has_content = true;
             view = view.child(
                 accessible_text("storage-status-error", error.clone())
                     .text_sm()
@@ -1383,6 +1388,7 @@ impl Desktop {
                     continue;
                 };
                 if check.needs_reassociation {
+                    has_content = true;
                     let id = location.id.clone();
                     view = view.child(v_flex().gap_2()
                         .child(accessible_text(("storage-association-needed", index), format!("「{}」的关联记录缺失。重新关联后可继续使用这个位置，已有文件会保留。", location.name)))
@@ -1390,6 +1396,7 @@ impl Desktop {
                         .child(control(("reassociate-storage-location", index)).icon(icons::storage()).label("重新关联此保存位置").self_start().disabled(self.storage_ui.busy)
                             .on_click(cx.listener(move |this, _, window, cx| this.begin_library_reassociation(id.clone(), window, cx)))));
                 } else if let Some(error) = &check.problem {
+                    has_content = true;
                     view = view.child(
                         accessible_text(
                             ("storage-association-error", index),
@@ -1403,6 +1410,7 @@ impl Desktop {
             }
         }
         for (index, (path, journal)) in self.storage_ui.pending.iter().enumerate() {
+            has_content = true;
             let path = path.clone();
             let abandoned_path = path.clone();
             let journal = journal.clone();
@@ -1469,6 +1477,7 @@ impl Desktop {
         }
         if let Some(workspace) = &self.workspace {
             for (index, backup) in workspace.state.storage_backups.iter().enumerate() {
+                has_content = true;
                 let id = backup.id.clone();
                 let path = backup.path.clone();
                 view = view.child(
@@ -1500,7 +1509,9 @@ impl Desktop {
                 );
             }
         }
-        view
+        // An empty flex child still contributes a gap in the settings column.
+        // Healthy storage has no status row and must consume no layout slot.
+        view.when(!has_content, |view| view.hidden())
     }
 
     fn begin_backup_cleanup(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {

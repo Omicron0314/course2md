@@ -195,11 +195,52 @@ pub(super) fn field_label(
 ) -> Stateful<Div> {
     text(id, value)
         .text_size(TEXT_BODY)
-        .font_weight(FontWeight::MEDIUM)
+        .font_weight(FontWeight::SEMIBOLD)
 }
 
-/// A field and its control share a row; the control moves below the label when
-/// the pane cannot accommodate both columns. Widths follow the app's text scale.
+fn setting_label(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Div {
+    let value = value.into();
+    let icon = if value.contains("文字大小") {
+        icons::zoom_in()
+    } else if value.contains("外观") {
+        icons::palette()
+    } else if value.contains("动态效果") {
+        icons::play_arrow()
+    } else if value.contains("引导") {
+        icons::book_open()
+    } else if value == "视频处理与导出" {
+        icons::movie()
+    } else if value == "读取在线视频" {
+        icons::link()
+    } else if value.contains("认证") || value.contains("密钥") || value == "API Key" {
+        icons::shield()
+    } else if value.contains("名称") {
+        icons::edit()
+    } else if value.contains("字幕") || value.contains("语言") {
+        icons::subtitles()
+    } else if value.contains("识别") || value.contains("音频") {
+        icons::microphone()
+    } else if value.contains("AI") || value.contains("摘要") || value.contains("校对") {
+        icons::auto_fix()
+    } else if value.contains("服务") || value.contains("地址") || value.contains("接口") {
+        icons::cloud()
+    } else if value.contains("保存") || value.contains("位置") || value.contains("缓存") {
+        icons::folder_open()
+    } else if value.contains("模型") {
+        icons::storage()
+    } else {
+        icons::tune()
+    };
+    semantic_label(
+        id,
+        value,
+        icon.size(rems(20. / 14.)).text_color(color(GRAY)),
+    )
+}
+
+/// A field and its control share a row and a bounded leading control column.
+/// The control moves below the label when the pane cannot fit both columns.
+/// Widths follow the app's text scale.
 pub(super) fn settings_row(
     id: impl Into<ElementId>,
     label: &'static str,
@@ -228,7 +269,7 @@ fn settings_form_row(
     align_first_control: bool,
 ) -> Div {
     let id = id.into();
-    h_flex()
+    let row = h_flex()
         .w_full()
         .min_w_0()
         .min_h(CONTROL_HEIGHT)
@@ -238,23 +279,14 @@ fn settings_form_row(
         .gap_4()
         .child(
             v_flex()
-                .w(rems(180. / 14.))
+                .w(rems(200. / 14.))
                 .max_w_full()
                 .flex_shrink_0()
                 .when(align_first_control, |label| {
                     label.min_h(CONTROL_HEIGHT).justify_center()
                 })
                 .gap_1()
-                .child(field_label(id.clone(), label))
-                .when(!hint.is_empty(), |view| {
-                    view.child(
-                        text(SharedString::from(format!("{id:?}-hint")), hint)
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_size(TEXT_AUX)
-                            .text_color(color(MUTED)),
-                    )
-                }),
+                .child(setting_label(id.clone(), label)),
         )
         .child(
             h_flex()
@@ -263,16 +295,36 @@ fn settings_form_row(
                 .max_w_full()
                 .min_w_0()
                 .when(align_first_control, |field| field.min_h(CONTROL_HEIGHT))
-                .justify_start()
                 .items_center()
-                .child(control),
-        )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .max_w(rems(560. / 14.))
+                        .min_w_0()
+                        .items_center()
+                        .child(control),
+                ),
+        );
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .child(row)
+        .when(!hint.is_empty(), |view| {
+            view.child(info_callout(
+                SharedString::from(format!("{id:?}-hint")),
+                hint,
+            ))
+        })
 }
 
 /// Section boundaries use hierarchy and space, without a second card outline.
 pub(super) fn settings_section(id: impl Into<ElementId>, title: &'static str, icon: Icon) -> Div {
-    v_flex().w_full().min_w_0().gap_4().child(
+    // The scroll viewport owns height limits. A section must keep its natural
+    // height, including the fixed-height actions at its end, as details change.
+    v_flex().w_full().min_w_0().flex_shrink_0().gap_4().child(
         h_flex()
+            .flex_shrink_0()
             .gap_2()
             .items_center()
             .child(icon.size_5().flex_shrink_0().text_color(color(MUTED)))
@@ -287,9 +339,22 @@ pub(super) fn settings_section(id: impl Into<ElementId>, title: &'static str, ic
 
 pub(super) fn settings_detail_group(id: impl Into<ElementId>, title: &'static str) -> Div {
     v_flex().w_full().min_w_0().gap_3().child(
-        field_label(id, title)
-            .role(Role::Heading)
-            .font_weight(FontWeight::SEMIBOLD),
+        h_flex()
+            .min_w_0()
+            .items_center()
+            .gap_2()
+            .child(
+                match title {
+                    "开源许可" => icons::code(),
+                    "所需程序" => icons::computer(),
+                    "检查服务" => icons::science(),
+                    _ => icons::info(),
+                }
+                .size(rems(20. / 14.))
+                .flex_shrink_0()
+                .text_color(color(MUTED)),
+            )
+            .child(field_label(id, title).role(Role::Heading).min_w_0()),
     )
 }
 
@@ -392,7 +457,10 @@ pub(super) fn preference(label: &'static str, hint: &'static str, control: Switc
         hint,
         crate::focus_scroll::FocusRing::new(
             SharedString::from(format!("preference-focus-{label}")),
-            coral_switch(control).accessibility_label(label).p_2(),
+            coral_switch(control)
+                .accessibility_label(label)
+                .py_2()
+                .pr_2(),
         ),
     )
 }
@@ -469,7 +537,10 @@ impl Desktop {
             v_flex()
                 .w_full()
                 .gap_2()
-                .child(field_label(("setting-field-label", field as usize), label))
+                .child(setting_label(
+                    ("setting-field-label", field as usize),
+                    label,
+                ))
                 .child(
                     text_input(&self.settings_ui.inputs[&field])
                         .w_full()
@@ -498,14 +569,10 @@ impl Desktop {
                     )
                 })
                 .when(field == EditField::Address, |view| {
-                    view.child(
-                        text(
-                            "service-address-hint",
-                            "可填写基础地址或完整接口地址，需包含 http:// 或 https://。",
-                        )
-                        .text_size(TEXT_AUX)
-                        .text_color(color(MUTED)),
-                    )
+                    view.child(info_callout(
+                        "service-address-hint",
+                        "可填写基础地址或完整接口地址，需包含 http:// 或 https://。",
+                    ))
                 }),
         )
     }
@@ -810,7 +877,7 @@ impl Desktop {
             )
             .child(
                 Scrollbar::vertical(&self.scrolls[Page::Settings as usize])
-                    .mode(ScrollbarMode::Always),
+                    .mode(ScrollbarMode::Scrolling),
             );
         let body = div()
             .flex()
@@ -850,7 +917,7 @@ impl Desktop {
         };
         let languages = group("language-settings", "文字来源")
             .child(
-                text("subtitle-policy", "优先使用字幕，没有字幕时识别视频声音。")
+                info_callout("subtitle-policy", "优先使用字幕，没有字幕时识别视频声音。")
                     .text_sm()
                     .text_color(color(MUTED)),
             )
@@ -918,14 +985,10 @@ impl Desktop {
                         self.setting_field(EditField::Languages, "语言优先级", cx)
                             .max_w(rems(24.)),
                     )
-                    .child(
-                        text(
-                            "subtitle-language-help",
-                            "用逗号分隔语言代码，例如 zh-Hans, en。留空表示自动。",
-                        )
-                        .text_sm()
-                        .text_color(color(MUTED)),
-                    )
+                    .child(info_callout(
+                        "subtitle-language-help",
+                        "用逗号分隔语言代码，例如 zh-Hans, en。留空表示自动。",
+                    ))
                     .child(
                         outline_pill("apply-languages")
                             .icon(icons::check_circle())
@@ -963,18 +1026,14 @@ impl Desktop {
                         this.commit_generation(next, cx);
                     })),
             ))
-            .child(
-                text(
-                    "asr-default-help",
-                    if provider == "api" {
-                        "视频声音会发送到所选语音服务。"
-                    } else {
-                        "在这台电脑上识别，课程声音不会上传。"
-                    },
-                )
-                .text_sm()
-                .text_color(color(MUTED)),
-            );
+            .child(info_callout(
+                "asr-default-help",
+                if provider == "api" {
+                    "视频声音会发送到所选语音服务。"
+                } else {
+                    "在这台电脑上识别，课程声音不会上传。"
+                },
+            ));
         if provider == "api" {
             recognition = recognition.child(self.service_picker(ServicePurpose::Speech, false, cx));
         } else {
@@ -1038,7 +1097,7 @@ impl Desktop {
                     self.settings_ui.asr_details_open,
                     v_flex()
                         .gap_3()
-                        .child(field_label("asr-hardware-heading", "固定识别方式"))
+                        .child(setting_label("asr-hardware-heading", "固定识别方式"))
                         .child(
                             self.setting_choices("default-asr-hardware", "固定识别方式")
                                 .options(
@@ -1075,7 +1134,7 @@ impl Desktop {
                                 })),
                         )
                         .child(
-                            text(
+                            info_callout(
                                 "asr-fixed-choice-help",
                                 "固定方式不可用时会提示原因；自动识别只使用本机能力。",
                             )
@@ -1226,9 +1285,12 @@ impl Desktop {
             ));
         let selected = value.options.formats.clone().unwrap_or_default();
         v_flex()
+            .w_full()
+            .min_w_0()
+            .flex_shrink_0()
             .gap_6()
             .child(
-                text(
+                info_callout(
                     "generation-default-scope",
                     "用于后续生成，也会更新当前未单独修改的选项。",
                 )
@@ -1241,7 +1303,7 @@ impl Desktop {
             .child(
                 group("export-default-settings", "导出与离线保存")
                     .child(
-                        text(
+                        info_callout(
                             "internal-note-policy",
                             "笔记会自动保存在应用内，也可以同时导出文件。",
                         )
@@ -1418,7 +1480,7 @@ impl Desktop {
     }
 
     fn services_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut view = v_flex().w_full().min_w_0().gap_5();
+        let mut view = v_flex().w_full().min_w_0().flex_shrink_0().gap_6();
         // Keep the active form near the start of the page, including in a long service list.
         let inline_editor = self
             .settings_ui
@@ -1430,11 +1492,10 @@ impl Desktop {
                 .child(self.service_editor_card(window, cx))
                 .into_any_element();
         }
-        view = view.child(
-            text("service-purpose-help", "连接你使用的语音或 AI 服务。")
-                .text_sm()
-                .text_color(color(MUTED)),
-        );
+        view = view.child(info_callout(
+            "service-purpose-help",
+            "连接你使用的来源账号、语音或 AI 服务。",
+        ));
         view = view.child(
             group("account-settings-heading", "来源账号").child(
                 v_flex()
@@ -1445,16 +1506,6 @@ impl Desktop {
                     .border_1()
                     .border_color(color(CARD_LINE))
                     .rounded(RADIUS_CARD)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(icons::bilibili().size_5())
-                            .child(
-                                text("account-card-title", "Bilibili 账号")
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            ),
-                    )
                     .child(self.account_settings_page(cx)),
             ),
         );
@@ -1683,7 +1734,11 @@ impl Desktop {
             .border_1()
             .border_color(color(CONTROL))
             .rounded(RADIUS_CARD)
-            .child(text("service-editor-inline-title", title).text_size(TEXT_TITLE).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                text("service-editor-inline-title", title)
+                    .text_size(TEXT_TITLE)
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
             .child(self.service_editor_content(true, window, cx))
     }
     pub fn task_service_picker(&self, purpose: ServicePurpose, cx: &mut Context<Self>) -> Div {
@@ -1741,10 +1796,14 @@ impl Desktop {
                 latest.insert(version.service_id.clone(), version.clone());
             }
         }
-        let mut view = v_flex().gap_2();
+        let mut view = v_flex().w_full().min_w_0().gap_2();
         if let Some(version) = current
             .as_deref()
             .and_then(|id| self.preferences.version(id))
+            .filter(|version| {
+                self.preferences
+                    .service_stopped_in_snapshot(&version.service_id)
+            })
         {
             view = view.child(
                 text(
@@ -1783,6 +1842,12 @@ impl Desktop {
             })
             .map(|version| version.service_id.clone());
         let mut choices = latest.into_values().collect::<Vec<_>>();
+        let mut controls = h_flex()
+            .w_full()
+            .min_w_0()
+            .items_start()
+            .flex_wrap()
+            .gap_2();
         if let Some(current) = current
             .as_deref()
             .and_then(|id| self.preferences.version(id))
@@ -1842,9 +1907,9 @@ impl Desktop {
                     picker = picker.disable_option(&version.id);
                 }
             }
-            view = view.child(picker);
+            controls = controls.child(picker);
         }
-        view = view.child(
+        controls = controls.child(
             control((
                 "configure-service",
                 purpose as usize * 2 + current_task as usize,
@@ -1866,6 +1931,7 @@ impl Desktop {
                 }
             })),
         );
+        view = view.child(controls);
         if current_task
             && self
                 .workspace
@@ -1907,7 +1973,20 @@ impl Desktop {
                     .text_color(color(DANGER)),
             );
         }
-        view
+        if current_task {
+            view
+        } else {
+            settings_field_row(
+                ("default-service-label", purpose as usize),
+                if purpose == ServicePurpose::Speech {
+                    "语音服务"
+                } else {
+                    "AI 服务"
+                },
+                "",
+                view,
+            )
+        }
     }
     fn bind_service(
         &mut self,
@@ -2147,7 +2226,13 @@ impl Desktop {
             .px_1();
         if !inline {
             view = view
-                .max_h((window.viewport_size().height - task_dialog_top(window) - window.rem_size() * 5. - px(72.)).max(px(80.)))
+                .max_h(
+                    (window.viewport_size().height
+                        - task_dialog_top(window)
+                        - window.rem_size() * 5.
+                        - px(72.))
+                    .max(px(80.)),
+                )
                 .min_h_0()
                 .overflow_y_scroll();
         }
@@ -2169,7 +2254,7 @@ impl Desktop {
                 view.child(
                 v_flex()
                     .gap_2()
-                    .child(field_label("service-protocol-heading", "接口类型"))
+                    .child(setting_label("service-protocol-heading", "接口类型"))
                     .child(
                         self.setting_choices("service-protocol", "服务接口类型")
                             .options(
@@ -2221,30 +2306,33 @@ impl Desktop {
         view = view.child(
             v_flex()
                 .gap_2()
-                .child(field_label("service-auth-heading", "认证方式"))
+                .child(setting_label("service-auth-heading", "认证方式"))
                 .child(
-                    self.setting_choices("service-auth-mode", "服务认证方式")
-                        .options([("api_key", "API Key"), ("none", "无需认证")])
-                        .selected(if auth == Authentication::ApiKey {
-                            "api_key"
-                        } else {
-                            "none"
-                        })
-                        .disabled(awaiting_binding)
-                        .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
-                            let mode = if selected.as_ref() == "api_key" {
-                                Authentication::ApiKey
+                    div().w_full().max_w(rems(560. / 14.)).min_w_0().child(
+                        self.setting_choices("service-auth-mode", "服务认证方式")
+                            .options([("api_key", "API Key"), ("none", "无需认证")])
+                            .full_width()
+                            .selected(if auth == Authentication::ApiKey {
+                                "api_key"
                             } else {
-                                Authentication::None
-                            };
-                            if let Some(editor) = &mut this.settings_ui.editor {
-                                editor.draft.authentication = mode;
-                                editor.models.invalidate();
-                                editor.errors.clear();
-                                editor.evidence = None;
-                            }
-                            cx.notify();
-                        })),
+                                "none"
+                            })
+                            .disabled(awaiting_binding)
+                            .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
+                                let mode = if selected.as_ref() == "api_key" {
+                                    Authentication::ApiKey
+                                } else {
+                                    Authentication::None
+                                };
+                                if let Some(editor) = &mut this.settings_ui.editor {
+                                    editor.draft.authentication = mode;
+                                    editor.models.invalidate();
+                                    editor.errors.clear();
+                                    editor.evidence = None;
+                                }
+                                cx.notify();
+                            })),
+                    ),
                 ),
         );
         if auth == Authentication::ApiKey {
@@ -2344,7 +2432,7 @@ impl Desktop {
                     .w_full()
                     .min_w_0()
                     .gap_2()
-                    .child(field_label(
+                    .child(setting_label(
                         ("setting-field-label", EditField::Model as usize),
                         "模型 ID",
                     ))
@@ -2376,49 +2464,56 @@ impl Desktop {
                 ),
             );
         }
-        view = view.child(
-            text("service-test-notice", service_test::TEST_NOTICE)
-                .text_sm()
-                .text_color(color(MUTED)),
-        );
+        let mut testing = settings_detail_group("service-test-heading", "检查服务")
+            .flex_shrink_0()
+            .pt_2()
+            .child(
+                text("service-test-notice", service_test::TEST_NOTICE)
+                    .text_sm()
+                    .text_color(color(MUTED)),
+            );
         if protocol == ServiceProtocol::AiChat {
-            view = view.child(
-                self.setting_choices("service-test-purpose", "要测试的服务能力")
-                    .options(
-                        [TestKind::Proofread, TestKind::Summary, TestKind::Vision]
-                            .into_iter()
-                            .map(|kind| (kind.contract(), kind.label())),
-                    )
-                    .selected(editor.test_kind.contract())
-                    .disabled(busy)
-                    .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
-                        let Some(kind) = [TestKind::Proofread, TestKind::Summary, TestKind::Vision]
-                            .into_iter()
-                            .find(|kind| kind.contract() == selected.as_ref())
-                        else {
-                            return;
-                        };
-                        let evidence = this
-                            .settings_ui
-                            .editor
-                            .as_ref()
-                            .filter(|_| this.setting_value(EditField::Key, cx).is_empty())
-                            .and_then(|editor| editor.draft.configuration().ok())
-                            .and_then(|config| {
-                                this.preferences
-                                    .test_evidence(&config, kind.contract())
-                                    .cloned()
-                            });
-                        if let Some(editor) = &mut this.settings_ui.editor {
-                            editor.test_kind = kind;
-                            editor.evidence = evidence;
-                        }
-                        cx.notify();
-                    })),
+            testing = testing.child(
+                div().w_full().max_w(rems(560. / 14.)).min_w_0().child(
+                    self.setting_choices("service-test-purpose", "要测试的服务能力")
+                        .options(
+                            [TestKind::Proofread, TestKind::Summary, TestKind::Vision]
+                                .into_iter()
+                                .map(|kind| (kind.contract(), kind.label())),
+                        )
+                        .full_width()
+                        .selected(editor.test_kind.contract())
+                        .disabled(busy)
+                        .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
+                            let Some(kind) =
+                                [TestKind::Proofread, TestKind::Summary, TestKind::Vision]
+                                    .into_iter()
+                                    .find(|kind| kind.contract() == selected.as_ref())
+                            else {
+                                return;
+                            };
+                            let evidence = this
+                                .settings_ui
+                                .editor
+                                .as_ref()
+                                .filter(|_| this.setting_value(EditField::Key, cx).is_empty())
+                                .and_then(|editor| editor.draft.configuration().ok())
+                                .and_then(|config| {
+                                    this.preferences
+                                        .test_evidence(&config, kind.contract())
+                                        .cloned()
+                                });
+                            if let Some(editor) = &mut this.settings_ui.editor {
+                                editor.test_kind = kind;
+                                editor.evidence = evidence;
+                            }
+                            cx.notify();
+                        })),
+                ),
             );
         }
         if busy {
-            view = view.child(
+            testing = testing.child(
                 h_flex()
                     .gap_2()
                     .items_center()
@@ -2500,7 +2595,7 @@ impl Desktop {
                     cx,
                 ));
             }
-            view = view.child(crate::motion::enter(
+            testing = testing.child(crate::motion::enter(
                 SharedString::from(format!(
                     "service-test-result-{}-{:?}",
                     evidence.tested_at, evidence.outcome
@@ -2509,6 +2604,7 @@ impl Desktop {
                 cx,
             ));
         }
+        view = view.child(testing);
         if let Some(status) = &editor.status
             && !busy
         {
@@ -2568,7 +2664,8 @@ impl Desktop {
                     ),
             );
         if inline {
-            view.child(self.reveal_setting("service-editor-actions-focus", actions)).into_any_element()
+            view.child(self.reveal_setting("service-editor-actions-focus", actions))
+                .into_any_element()
         } else {
             v_flex()
                 .gap_4()
@@ -3300,21 +3397,19 @@ impl Desktop {
         view
     }
     fn storage_settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut view = v_flex().gap_5().child(
+        let mut view = v_flex().w_full().min_w_0().flex_shrink_0().gap_6().child(
             h_flex()
                 .w_full()
                 .min_w_0()
                 .gap_3()
                 .flex_wrap()
                 .child(
-                    text(
+                    info_callout(
                         "storage-policy",
                         "在这些位置保存笔记。更改默认位置只影响后续生成的笔记。",
                     )
                     .flex_1()
-                    .min_w_0()
-                    .text_sm()
-                    .text_color(color(MUTED)),
+                    .min_w(rems(240. / 14.)),
                 )
                 .child(
                     quiet("refresh-storage-locations")
@@ -3764,9 +3859,10 @@ impl Desktop {
             .into_iter()
             .enumerate()
             {
-                card = card.child(settings_detail_row(
+                card = card.child(settings_row(
                     ("diagnostic-capability", index),
                     label,
+                    "",
                     badge(if ready {
                         BadgeKind::Success
                     } else if optional {
@@ -3789,13 +3885,10 @@ impl Desktop {
             }
             if !e.engine {
                 card = card
-                    .child(
-                        settings_value(
-                            "repair-bundled-engine",
-                            "转换程序暂时无法运行。重新安装应用后可继续，已有笔记会保留。",
-                        )
-                        .text_size(TEXT_AUX),
-                    )
+                    .child(info_callout(
+                        "repair-bundled-engine",
+                        "转换程序暂时无法运行。重新安装应用后可继续，已有笔记会保留。",
+                    ))
                     .child(
                         control("download-repair-app")
                             .icon(icons::download())
@@ -3807,24 +3900,16 @@ impl Desktop {
                     );
             }
             if !e.ffmpeg || !e.ffprobe || !e.ytdlp {
-                card = card.child(
-                    settings_value(
-                        "media-tools-unavailable",
-                        "部分媒体功能暂不可用。展开诊断详情可查看修复方式。",
-                    )
-                    .text_size(TEXT_AUX)
-                    .text_color(color(MUTED)),
-                );
+                card = card.child(info_callout(
+                    "media-tools-unavailable",
+                    "部分媒体功能暂不可用。展开诊断详情可查看修复方式。",
+                ));
             }
             if !speech_service && !(e.apple || e.npu || e.llama) {
-                card = card.child(
-                    settings_value(
-                        "local-recognition-help",
-                        "本机识别尚未就绪。展开详情查看安装方式，或在生成设置中选择在线语音服务。",
-                    )
-                    .text_size(TEXT_AUX)
-                    .text_color(color(MUTED)),
-                );
+                card = card.child(info_callout(
+                    "local-recognition-help",
+                    "本机识别尚未就绪。展开详情查看安装方式，或在生成设置中选择在线语音服务。",
+                ));
             }
         } else {
             card = card.child(

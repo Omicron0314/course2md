@@ -233,46 +233,57 @@ impl Desktop {
         let show_detail = !self.account.checking && detail != label;
         v_flex()
             .w_full()
+            .min_w_0()
             .gap_3()
             .child(
                 h_flex()
                     .w_full()
                     .min_w_0()
                     .gap_2()
-                    .items_start()
+                    .items_center()
+                    .child(
+                        semantic_label(
+                            "bilibili-account-identity",
+                            if onboarding {
+                                "账号状态"
+                            } else {
+                                "Bilibili 账号"
+                            },
+                            icons::bilibili(),
+                        )
+                        .flex_1(),
+                    )
                     .when(self.account.checking, |row| {
                         row.child(crate::motion::spinner("account-checking", cx))
                     })
-                    .child(badge(kind).child(label))
-                    .when(show_detail, |row| {
-                        row.child(
-                            accessible_text("bilibili-account-status", detail)
-                                .flex_1()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .py(px(3.)),
-                        )
-                    }),
+                    .child(badge(kind).child(label)),
             )
+            .when(show_detail, |view| {
+                view.child(
+                    accessible_text("bilibili-account-status", detail)
+                        .min_w_0()
+                        .whitespace_normal()
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+            })
             .child(
-                accessible_text(
+                info_callout(
                     "bilibili-account-policy",
                     if saved {
                         "读取字幕和视频时使用此账号的权限。退出登录不会删除课程和笔记。"
                     } else if onboarding {
-                        "可跳过，之后在设置中登录。"
+                        "登录后可读取账号有权访问的视频与字幕，也可以跳过，之后在设置中登录。"
                     } else {
                         "公开内容可以先尝试读取；遇到账号权限限制时，登录后继续。"
                     },
                 )
                 .w_full()
                 .min_w_0()
-                .whitespace_normal()
-                .text_sm()
-                .text_color(color(MUTED)),
+                .whitespace_normal(),
             )
             .child(
                 h_flex()
+                    .w_full()
                     .gap_2()
                     .flex_wrap()
                     .when_some(login_action, |view, label| {
@@ -288,7 +299,8 @@ impl Desktop {
                     .child(
                         control("account-refresh")
                             .ghost()
-                            .icon(icons::refresh()).label("重新检查")
+                            .icon(icons::refresh())
+                            .label("重新检查")
                             .disabled(self.account.checking)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_account(cx))),
                     )
@@ -296,7 +308,8 @@ impl Desktop {
                         view.child(
                             control("account-logout")
                                 .ghost()
-                                .icon(icons::logout()).label("退出登录")
+                                .icon(icons::logout())
+                                .label("退出登录")
                                 .on_click(cx.listener(|this, _, _, cx| this.clear_account(cx))),
                         )
                     }),
@@ -442,8 +455,11 @@ impl Desktop {
                 f32::from(window.rem_size()),
             );
             dialog
-                .title(crate::settings_ui::settings_value("bilibili-dialog-title", "登录 Bilibili")
-                    .text_size(TEXT_TITLE).font_weight(FontWeight::SEMIBOLD))
+                .title(
+                    crate::settings_ui::settings_value("bilibili-dialog-title", "登录 Bilibili")
+                        .text_size(TEXT_TITLE)
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
                 .w(px(layout.dialog_width))
                 .margin_top(task_dialog_top(window))
                 .overlay_closable(false)
@@ -802,8 +818,7 @@ mod tests {
                     assert_eq!((unit * scale).fract(), 0.);
                     for origin in [0., 0.125, 0.25, 0.5, 0.75] {
                         let first = ((origin + offset) * scale).round() / scale;
-                        let last = ((origin + offset + (module_count - 1) as f32 * unit)
-                            * scale)
+                        let last = ((origin + offset + (module_count - 1) as f32 * unit) * scale)
                             .round()
                             / scale
                             + unit;
