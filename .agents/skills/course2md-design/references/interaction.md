@@ -1,0 +1,39 @@
+# Task decisions and continuity
+
+Use this reference when designing first use, conversion, result access, configuration handoffs or recovery. It describes decision criteria and business constraints; it does not prescribe a fixed screen sequence or tutorial length.
+
+## Assign work to the right party
+
+The user supplies the content and intent. The app should detect metadata, choose supported local capabilities, reuse established preferences, propose a name and destination, and advance routine processing. A step does not need a separate user command merely because it has a separate backend function.
+
+Ask when the app cannot determine the intended video, when an explicit choice cannot be honored, or when continuing changes a material consequence such as sending content to a different service, repeating a possibly billed request, replacing content, or moving/deleting user files. State the consequence and offer a direct way forward. Keep these decisions distinct from ordinary status feedback.
+
+“Automatic” delegates a choice within its stated scope. For example, an automatic local text route can try usable subtitles and then local speech recognition when subtitles are unavailable. A subtitle-only request must not silently become speech recognition, and a local request must not silently become a cloud request. A failed auxiliary probe need not block an otherwise viable task; a failed source identity or access check may do so.
+
+## Defaults and first use
+
+Choose useful defaults before adding a setting or an explanation. Configure reusable capabilities once; expose per-task overrides only when they help the current intent. Clearly distinguish changes for future work from changes to the current input. Do not require users to understand service revision IDs or task serialization to make that distinction.
+
+Use first-use guidance to help people reach value with real content. It can combine a concise introduction, relevant capability choices and contextual help; choose the form from the actual task. Allow skipping, retain completed choices, and provide a way to revisit guidance without repeating it on every launch. Download or account setup should be relevant to the chosen capability, with truthful status and an opportunity to stop. An existing working configuration should not be erased or subjected to another compulsory setup flow.
+
+## Continue, interrupt and return
+
+An accepted request remains an intent while the app checks its prerequisites. Normal completion of a check should advance that intent. Keep cancellation, source replacement and late asynchronous responses tied to the correct input and request; a stale response must not resume abandoned work.
+
+Temporary configuration or login should preserve the originating input, task and reading position and make continuation discoverable. Navigation is not cancellation. Use an explicit cancel/discard action for an unfinished edit when losing it matters; do not publish a private edit merely to preserve navigation continuity.
+
+A completion action should reach the result it names. Processing history and technical logs remain available, but should not be mandatory intermediates before reading an available note. Keep partial results readable and offer recovery for the failed part. Status updates should not steal navigation from someone working elsewhere.
+
+## Business invariants
+
+- Submitted tasks retain their captured source, processing choices and service configuration; updating defaults must not rewrite queued or running work.
+- Names, storage associations, notes and existing versions survive failed saves and canceled repairs. A failed save must not claim persistence.
+- Repeating an uncertain external request requires a clear user decision. Automatic recovery must not duplicate a possibly completed or billed request.
+- A label such as “only this note” has a real scope boundary. Define what happens on a new source, retry, navigation and restart; do not let a temporary choice silently become a permanent default or vice versa.
+- Fresh setup, a configured repeat task and a restored interrupted task are distinct states. Review each without assuming evidence for one proves the others.
+
+## Guidance and evidence
+
+[Apple Onboarding](https://developer.apple.com/design/human-interface-guidelines/onboarding) favors learning while doing, contextual help, optional tutorials and postponing nonessential setup. [Apple Settings](https://developer.apple.com/design/human-interface-guidelines/settings) distinguishes infrequent preferences from contextual task options and discourages asking for facts the app can detect. [Apple Feedback](https://developer.apple.com/design/human-interface-guidelines/feedback) relates interruption to the significance of the consequence and keeps status near its subject. [Apple Offering help](https://developer.apple.com/design/human-interface-guidelines/offering-help) recommends concise guidance for the action at hand, rather than explaining standard controls or requiring memorization.
+
+Judge a flow with an actual native action trace, including the decisions made, extra navigation, changed data and reached result. Screenshots establish visible state; source inspection establishes implementation paths. Neither alone proves that first-time users can complete the task or that a repeat run reuses configuration.

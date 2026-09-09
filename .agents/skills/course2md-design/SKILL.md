@@ -1,15 +1,19 @@
 ---
 name: course2md-design
-description: Design, implement and independently review course2md's native GPUI pages, shared controls, wording, themes and motion. Not for CLI-only or conversion-engine work.
+description: Design, implement and independently review course2md's native GPUI task flows, first use, pages, shared controls, wording, themes and motion. Not for CLI-only or conversion-engine work.
 ---
 
 # course2md desktop design
 
 Use Material Design 3 as the common visual and interaction vocabulary. Use macOS conventions for window controls, dragging, menus and keyboard behavior. The product uses Material Icons and configurable palettes; it does not reproduce every Material mobile dimension or Expressive animation. Read [the design system](references/system.md) before changing shared controls or composition, and [settings](references/settings.md) when touching preferences.
 
+For first use, conversion, navigation or recovery, read [task decisions and continuity](references/interaction.md). The interface should remove work from the user's task; visual consistency does not justify keeping a needless step.
+
 ## Design before patching
 
 Start with the user's task, the complete screen, and its relationship to other screens. An arrow on a rejected screenshot identifies a problem, not necessarily the best implementation. Explain a design choice by the information or action it serves. Do not add concepts, empty cards, fixed heights or extra instructions just to satisfy visual symmetry.
+
+Trace a realistic intent through to a usable result before choosing screens. Separate decisions only the user can make from facts the app can detect, defaults it can reuse, and operations it can continue automatically. A pause needs an unresolved choice or actionable obstacle, not merely the completion of an internal stage. Do not turn the page order from a previous implementation into a required workflow.
 
 Define the hierarchy and shared alignment before individual dimensions. A screen needs a recognizable primary task, related information grouped together, and secondary controls that do not compete with the main action. Whitespace separates groups; it must not scatter a small amount of related information across a large card. A border needs a purpose such as input, selection or containment of an independently interactive object. Avoid stacking a divider, heading and bordered card for every section.
 
@@ -17,11 +21,12 @@ Use the existing shared implementation as the place to correct inconsistencies. 
 
 ## Product structure
 
-- The workbench is a continuous video import form: choose source, enter/select video, read it, then configure generation. Do not ask people to create, name, manage or discard an empty note/draft. Navigating to import preserves current input; tasks own their submitted data independently. Saved generated notes remain the output users read.
-- Keep the initial form limited to decisions needed before reading. Automatic language handling is the normal path; explicit subtitle-track choice belongs with the source after reading, with advanced preferences in Settings.
+- The workbench turns a supplied video into a readable note. Let the app resolve source metadata, choose suitable defaults and carry out the requested work without demanding separate approval of routine internal stages. Do not ask people to create, name, manage or discard an empty note/draft. Navigating to import preserves current input; submitted tasks own their data independently.
+- Show options when they affect a present decision. Automatic language and local capability selection are ordinary defaults; explicit source, model or service choices remain authoritative. An automatic route and an explicitly pinned route can have different recovery behavior. Do not require configuration for a capability the current task will not use.
+- First-use guidance helps people perform a real task, explains consequential choices in context, and can be skipped and found again. Reuse established configuration on later runs. Keep optional services, appearance customisation and technical diagnostics out of mandatory setup.
 - The library presents generated content. A truly empty library has one useful import action; search/filter failure states keep the controls needed to recover. Do not show an entire organisation toolbar before there is content to organise.
 - The title bar provides stable navigation. It stays quieter than a page's forward action. Peer views may share capsule visuals while keeping tab semantics. A sidebar uses leading-aligned items, not a rotated horizontal track.
-- Navigation already identifies the selected category. Content headings describe useful groups; avoid repeated category headings and redundant return actions when global navigation remains available.
+- Navigation identifies location; content headings describe useful groups. Keep a contextual return when global navigation cannot restore the current input, document or task. Reusing a selection control must not erase navigation activation or return behavior.
 - Put model implementation, protocols, raw paths and technical diagnostics in clearly labelled details. Keep actionable errors close to their cause. Keep user data, notes, credentials and release installations safe during verification.
 
 ## Shared implementation
@@ -44,7 +49,7 @@ Use one principal animated response per intent. A selector moves its indicator; 
 
 For a broad change, assign independent subagent review to every affected page, including shared-component callers, overlays and loading/empty/failure/completion states. Reviewers start from the original rejected screens and this system, not a list of claimed fixes.
 
-First compare complete native screens for hierarchy, grouping, rhythm, density, coherence and discoverability. Then check geometry and behavior. Do not equate “no overflow”, compilation, tests or an animation duration with good design. Record concrete findings and their resolution, and distinguish screenshot evidence from source inspection and runtime observation.
+First follow the main task and a repeat use through the running native app: record user decisions, required actions, detours, recovery and the usable result. Then compare complete screens for hierarchy, grouping, rhythm, density, coherence and discoverability, followed by geometry and control behavior. Do not equate “no overflow”, compilation, tests or an animation duration with good design. Record concrete findings and their resolution, and distinguish screenshot evidence from source inspection and runtime observation.
 
 Verify normal/narrow/wide native windows, light/dark palettes and every theme. The product's offered 100/125/150/200% text scales are normal layout cases: controls grow and content reflows. This is not authorization for a specialist accessibility audit. Keep ordinary keyboard navigation and existing system preferences.
 

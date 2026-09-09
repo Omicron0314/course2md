@@ -29,6 +29,8 @@ The 40px control baseline, 28/18/14/12px type scale, spacing steps, preview geom
 
 ## Whole-screen comparisons
 
+For a product flow, start with [task decisions and continuity](interaction.md): establish whether the user can reach the intended result and return from interruptions before assessing composition. An orderly set of redundant steps is still a poor interaction.
+
 Inspect the workbench, library, tasks, reader and settings side by side at default size. The forward action should attract more attention than navigation. Related controls must align even when their label lengths differ. Empty screens should not look like disabled populated screens. Expanded details should add a structured explanation rather than reveal an undifferentiated text dump.
 
 Measure a selector including track padding alongside an input and a button. Then click, hover and focus its selected item. Changing these states must preserve the same selection and avoid shifting nearby text. Compare the initial and enlarged-type layouts: the latter is a new layout constraint, not simply a magnified screenshot.

@@ -2,6 +2,14 @@
 
 Read with [the shared system](system.md). Earlier 520px subcolumns, repeated category titles and special side/underline markers were local decisions that produced an incoherent screen. They are superseded by this composition.
 
+## Scope and continuity
+
+Use [task decisions and continuity](interaction.md) for settings reached during another task. Keep infrequently changed defaults here and current-task choices near their effects. A missing required service or unavailable model should lead to the relevant repair and back to the originating work, not require users to reconstruct a path through settings categories.
+
+State whether a change applies to future work or the current input. Reuse saved service configuration; immutable versions protect submitted tasks internally and belong in details when they explain a discrepancy. Do not make ordinary service selection a version-management workflow. Preserve unfinished input during temporary navigation, and distinguish canceling an editor from publishing its values.
+
+Model setup should communicate the decision that matters: the recommended usable option, any relevant download, and why someone might change it. Hardware and model identifiers remain available for explicit configuration and diagnosis. Opening settings must not be a prerequisite for ordinary conversion when usable defaults already exist.
+
 ## Layout
 
 Use a leading category sidebar when the current window and text scale leave a useful content pane; otherwise use a compact single-row category control. Keep navigation outside content scrolling. Reuse capsule selection and tab behavior rather than drawing a page-specific underline, side stripe or bordered selected button.
