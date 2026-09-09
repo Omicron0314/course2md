@@ -1,0 +1,774 @@
+Diff in /Users/aac6fef/Developer/course2md/desktop/.deps/component/crates/component-macros/src/crate_path.rs:11:
+ pub(crate) fn gpui() -> syn::Result<TokenStream> {
+     match crate_name("gpui-kit") {
+         Ok(found) => Ok(found_crate_path(found)),
+-        Err(kit_error) => crate_name("gpui-pre").or_else(|_| crate_name("gpui"))
++        Err(kit_error) => crate_name("gpui-pre")
++            .or_else(|_| crate_name("gpui"))
+             .map(found_crate_path)
+             .map_err(|gpui_error| {
+                 syn::Error::new(
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/appearance_ui.rs:281:
+             cx,
+         );
+         let available_height = (f32::from(window.viewport_size().height)
+-            - f32::from(task_dialog_top(window)) - PICKER_GUTTER
++            - f32::from(task_dialog_top(window))
++            - PICKER_GUTTER
+             - PICKER_PADDING * 2.
+             - PICKER_BORDER * 2.
+             - f32::from(window.rem_size()) * 3.
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/appearance_ui.rs:339:
+         });
+         window.open_dialog(cx, move |dialog, window, _| {
+             dialog
+-                .title(crate::settings_ui::settings_value("palette-dialog-title", if dark { "深色主题" } else { "浅色主题" })
+-                    .text_size(TEXT_TITLE).font_weight(FontWeight::SEMIBOLD))
++                .title(
++                    crate::settings_ui::settings_value(
++                        "palette-dialog-title",
++                        if dark { "深色主题" } else { "浅色主题" },
++                    )
++                    .text_size(TEXT_TITLE)
++                    .font_weight(FontWeight::SEMIBOLD),
++                )
+                 .w(px(picker_width(window)))
+                 .p(px(PICKER_PADDING))
+                 .margin_top(task_dialog_top(window))
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/backend.rs:426:
+             false
+         };
+         let npu_runtime = ["uv", "python3", "python"].iter().any(|name| {
+-                let executable = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+-                std::env::split_paths(&tool_path()).any(|dir| dir.join(&executable).is_file())
+-            });
++            let executable = format!("{name}{}", std::env::consts::EXE_SUFFIX);
++            std::env::split_paths(&tool_path()).any(|dir| dir.join(&executable).is_file())
++        });
+         let npu = npu_device && npu_runtime;
+         Self {
+             engine: cli.is_some() && checks[0].is_some(),
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/icons.rs:333:
+ impl AssetSource for Assets {
+     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+         if path == "images/course2md.png" {
+-            return Ok(Some(Cow::Borrowed(include_bytes!("../assets/128x128@2x.png"))));
++            return Ok(Some(Cow::Borrowed(include_bytes!(
++                "../assets/128x128@2x.png"
++            ))));
+         }
+         if let Some((_, bytes)) = ICONS.iter().find(|(name, _)| *name == path) {
+             return Ok(Some(Cow::Borrowed(bytes)));
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:56:
+                     value.backup_detail = Some(format!("未找到旧配置备份：{}", backup.display()));
+                 }
+                 Err(error) => {
+-                    value.backup_detail = Some(format!("备份暂时不可用：{}\n{error:#}", backup.display()));
++                    value.backup_detail =
++                        Some(format!("备份暂时不可用：{}\n{error:#}", backup.display()));
+                 }
+             }
+         }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:84:
+ /// This only chooses a bootstrap root. Workspace::open subsequently uses its persisted
+ /// registry. Fresh installs use managed local storage so the welcome screen does not
+ /// synchronously access a protected Documents folder before the user can choose a location.
+-pub fn startup_output(
+-    directory: &Path,
+-    legacy: &Inspection,
+-) -> PathBuf {
++pub fn startup_output(directory: &Path, legacy: &Inspection) -> PathBuf {
+     if has_modern_records(directory) || legacy.problem.is_some() {
+         return directory.join("desktop-local-library");
+     }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:103:
+     let config: ConfigFile = toml::from_str(source).map_err(|error: toml::de::Error| {
+         // Displaying a TOML parser error can reproduce an API key from the offending line.
+         // Keep location and cause class, never the source excerpt or untrusted field value.
+-        let location = error.span().map(|range| {
+-            let before = &source.as_bytes()[..range.start.min(source.len())];
+-            let line = before.iter().filter(|byte| **byte == b'\n').count() + 1;
+-            let column = before.iter().rposition(|byte| *byte == b'\n')
+-                .map_or(before.len() + 1, |last| before.len() - last);
+-            format!("（第 {line} 行，第 {column} 列）")
+-        }).unwrap_or_default();
++        let location = error
++            .span()
++            .map(|range| {
++                let before = &source.as_bytes()[..range.start.min(source.len())];
++                let line = before.iter().filter(|byte| **byte == b'\n').count() + 1;
++                let column = before
++                    .iter()
++                    .rposition(|byte| *byte == b'\n')
++                    .map_or(before.len() + 1, |last| before.len() - last);
++                format!("（第 {line} 行，第 {column} 列）")
++            })
++            .unwrap_or_default();
+         anyhow!("TOML 格式或配置选项无法识别{location}；未显示原文，以免暴露凭据")
+     })?;
+     crate::preferences::validate_legacy(&config)?;
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:134:
+ /// The UI calls this before the independent preference transactions. Existing TOML and its
+ /// .bak remain byte-for-byte intact, including on an interrupted/failed group import.
+ pub fn preserve_for_import(path: &Path) -> Result<PreservedImport> {
+-    let (bytes, config) = read(path)?.ok_or_else(|| anyhow!("旧配置文件已经不在原位置，请重新检查"))?;
++    let (bytes, config) =
++        read(path)?.ok_or_else(|| anyhow!("旧配置文件已经不在原位置，请重新检查"))?;
+     let original = preserve(path, &bytes)?;
+     ensure_unchanged(path, &bytes)?;
+     Ok(PreservedImport { config, original })
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:152:
+ 
+ pub fn restore_backup(path: &Path) -> Result<PathBuf> {
+     let backup = path.with_extension("toml.bak");
+-    let (replacement, _) = read(&backup)?
+-        .ok_or_else(|| anyhow!("没有可恢复的旧配置备份，原文件保持不变"))?;
++    let (replacement, _) =
++        read(&backup)?.ok_or_else(|| anyhow!("没有可恢复的旧配置备份，原文件保持不变"))?;
+     repair(path, &replacement)
+ }
+ 
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:160:
+ pub fn reset_preserving_original(path: &Path) -> Result<PathBuf> {
+     // An empty valid configuration has no old service, provider, model, or output selection.
+     // New desktop defaults and its library registry are deliberately not read or written.
+-    repair(path, b"# Old configuration reset; desktop preferences are stored independently.\n")
++    repair(
++        path,
++        b"# Old configuration reset; desktop preferences are stored independently.\n",
++    )
+ }
+ 
+ fn repair(path: &Path, replacement: &[u8]) -> Result<PathBuf> {
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:179:
+ }
+ 
+ fn preserve(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
+-    let directory = path.parent().ok_or_else(|| anyhow!("旧配置没有可用的上级目录"))?
++    let directory = path
++        .parent()
++        .ok_or_else(|| anyhow!("旧配置没有可用的上级目录"))?
+         .join("legacy-config-recovery");
+     if !directory.exists() {
+         let mut builder = std::fs::DirBuilder::new();
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:186:
+         builder.recursive(true);
+-        #[cfg(unix)] {
++        #[cfg(unix)]
++        {
+             use std::os::unix::fs::DirBuilderExt;
+             builder.mode(0o700);
+         }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:191:
+-        builder.create(&directory).context("无法创建原配置保留目录，尚未替换")?;
++        builder
++            .create(&directory)
++            .context("无法创建原配置保留目录，尚未替换")?;
+     }
+     let saved = directory.join(format!("config-{}.original.toml", uuid::Uuid::new_v4()));
+     let mut options = std::fs::OpenOptions::new();
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:195:
+     options.write(true).create_new(true);
+-    #[cfg(unix)] {
++    #[cfg(unix)]
++    {
+         use std::os::unix::fs::OpenOptionsExt;
+         options.mode(0o600);
+     }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:200:
+     let mut file = options.open(&saved).context("无法保留原配置，尚未替换")?;
+-    file.write_all(bytes).context("原配置保留副本未写完，尚未替换")?;
+-    file.sync_all().context("原配置保留副本尚未落盘，尚未替换")?;
+-    if Zeroizing::new(std::fs::read(&saved)?) .as_slice() != bytes {
++    file.write_all(bytes)
++        .context("原配置保留副本未写完，尚未替换")?;
++    file.sync_all()
++        .context("原配置保留副本尚未落盘，尚未替换")?;
++    if Zeroizing::new(std::fs::read(&saved)?).as_slice() != bytes {
+         bail!("原配置保留副本未通过校验，尚未替换");
+     }
+     sync_directory(&directory)?;
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:208:
+ }
+ 
+ fn ensure_unchanged(path: &Path, expected: &[u8]) -> Result<()> {
+-    let current = Zeroizing::new(std::fs::read(path).context("旧配置原文件暂时无法读取，尚未替换")?);
++    let current =
++        Zeroizing::new(std::fs::read(path).context("旧配置原文件暂时无法读取，尚未替换")?);
+     if current.as_slice() != expected {
+         bail!("旧配置已被其他程序修改，尚未替换。请重新检查后重试。");
+     }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:216:
+ }
+ 
+ fn publish(path: &Path, expected: &[u8], replacement: &[u8]) -> Result<()> {
+-    let directory = path.parent().ok_or_else(|| anyhow!("旧配置没有可用的上级目录"))?;
++    let directory = path
++        .parent()
++        .ok_or_else(|| anyhow!("旧配置没有可用的上级目录"))?;
+     let mut file = tempfile::NamedTempFile::new_in(directory).context("旧配置目录暂时无法写入")?;
+-    file.write_all(replacement).context("恢复后的旧配置尚未写完")?;
+-    file.as_file().sync_all().context("恢复后的旧配置尚未落盘")?;
++    file.write_all(replacement)
++        .context("恢复后的旧配置尚未写完")?;
++    file.as_file()
++        .sync_all()
++        .context("恢复后的旧配置尚未落盘")?;
+     ensure_unchanged(path, expected)?;
+-    file.persist(path).context("无法发布恢复后的旧配置，原文件仍保留")?;
++    file.persist(path)
++        .context("无法发布恢复后的旧配置，原文件仍保留")?;
+     sync_directory(directory)?;
+     Ok(())
+ }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:233:
+ }
+ 
+ pub fn failure_message(error: &anyhow::Error) -> &'static str {
+-    let io = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>());
++    let io = error
++        .chain()
++        .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+     match io.map(std::io::Error::kind) {
+-        Some(ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem) =>
+-            "旧配置尚未恢复：配置目录暂时无法写入。原文件保留。",
++        Some(ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem) => {
++            "旧配置尚未恢复：配置目录暂时无法写入。原文件保留。"
++        }
+         Some(ErrorKind::StorageFull) => "旧配置尚未恢复：磁盘空间不足。原文件保留。",
+         _ => "旧配置尚未恢复。原文件与当前设置均已保留，可查看原因后重试。",
+     }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:244:
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{Inspection, ensure_unchanged, preserve_for_import, reset_preserving_original, restore_backup, startup_output};
++    use super::{
++        Inspection, ensure_unchanged, preserve_for_import, reset_preserving_original,
++        restore_backup, startup_output,
++    };
+     use std::path::PathBuf;
+ 
+     #[test]
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:319:
+         let preserved = restore_backup(&path).unwrap();
+         assert_eq!(std::fs::read(&preserved).unwrap(), damaged);
+         assert_eq!(std::fs::read(&path).unwrap(), backup);
+-        assert_eq!(std::fs::read(path.with_extension("toml.bak")).unwrap(), backup);
++        assert_eq!(
++            std::fs::read(path.with_extension("toml.bak")).unwrap(),
++            backup
++        );
+         assert!(Inspection::inspect(path.clone()).problem.is_none());
+         assert!(restore_backup(&path).is_err());
+-        #[cfg(unix)] {
++        #[cfg(unix)]
++        {
+             use std::os::unix::fs::PermissionsExt;
+-            assert_eq!(std::fs::metadata(preserved).unwrap().permissions().mode() & 0o777, 0o600);
++            assert_eq!(
++                std::fs::metadata(preserved).unwrap().permissions().mode() & 0o777,
++                0o600
++            );
+         }
+     }
+ 
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:339:
+         assert!(!Inspection::inspect(path.clone()).backup_available);
+         assert!(restore_backup(&path).is_err());
+         assert_eq!(std::fs::read(&path).unwrap(), damaged);
+-        std::fs::write(directory.path().join("legacy-config-recovery"), b"obstruction").unwrap();
++        std::fs::write(
++            directory.path().join("legacy-config-recovery"),
++            b"obstruction",
++        )
++        .unwrap();
+         assert!(reset_preserving_original(&path).is_err());
+         assert_eq!(std::fs::read(&path).unwrap(), damaged);
+         std::fs::remove_file(directory.path().join("legacy-config-recovery")).unwrap();
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:349:
+         assert!(inspected.problem.is_none());
+         assert!(!inspected.importable);
+         assert!(inspected.output.is_none());
+-        assert_eq!(std::fs::read(path.with_extension("toml.bak")).unwrap(), b"[bad");
++        assert_eq!(
++            std::fs::read(path.with_extension("toml.bak")).unwrap(),
++            b"[bad"
++        );
+     }
+ 
+     #[test]
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:374:
+         let safe = directory.path().join("desktop-local-library");
+         let inspected = Inspection::inspect(path.clone());
+         assert_eq!(startup_output(directory.path(), &inspected), safe);
+-        assert!(!safe.exists(), "inspection must not create or scan any library");
++        assert!(
++            !safe.exists(),
++            "inspection must not create or scan any library"
++        );
+         std::fs::write(&path, b"[defaults]\nout = \"/users/retired-library\"\n").unwrap();
+         let inspected = Inspection::inspect(path);
+         std::fs::create_dir(directory.path().join("desktop-preferences")).unwrap();
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:381:
+-        assert_eq!(startup_output(directory.path(), &inspected), PathBuf::from("/users/retired-library"));
+-        std::fs::write(directory.path().join("desktop-preferences/application.json"), b"modern record").unwrap();
++        assert_eq!(
++            startup_output(directory.path(), &inspected),
++            PathBuf::from("/users/retired-library")
++        );
++        std::fs::write(
++            directory
++                .path()
++                .join("desktop-preferences/application.json"),
++            b"modern record",
++        )
++        .unwrap();
+         assert_eq!(startup_output(directory.path(), &inspected), safe);
+     }
+ 
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/legacy_settings.rs:394:
+         assert_eq!(imported.config.llm.api_key, "isolated-test-key");
+         assert_eq!(std::fs::read(imported.original).unwrap(), source);
+         assert_eq!(std::fs::read(&path).unwrap(), source);
+-        assert_eq!(std::fs::read(path.with_extension("toml.bak")).unwrap(), b"# previous backup");
++        assert_eq!(
++            std::fs::read(path.with_extension("toml.bak")).unwrap(),
++            b"# previous backup"
++        );
+     }
+ }
+ 
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/main.rs:15:
+ mod import_ui;
+ mod legacy_settings;
+ mod library_ui;
+-mod motion;
+ mod model_discovery;
++mod motion;
+ mod notes;
+ mod onboarding;
+ mod organize;
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/onboarding.rs:2170:
+     fn setup_model_progress(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+         // Reserve the phase, detail and bar region before the first worker sample.
+         // Incoming progress must not move the pause or continue actions.
+-        let mut view = v_flex()
+-            .w_full()
+-            .min_w_0()
+-            .min_h(rems(80. / 14.))
+-            .gap_3();
++        let mut view = v_flex().w_full().min_w_0().min_h(rems(80. / 14.)).gap_3();
+         let mut has_phase = false;
+         for (index, (stage, progress)) in self
+             .progress
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:331:
+     blocks: &[PreviewBlock],
+     position: &workspace::ReadingPosition,
+ ) -> Option<usize> {
+-    position.paragraph.as_ref().and_then(|anchor| {
+-        blocks.iter().enumerate()
+-            .position(|(index, block)| block_anchor(block, index) == *anchor)
+-    }).or_else(|| {
+-        position.seconds.and_then(|seconds| {
+-            nav::nearest_time(blocks.iter().enumerate().map(|(index, block)| {
+-                (index, match block {
+-                    PreviewBlock::Heading { seconds, .. } => *seconds,
+-                    _ => None,
+-                })
+-            }), seconds).map(|(index, _)| index)
++    position
++        .paragraph
++        .as_ref()
++        .and_then(|anchor| {
++            blocks
++                .iter()
++                .enumerate()
++                .position(|(index, block)| block_anchor(block, index) == *anchor)
+         })
+-    })
++        .or_else(|| {
++            position.seconds.and_then(|seconds| {
++                nav::nearest_time(
++                    blocks.iter().enumerate().map(|(index, block)| {
++                        (
++                            index,
++                            match block {
++                                PreviewBlock::Heading { seconds, .. } => *seconds,
++                                _ => None,
++                            },
++                        )
++                    }),
++                    seconds,
++                )
++                .map(|(index, _)| index)
++            })
++        })
+ }
+ fn restored_reader_offset(
+     layout: &nav::ReadingLayout,
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:350:
+     index: Option<usize>,
+     position: &workspace::ReadingPosition,
+ ) -> f32 {
+-    index.and_then(|index| layout.restore(index, position.fraction, position.within))
++    index
++        .and_then(|index| layout.restore(index, position.fraction, position.within))
+         .unwrap_or(position.offset.min(0.))
+ }
+ fn frame_label(title: &str, frame: &Frame, index: usize) -> String {
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:589:
+             |index| {
+                 if self.result_tab == 0 {
+                     (
+-                        preview.blocks.get(index).map(|block| block_anchor(block, index)),
++                        preview
++                            .blocks
++                            .get(index)
++                            .map(|block| block_anchor(block, index)),
+                         block_time(&preview.blocks, index),
+                     )
+                 } else {
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:596:
+-                    self.reader_ui.frames.get(index)
++                    self.reader_ui
++                        .frames
++                        .get(index)
+                         .map(|frame| (Some(frame.anchor.clone()), frame.seconds))
+                         .unwrap_or((None, None))
+                 }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:1474:
+                         .w_full()
+                         .min_w_0()
+                         .whitespace_normal()
+-                        .when(!compact, |title| {
+-                            title.text_size(TEXT_DISPLAY)
+-                        })
++                        .when(!compact, |title| title.text_size(TEXT_DISPLAY))
+                         .when(compact, |title| {
+                             title
+                                 .text_ellipsis()
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:1560:
+                             ))
+                         })
+                         .when(!exists, |row| {
+-                            row.child(theme::accessible_text(
+-                                "missing-original-video",
+-                                "原视频暂不可用，笔记仍可阅读",
+-                            ).text_size(TEXT_AUX).text_color(color(GRAY)))
++                            row.child(
++                                theme::accessible_text(
++                                    "missing-original-video",
++                                    "原视频暂不可用，笔记仍可阅读",
++                                )
++                                .text_size(TEXT_AUX)
++                                .text_color(color(GRAY)),
++                            )
+                             .child(reveal(
+                                 "reveal-relocate-reader-source",
+                                 quiet("relocate-reader-source")
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:1570:
+                                     .icon(IconName::FolderOpen)
+-                                    .label(if self.reader_ui.source_loading { "正在核对视频…" } else { "重新定位原视频" })
++                                    .label(if self.reader_ui.source_loading {
++                                        "正在核对视频…"
++                                    } else {
++                                        "重新定位原视频"
++                                    })
+                                     .loading(self.reader_ui.source_loading)
+                                     .disabled(self.reader_ui.source_loading)
+                                     .on_click(cx.listener(|this, _, window, cx| {
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:1673:
+                     } else {
+                         "生成信息"
+                     })
+-                    .tooltip(if self.reader_ui.info_open { "收起生成信息" } else { "生成信息" })
++                    .tooltip(if self.reader_ui.info_open {
++                        "收起生成信息"
++                    } else {
++                        "生成信息"
++                    })
+                     .when(!compact, |button| {
+                         button.label(if self.reader_ui.info_open {
+                             "收起生成信息"
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:2641:
+                             .role(Role::Heading)
+                             .text_size(TEXT_TITLE)
+                             .font_weight(FontWeight::SEMIBOLD),
+-                    ).into_any_element();
++                    )
++                    .into_any_element();
+                 let summary_label = if let Some(index) = preview.blocks.iter().position(|block| {
+                     matches!(block, PreviewBlock::Heading { anchor, .. } if anchor == "summary")
+                 }) {
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:3487:
+                     .child(
+                         control("image-previous")
+                             .icon(IconName::ChevronLeft)
+-                            .w(CONTROL_HEIGHT).px_0()
++                            .w(CONTROL_HEIGHT)
++                            .px_0()
+                             .accessibility_label("上一张")
+                             .tooltip("上一张 · ←")
+                             .disabled(index == 0)
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:3494:
+                             .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(-1, cx))),
+                     )
+-                    .child(theme::accessible_text(
+-                        "image-number",
+-                        format!("{} / {count}", index + 1),
+-                    ).whitespace_nowrap().text_size(TEXT_BODY))
+                     .child(
++                        theme::accessible_text("image-number", format!("{} / {count}", index + 1))
++                            .whitespace_nowrap()
++                            .text_size(TEXT_BODY),
++                    )
++                    .child(
+                         control("image-next")
+                             .icon(IconName::ChevronRight)
+-                            .w(CONTROL_HEIGHT).px_0()
++                            .w(CONTROL_HEIGHT)
++                            .px_0()
+                             .accessibility_label("下一张")
+                             .tooltip("下一张 · →")
+                             .disabled(index + 1 >= count)
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:3509:
+                     .child(
+                         control("image-zoom-out")
+                             .icon(icons::zoom_out())
+-                            .w(CONTROL_HEIGHT).px_0()
++                            .w(CONTROL_HEIGHT)
++                            .px_0()
+                             .accessibility_label("缩小")
+                             .tooltip("缩小 · −")
+                             .disabled(scale <= 0.1)
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:3517:
+                                 this.zoom_reader_image(Some(0.8), window, cx)
+                             })),
+                     )
+-                    .child(theme::accessible_text(
+-                        "image-scale",
+-                        if scale > 0. { format!("{}%", (scale * 100.).round() as u32) } else { "—".into() },
+-                    ).whitespace_nowrap().text_size(TEXT_BODY))
+                     .child(
++                        theme::accessible_text(
++                            "image-scale",
++                            if scale > 0. {
++                                format!("{}%", (scale * 100.).round() as u32)
++                            } else {
++                                "—".into()
++                            },
++                        )
++                        .whitespace_nowrap()
++                        .text_size(TEXT_BODY),
++                    )
++                    .child(
+                         control("image-zoom-in")
+                             .icon(icons::zoom_in())
+-                            .w(CONTROL_HEIGHT).px_0()
++                            .w(CONTROL_HEIGHT)
++                            .px_0()
+                             .accessibility_label("放大")
+                             .tooltip("放大 · +")
+                             .disabled(scale >= 4.)
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:3535:
+                     .child(
+                         control("image-fit")
+                             .icon(icons::fit_screen())
+-                            .w(CONTROL_HEIGHT).px_0()
++                            .w(CONTROL_HEIGHT)
++                            .px_0()
+                             .accessibility_label("适合窗口")
+                             .tooltip("适合窗口 · 0")
+                             .on_click(cx.listener(|this, _, window, cx| {
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:3636:
+             .overflow_y_scroll()
+             .track_scroll(&viewer.scroll);
+         if let Some(caption) = frame.caption {
+-            details = details.child(paragraph(
+-                "image-caption",
+-                format!("原图说明：{caption}"),
+-                0,
+-                Vec::new(),
+-            ).flex_shrink_0());
++            details = details.child(
++                paragraph(
++                    "image-caption",
++                    format!("原图说明：{caption}"),
++                    0,
++                    Vec::new(),
++                )
++                .flex_shrink_0(),
++            );
+         }
+         if !frame.transcript.is_empty() {
+-            details = details.child(paragraph(
+-                "image-transcript",
+-                format!(
+-                    "{}：{}",
+-                    if frame.seconds.is_some() {
+-                        "同期转录"
+-                    } else {
+-                        "相邻正文"
+-                    },
+-                    frame.transcript
+-                ),
+-                1,
+-                Vec::new(),
+-            ).flex_shrink_0());
++            details = details.child(
++                paragraph(
++                    "image-transcript",
++                    format!(
++                        "{}：{}",
++                        if frame.seconds.is_some() {
++                            "同期转录"
++                        } else {
++                            "相邻正文"
++                        },
++                        frame.transcript
++                    ),
++                    1,
++                    Vec::new(),
++                )
++                .flex_shrink_0(),
++            );
+         }
+         if has_details && Self::image_details_open(viewer, window) {
+-            body = body.child(details).child(
+-                Scrollbar::vertical(&viewer.scroll).mode(ScrollbarMode::Always),
+-            );
++            body = body
++                .child(details)
++                .child(Scrollbar::vertical(&viewer.scroll).mode(ScrollbarMode::Always));
+         }
+         body.into_any_element()
+     }
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:4050:
+ 
+     fn reading_blocks() -> Vec<PreviewBlock> {
+         vec![
+-            PreviewBlock::Heading { text: "摘要".into(), anchor: "summary".into(), seconds: None },
+-            PreviewBlock::Paragraph { text: "摘要正文".into(), anchor: "summary-tldr".into() },
+-            PreviewBlock::Heading { text: "第一节".into(), anchor: "section-1".into(), seconds: Some(5.) },
+-            PreviewBlock::Paragraph { text: "可在放大字号后继续阅读的长正文".into(), anchor: "section-1-text".into() },
++            PreviewBlock::Heading {
++                text: "摘要".into(),
++                anchor: "summary".into(),
++                seconds: None,
++            },
++            PreviewBlock::Paragraph {
++                text: "摘要正文".into(),
++                anchor: "summary-tldr".into(),
++            },
++            PreviewBlock::Heading {
++                text: "第一节".into(),
++                anchor: "section-1".into(),
++                seconds: Some(5.),
++            },
++            PreviewBlock::Paragraph {
++                text: "可在放大字号后继续阅读的长正文".into(),
++                anchor: "section-1-text".into(),
++            },
+         ]
+     }
+ 
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:4063:
+         let mut initial = nav::ReadingLayout::default();
+         initial.record(1, 48., 60.);
+         let position = capture_reader_position(&initial, 0., |index| {
+-            (Some(block_anchor(&blocks[index], index)), block_time(&blocks, index))
+-        }).unwrap();
++            (
++                Some(block_anchor(&blocks[index], index)),
++                block_time(&blocks, index),
++            )
++        })
++        .unwrap();
+         // Loading initially exposes only the paragraph. Its later measured
+         // heading and a larger type scale must not replace the document top.
+         let mut resized = nav::ReadingLayout::default();
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:4071:
+         resized.record(0, 12., 36.);
+         resized.record(1, 64., 120.);
+         assert!(position.paragraph.is_none());
+-        assert_eq!(restored_reader_offset(&resized, note_position_index(&blocks, &position), &position), 0.);
++        assert_eq!(
++            restored_reader_offset(&resized, note_position_index(&blocks, &position), &position),
++            0.
++        );
+     }
+ 
+     #[test]
+Diff in /Users/aac6fef/Developer/course2md/desktop/src/reader_ui.rs:4099:
+         let mut initial = nav::ReadingLayout::default();
+         initial.record(3, 220., 200.);
+         let position = capture_reader_position(&initial, -270., |index| {
+-            (Some(block_anchor(&blocks[index], index)), block_time(&blocks, index))
+-        }).unwrap();
++            (
++                Some(block_anchor(&blocks[index], index)),
++                block_time(&blocks, index),
++            )
++        })
++        .unwrap();
+         let mut resized = nav::ReadingLayout::default();
+         resized.record(3, 400., 400.);
+-        let offset = restored_reader_offset(&resized, note_position_index(&blocks, &position), &position);
++        let offset =
++            restored_reader_offset(&resized, note_position_index(&blocks, &position), &position);
+         assert_eq!(offset, -500.);
+         let (index, within, height) = resized.top_item(offset).unwrap();
+         assert_eq!(index, 3);
+Diff in /Users/aac6fef/Developer/course2md/src/lib.rs:5:
+ pub mod checkpoint;
+ pub mod cli;
+ pub mod config;
+-pub mod doctor;
+ pub mod dispatch;
++pub mod doctor;
+ pub mod error;
+ pub mod execution;
+ pub mod fetch;
+Diff in /Users/aac6fef/Developer/course2md/src/lib.rs:13:
+-pub mod llm;
+ pub mod legacy;
++pub mod llm;
+ pub mod media;
+ pub mod models;
+ pub mod npu;
+Diff in /Users/aac6fef/Developer/course2md/src/timeline.rs:213:
+ fn append_text(paragraph: &mut String, next: &str) {
+     let latin_word = |c: char| {
+         c.is_ascii_alphanumeric()
+-            || (c.is_alphabetic()
+-                && matches!(c, '\u{00c0}'..='\u{024f}' | '\u{1e00}'..='\u{1eff}'))
++            || (c.is_alphabetic() && matches!(c, '\u{00c0}'..='\u{024f}' | '\u{1e00}'..='\u{1eff}'))
+     };
+     let previous_is_word = paragraph
+         .trim_end_matches(['.', ',', '!', '?', ':', ';', ')', ']', '}', '»', '”', '"'])
+Diff in /Users/aac6fef/Developer/course2md/src/timeline.rs:511:
+     #[test]
+     fn subtitle_boundaries_preserve_latin_sentences_without_separating_cjk_or_apostrophes() {
+         for (left, right, expected) in [
+-            ("Le risque est limité.", "La suite.", "Le risque est limité. La suite."),
++            (
++                "Le risque est limité.",
++                "La suite.",
++                "Le risque est limité. La suite.",
++            ),
+             ("café", "économique", "café économique"),
+             ("A risk?", "Yes.", "A risk? Yes."),
+             ("a word", ", next", "a word, next"),
+Diff in /Users/aac6fef/Developer/course2md/tests/scene_synthetic.rs:41:
+ }
+ 
+ /// 两个场景测试共享的 PipelineConfig 基座；差异字段在调用处用结构体更新语法覆盖。
+-fn test_cfg(
+-    video: &std::path::Path,
+-    dir: &std::path::Path,
+-) -> course2md::config::PipelineConfig {
++fn test_cfg(video: &std::path::Path, dir: &std::path::Path) -> course2md::config::PipelineConfig {
+     course2md::config::PipelineConfig {
+         url: video.display().to_string(),
+         out_dir: dir.to_path_buf(),

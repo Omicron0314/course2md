@@ -1,0 +1,41 @@
+Window: "course2md", App: course2md Composition failure.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: off
+			4 tab (settable, boolean) 我的笔记, Value: on
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 button 返回我的笔记
+		8 Heading 信息架构：从视频到结构化知识的六个关键步骤
+		9 text 00:30 · 本地视频
+		10 button 打开原视频
+		11 button 版本 6
+		12 button 生成信息
+		13 tab group 阅读视图
+			14 tab (settable, boolean) 笔记, Value: on
+			15 tab (settable, boolean) 截图, Value: off
+		16 button 在笔记中查找，Command F
+		17 button 目录：开
+		18 button 复制笔记
+		19 button 导出
+		20 button 在文件夹中显示这份笔记
+		21 container 信息架构：从视频到结构化知识的六个关键步骤
+			22 Heading 摘要
+			23 container 分散投资可以降低个别资产带来的影响。
+			24 container • 不同资产的风险需要共同考虑。
+			25 Heading 分散投资
+			26 button 放大信息架构：从视频到结构化知识的六个关键步骤，00:00 的截图
+			27 container 视频只是起点，信息需要清晰的组织结构才能被理解。我们先确定阅读顺序，再安排标题、正文与图片。相邻的信息应该表现出明确的关系。标签负责命名，说明帮助决策，操作告诉用户下一步会发生什么。对齐是结构的一部分。页面标题、内容和工具栏应共享明确的边界；同一行的按钮使用统一高度，长内容应该自然换行。转换流程会经过读取媒体、提取文字、整理内容和保存结果。每个阶段的状态应真实呈现；有明确进度时显示进度，没有时保持持续的运行反馈。用户开始转换之后，应用应该直接完成这项工作。只有需要用户作出真实决策时才中断流程，结果准备好后即可阅读。复核需要包括大窗口、小窗口、长标题、失败和恢复状态。截图和运行行为共同构成检查依据，源代码看上去正确并不能保证实际画面合理。
+		28 text 目录
+		29 button 当前章节：摘要
+		30 button 转到 分散投资
+	31 close button
+	32 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	33 minimize button
+34 menu bar
+	35 course2md Composition failure
+	36 文件
+	37 查找
+
+The focused UI element is 4 tab (settable, boolean) 我的笔记, Value: on

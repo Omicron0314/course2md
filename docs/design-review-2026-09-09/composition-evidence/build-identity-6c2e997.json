@@ -1,0 +1,12 @@
+{
+  "code_revision": "6c2e997a0e70fbfe061dcad8c666210feea8f392",
+  "profile": "release optimized, no performance feature",
+  "binaries": {
+    "desktop/target/release/course2md-desktop": "9bc5468fd6e44714b9804840fb9bd6c8f0a5582586482652205813a4cf2f9a7e",
+    "/tmp/course2md-composition-2026-09-09/course2md Composition normal.app/Contents/MacOS/course2md-desktop": "3e119de2e60c15b6678ae9f8911fcfdab16f0f14f48dc5b76117b29222f94703",
+    "/tmp/course2md-composition-2026-09-09/course2md Composition narrow.app/Contents/MacOS/course2md-desktop": "342a01c814b661be7c52ec1c40d1e42c36c277408fab39869837c5784bb355fa",
+    "/tmp/course2md-composition-2026-09-09/course2md Composition wide.app/Contents/MacOS/course2md-desktop": "ca1e7d71af84cd75520abca4cf3a05ea78e92423f485e4eb6ab545aa1ec76b43",
+    "/tmp/course2md-composition-2026-09-09/course2md Composition empty.app/Contents/MacOS/course2md-desktop": "ac3aa09fbdab4050492ee4a3dfc37f68e7dd3db70825cf0848203a537689ded4",
+    "/tmp/course2md-composition-2026-09-09/course2md Composition failure.app/Contents/MacOS/course2md-desktop": "510c7b0099f1f0d6a5e9843fdb426eb219189bb45c1ed4d1cf2a43379a9c3f5d"
+  }
+}

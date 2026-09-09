@@ -1,0 +1,171 @@
+Window: "course2md", App: course2md Design Preview.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: off
+			4 tab (settable, boolean) 我的笔记, Value: on
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 button 返回我的笔记
+		8 Heading OpenAI官宣攻克千禧年七大难题的NS方程问题
+		9 text 分析学爱好者 · 07:30 · Bilibili
+		10 button 打开原视频：https://www.bilibili.com/video/BV1SdYn6cEoq
+		11 button 生成信息
+		12 tab group 阅读视图
+			13 tab (settable, boolean) 笔记, Value: on
+			14 tab (settable, boolean) 截图, Value: off
+		15 button 在笔记中查找，Command F
+		16 button 目录：开
+		17 button 复制笔记
+		18 button 导出
+		19 button 在文件夹中显示这份笔记
+		20 container OpenAI官宣攻克千禧年七大难题的NS方程问题 (showing 0-100 of 166 items)
+			21 Heading 摘要
+			22 container OpenAI官宣其内部模型通过多智能体协作攻克了千禧年七大难题中的N-S方程问题并经Lean验证，同时对数学家Buckmaster学术不端的指控作出回应并表示无意申领克雷奖，引发外界对AI学术道德与合作内幕的广泛讨论。
+			23 container • OpenAI内部模型先解出无外力欧拉方程，后耗时88小时攻克N-S方程，并通过Lean形式化检验。
+			24 container • 针对学术不端指控，OpenAI否认访问特定用户数据，且表示无意申领克雷奖。
+			25 container • Buckmaster公开了OpenAI提出的合作方案及双方关于作者署名与成果发布的争议细节。
+			26 container • 作者与朋友讨论了OpenAI在本次事件中的做法，认为其处理方式并非完全恶意，但对现状感到复杂与失望。
+			27 Heading OpenAI官宣攻克N-S方程
+			28 button 在原视频打开 00:06
+			29 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，00:06 的截图
+			30 container 看到OpenAI官宣攻克千禧年七大难题中的N-S方程问题，我瘫坐、眩晕在椅子上，仿佛看到二向箔打击。
+			31 Heading 00:16
+			32 button 在原视频打开 00:16
+			33 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，00:16 的截图
+			34 container 北京时间2026年9月9日凌晨一点，也就是刚刚，OpenAI官宣他们攻克了千禧年七大难题中的N-S方程问题。
+			35 Heading 00:27
+			36 button 在原视频打开 00:27
+			37 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，00:27 的截图
+			38 container 而且，他们对该问题的证明已经通过了 Lean 的形式化检验。可以说，这个证明的可信度有 99.99%。在此传言中，OpenAI 也正式回应了数学家 Buckmaster 所声称的。
+			39 Heading 00:40
+			40 button 在原视频打开 00:40
+			41 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，00:40 的截图
+			42 container 学术不端的指控。他们声称自己是从9月1日开始，让一个数学能力比S-train还强很多的内部模型，去尝试解决千禧年七大难题。
+			43 Heading 00:54
+			44 button 在原视频打开 00:54
+			45 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，00:54 的截图
+			46 container 而他们的内部模型通过多智能体协作，首先用大约五十个小时攻克了无外力版本的欧拉方程正则性问题。
+			47 Heading 01:05
+			48 button 在原视频打开 01:05
+			49 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，01:05 的截图
+			50 container 这个问题跟千禧年七大难题中的N-S方程问题是高度密切相关的。所以，OpenAI的内部团队认为，N-S方程问题应该是最有可能被解决的。
+			51 Heading 01:14
+			52 button 在原视频打开 01:14
+			53 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，01:14 的截图
+			54 container 千禧年七大难题，这也是前AI时代人类数学界的共识。
+			55 Heading 01:21
+			56 button 在原视频打开 01:21
+			57 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，01:21 的截图
+			58 container 那么，OpenAI这次也通过使用AI抽卡的方式，验证了人类数学家的直觉是正确的。随后，OpenAI又把所有算力集中到了对NS方程的求解上。
+			59 Heading 01:35
+			60 button 在原视频打开 01:35
+			61 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，01:35 的截图
+			62 container 在第一批智能体启动的88个小时以后，他们的内部模型正式攻克了N-S方程问题。随后，OpenAI又花了17个小时对证明进行检验和形式化验证。
+			63 Heading 回应学术剽窃与克雷奖
+			64 button 在原视频打开 01:46
+			65 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，01:46 的截图
+			66 container 而在相应证明得到核验以后，OpenAI主动联系了Blockmaster，并声称他们愿意同步发布成果，且承认Blockmaster的优先权。应该说，
+			67 Heading 01:57
+			68 button 在原视频打开 01:57
+			69 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，01:57 的截图
+			70 container 如果 OpenAI 说这句话完全属实，那么他们是在本以为 Buckmaster 把 NS 方程问题解决了的这个基础上去抽金卡的。结果，他们大力出奇迹，
+			71 Heading 02:10
+			72 button 在原视频打开 02:10
+			73 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，02:10 的截图
+			74 container 烧了三千亿Token吧，N-S方程问题出来以后呢，却发现Bank Master没有把卡给抽出来。
+			75 Heading 02:19
+			76 button 在原视频打开 02:19
+			77 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，02:19 的截图
+			78 container 那么随后就是我们昨天报道过的事情了：Bankmaster跟OpenAI，他们是不是使用了自己的数据？
+			79 Heading 02:29
+			80 button 在原视频打开 02:29
+			81 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，02:29 的截图
+			82 container OpenAI声称，他们没有访问任何特定用户的数据。当然，他们不排除Bankmaster的去标识化数据曾对他们的这样一个模型训练产生收益。
+			83 Heading 02:42
+			84 button 在原视频打开 02:42
+			85 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，02:42 的截图
+			86 container 我自己也不好说AI有没有真的去学术剽窃，但我只能说，要是OpenAI能从浩如烟海的数百亿条信息中，
+			87 Heading 02:51
+			88 button 在原视频打开 02:51
+			89 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，02:51 的截图
+			90 container 先精准定位出有助于解决NS问题的这样一个框架记录，就在几天内，靠这个数据特化训练一个10T参数的大模型，就靠训练好的大模型。
+			91 Heading 03:05
+			92 button 在原视频打开 03:05
+			93 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，03:05 的截图
+			94 container 干掉了 N-S 方程问题，那 OpenAI 这个内部大模型可别说什么 AGI、ASI 了，它就是全知全能的神。我看它只要烧 token，什么都能干到。
+			95 Heading 03:17
+			96 button 在原视频打开 03:17
+			97 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，03:17 的截图
+			98 container 值得注意的事情是，OpenAI在官宣证明的时候，也一并官宣了他们无意申领攻克千禧年难题的克雷奖。
+			99 Heading Buckmaster披露的合作内幕
+			100 button 在原视频打开 03:28
+			101 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，03:28 的截图
+			102 container OK，事实就是如此。这个消息我们其实早就知道了，它应该是真的，现在只是刚尘埃落定。什么二向箔打击、大成绩、成果。
+			103 Heading 03:38
+			104 button 在原视频打开 03:38
+			105 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，03:38 的截图
+			106 container OpenAI的内部模型、老祖真仙降世、血姬哥哥、大数据问题，这种事情我们也说了太多遍，今天不想再说了。
+			107 Heading 03:47
+			108 button 在原视频打开 03:47
+			109 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，03:47 的截图
+			110 container 我们回到Bankmaster指责OpenAI学术不端这件事情上吧，我再把他的原文给你们念一遍吧，比较相关的这个部分：OpenAI向我提出了两个方案。
+			111 Heading 04:01
+			112 button 在原视频打开 04:01
+			113 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，04:01 的截图
+			114 container 第一个是由我们先发布在欧拉方程问题上的结果，然后OpenAI在第二天发布了在N-S方程上的结果。第二个是……
+			115 Heading 04:13
+			116 button 在原视频打开 04:13
+			117 button 放大OpenAI官宣攻克千禧年七大难题的NS方程问题，04:13 的截图
+			118 container 我们在发布欧拉方程的结果以后，由我独自撰写一篇介绍 N-S 方程结果的论文，并承认是 Open
+			119 Heading 04:23
+			120 button 在原视频打开 04:23
+		121 text 目录
+		122 button 当前章节：摘要
+		123 button 转到 OpenAI官宣攻克N-S方程
+		124 button 转到 00:16
+		125 button 转到 00:27
+		126 button 转到 00:40
+		127 button 转到 00:54
+		128 button 转到 01:05
+		129 button 转到 01:14
+		130 button 转到 01:21
+		131 button 转到 01:35
+		132 button 转到 回应学术剽窃与克雷奖
+		133 button 转到 01:57
+		134 button 转到 02:10
+		135 button 转到 02:19
+		136 button 转到 02:29
+		137 button 转到 02:42
+		138 button 转到 02:51
+		139 button 转到 03:05
+		140 button 转到 03:17
+		141 button 转到 Buckmaster披露的合作内幕
+		142 button 转到 03:38
+		143 button 转到 03:47
+		144 button 转到 04:01
+		145 button 转到 04:13
+		146 button 转到 04:23
+		147 button 转到 04:28
+		148 button 转到 04:44
+		149 button 转到 04:58
+		150 button 转到 05:06
+		151 button 转到 05:19
+		152 button 转到 05:26
+		153 button 转到 05:38
+		154 button 转到 05:49
+		155 button 转到 05:58
+		156 button 转到 06:10
+		157 button 转到 06:23
+		158 button 转到 06:28
+		159 button 转到 06:43
+		160 button 转到 06:54
+		161 button 转到 07:04
+		162 button 转到 07:14
+	163 close button
+	164 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	165 minimize button
+166 menu bar
+	167 course2md Design Preview
+	168 文件
+	169 查找

@@ -1,0 +1,31 @@
+{
+  "code_revision": "9ec2f6ef89b923226fa178f722c7b6a07fa71423",
+  "profile": "release, no performance feature",
+  "release_binary_sha256": "824cbe063bc7c8095146d723f9876fb84020c7f68485aa03c1464049c317fd27",
+  "debug_binary_sha256": "95ca4561c06237b7ba2c4329d2abc1592ea8925ac63d4643a5b4119dd56cd6a1",
+  "debug_code_revision": "574083758069986e9c721b9ba37980463b2fcd68",
+  "tests": {
+    "desktop_passed": 201,
+    "failed": 0,
+    "ignored": 3,
+    "code_revision": "9ec2f6ef89b923226fa178f722c7b6a07fa71423"
+  },
+  "captured_at": "2026-09-09T17:01:14.600457",
+  "fixtures": {
+    "normal": {
+      "sha256": "770a29fa3ebea264abb94ad7f877f24ec50f2904c7b5c52721d3cda0bc037156",
+      "code_revision": "9ec2f6ef89b923226fa178f722c7b6a07fa71423",
+      "profile": "release"
+    },
+    "failure": {
+      "sha256": "fcea61075c18af084a8604be101e1ce11342177085720c2884e45daa609c52e3",
+      "code_revision": "9ec2f6ef89b923226fa178f722c7b6a07fa71423",
+      "profile": "release"
+    },
+    "narrow": {
+      "sha256": "23a77431c4b14f4a1c745d79db2e9d0cf5d17595ded87e1c6a65bffccd171042",
+      "code_revision": "574083758069986e9c721b9ba37980463b2fcd68",
+      "profile": "debug"
+    }
+  }
+}
