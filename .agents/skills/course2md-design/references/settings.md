@@ -1,6 +1,6 @@
 # Settings composition
 
-Read with [the shared system](system.md). Earlier 520px subcolumns, repeated category titles and special side/underline markers were local decisions that produced an incoherent screen. They are superseded by this composition.
+Read with [the shared system](system.md), [layout and type](layout-and-type.md) and [states and motion](states-and-motion.md). These are project adaptations, not a claim that Material prescribes this exact preferences layout. Earlier 520px subcolumns, repeated category titles and special side/underline markers were local decisions that produced an incoherent screen. They are superseded by this composition.
 
 ## Scope and continuity
 
@@ -15,6 +15,10 @@ Model setup should communicate the decision that matters: the recommended usable
 Use a leading category sidebar when the current window and text scale leave a useful content pane; otherwise use a compact single-row category control. Keep navigation outside content scrolling. Reuse capsule selection and tab behavior rather than drawing a page-specific underline, side stripe or bordered selected button.
 
 Within the content pane, begin with meaningful groups such as “关于” or “运行检查”. Do not repeat the category name directly above them. A form group has one label/control alignment system: its outer edges align with the other groups, while a selector has a useful bounded width inside it. A wide pane is not permission to scatter labels and values to opposite extremes.
+
+Use the shared leading icon slot and emphasized label for main preference labels and categories. Values and explanatory prose remain regular. Supporting text aligns with its label's text start, not the icon edge. Optional explanations use the shared information panel or structured detail; a pile of unrelated subtitles is not a hierarchy. Compute when to stack a control from actual label and control widths at the current type scale.
+
+The content pane scrolls independently of navigation. Scrollbars appear during hover/scroll/drag and fade after interaction, without changing the grid width; respect an existing always-show system preference. Dialog titles/actions and external-request consequences stay available when their form body scrolls.
 
 ## Appearance
 
