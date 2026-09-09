@@ -1,0 +1,1041 @@
+{
+  "schema_version": 1,
+  "recorded_on": "2026-09-09",
+  "source_directory": "/tmp/course2md-product-review-2026-09-09",
+  "scope": "独立审查文档及原生截图的可提交证据摘录；不复制临时配置、凭据、导出 HTML/转录正文或工作目录。",
+  "evidence_limit": "本清单记录具体所见与边界，不是全页面、全状态通过声明。原报告中的路径与相对路径以原采集目录为上下文，未把其指向的临时文件复制进仓库。",
+  "screenshot_count": 48,
+  "report_count": 20,
+  "reports": [
+    {
+      "filename": "final-reader-v6-cross.md",
+      "sha256": "12b2a017fe16f82964867704f92f658a1d339570528cdc5ec12fef8f0200eacd",
+      "bytes": 5428,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "final-export-native-review.md",
+      "sha256": "9cc501930d3197d541d1cfbc4e33fbfbcd15626195b9e6ed6d8efb8a4f28df59",
+      "bytes": 8031,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "final-export-byte-evidence.json",
+      "sha256": "e3141070f93275e47afe4b97a00786627f0b12cf87ac8f0203e482c4ef6676df",
+      "bytes": 6018,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "shared-v4-cross.md",
+      "sha256": "22f481e4d15e5f23eac36f44d5b43d636df87732cb653834468b674cccb495a1",
+      "bytes": 9925,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "reader-exports-v5-cross.md",
+      "sha256": "96fddc4a08da15d903382629c8c4d655ef06ce5e1f6cff31f70bbe237cbb31bb",
+      "bytes": 7681,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "settings-model-storage-coverage.md",
+      "sha256": "7df7895641c0b1552d3cb3b95c0968cbeb0bd55347a9fc7f43c2cb13c2eedbef",
+      "bytes": 12005,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "flow-implementation-review.md",
+      "sha256": "678b07d68c183ab7aac0a93ea9971db3641071bc332dd3db3318c2d25328a82b",
+      "bytes": 9833,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "repair-card-state-review.md",
+      "sha256": "1e92bfaa41f132c1b65a593afc0ea919047745150bd8224df612073b55a3ca48",
+      "bytes": 3234,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "flow-cross-v1.md",
+      "sha256": "aeb6dca7a6e3a3eb3112d56d820d19468ab005ccc7caf7d8c9a19ca5d3388e6e",
+      "bytes": 13572,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "settings-cross-v2.md",
+      "sha256": "4809bb93592b5ea151d101ecec637f40cc7bad75ecec084bffc7f27ff1ddc47c",
+      "bytes": 10387,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "reader-cross-v4.md",
+      "sha256": "03199cc1b29ed5bbefc07ee33effd1d73f547cae6a591fb93d3aed8f7c457a73",
+      "bytes": 3167,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告时点的结论与未访范围；其后修正不回写旧报告。"
+    },
+    {
+      "filename": "final-settings-first-cross.md",
+      "sha256": "96527e2ce8cf470e04cf197eb0e7e71e436ebcbc41c5f19295f5592d832f5e73",
+      "bytes": 16568,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告或文件核验时点的结论；其后显式操作不反填到之前状态。"
+    },
+    {
+      "filename": "v7-default-verification.json",
+      "sha256": "19ccb6a5c036079451bfcacf2e1fbe42ffa36c67a6c2de93a13bb8eb8d7ddb4d",
+      "bytes": 420,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告或文件核验时点的结论；其后显式操作不反填到之前状态。"
+    },
+    {
+      "filename": "v7-save-only-verification.json",
+      "sha256": "70a0ac7e1a40bb525fa3121aac10eb17535fbb23c24ef6e0927ba62e5b7012bd",
+      "bytes": 102,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告或文件核验时点的结论；其后显式操作不反填到之前状态。"
+    },
+    {
+      "filename": "v8-reader-follow-task-evidence.json",
+      "sha256": "0b9cf69a29e24c461cdc41a61d91b2cfc435e8ba94f85a2cee86191b3075e5ca",
+      "bytes": 1240,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告或文件核验时点的结论；其后显式操作不反填到之前状态。"
+    },
+    {
+      "filename": "v9-reader-viewer-task-evidence.json",
+      "sha256": "c48d07252c5e343577806e497d0445c6b2f327e9e7804ceda01f7d84dfdd4657",
+      "bytes": 629,
+      "copy_policy": "verbatim",
+      "limits": "保留原报告或文件核验时点的结论；其后显式操作不反填到之前状态。"
+    },
+    {
+      "filename": "reader-follow-static-review.md",
+      "sha256": "9de901dccf100ec978945e476e27b451e80c25251f040ddad481449ec1ce37db",
+      "bytes": 14689,
+      "copy_policy": "verbatim",
+      "limits": "仅覆盖文档中注明的时点和实际操作。"
+    },
+    {
+      "filename": "installed-preview-verification.json",
+      "sha256": "a5f260107f7cdacc5fcfcad706d43c6034dbaf7796271837b679275cc2f1dd61",
+      "bytes": 971,
+      "copy_policy": "verbatim",
+      "limits": "仅覆盖文档中注明的时点和实际操作。"
+    },
+    {
+      "filename": "installed-release-cross.md",
+      "sha256": "4e49384972539aefb3b8e664f9ab3b7254195e42e73024209269336c68272cd5",
+      "bytes": 5422,
+      "copy_policy": "verbatim",
+      "limits": "明确区分原生画面、实际操作、文件核验和测试；未覆盖状态见对应报告。"
+    },
+    {
+      "filename": "validation-summary.json",
+      "sha256": "6170a9292df454afcd495ba90a1e3aa47730f44346ee3f39fb2f360cb99b41f1",
+      "bytes": 770,
+      "copy_policy": "generated from recorded logs",
+      "limits": "明确区分原生画面、实际操作、文件核验和测试；未覆盖状态见对应报告。"
+    }
+  ],
+  "screenshots": [
+    {
+      "filename": "v3-empty-first-workbench.jpg",
+      "relative_path": "screenshots/v3-empty-first-workbench.jpg",
+      "sha256": "5f622b4e8d340e11a7b850957d29e7286fc196f841bc2c504c1ea1a28148162f",
+      "bytes": 47384,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "工作台",
+      "state": "空输入",
+      "observed": "视频链接输入、开始转换、本地文件切换及高级选项可见，未出现最近笔记或任务结果。",
+      "limitations": [
+        "历史 v3 普通窗口；不证明输入后的来源解析、错误恢复或后台任务行为。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v3-empty-direct-start.jpg",
+      "relative_path": "screenshots/v3-empty-direct-start.jpg",
+      "sha256": "2960f92e3239f9d733b99362f993a404e7adc8eb8c7c63ea9824208a74add260",
+      "bytes": 45290,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "工作台",
+      "state": "任务启动中",
+      "observed": "合成课程已进入正在生成笔记，实际阶段为正在启动任务；暂停与取消可见。",
+      "limitations": [
+        "不是生成完成，也不能凭静态按钮确认暂停或取消已执行。",
+        "这是合成字幕夹具，不能替代无字幕本机识别。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v3-empty-direct-completed.jpg",
+      "relative_path": "screenshots/v3-empty-direct-completed.jpg",
+      "sha256": "516bf87dad3cefd28163ce18ef02d0b0eea1301050cebed7d6d6de41f93030de",
+      "bytes": 55795,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "阅读",
+      "state": "合成课程已打开",
+      "observed": "BV1UXPRODUCTDIRECT 的人工字幕正文、00:00 和蓝色测试截图可读；顶部有笔记已打开横幅。",
+      "limitations": [
+        "蓝色画面是夹具素材，不是缩略图缺失。",
+        "这是旧版有完成横幅的状态；横幅后续寿命及自动导出取用需看新证据。"
+      ],
+      "related_later_evidence": [
+        "v6-automatic-export-result.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v3-empty-library.jpg",
+      "relative_path": "screenshots/v3-empty-library.jpg",
+      "sha256": "8f7d4e0a2d70c585707e22b3b8b95f300d7aa0a072de6e2dcede8396b4c041e9",
+      "bytes": 30810,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "笔记库",
+      "state": "无笔记",
+      "observed": "还没有笔记的空态与导入视频动作可见。",
+      "limitations": [
+        "不等于课程库失联、搜索无结果或扫描失败。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v3-empty-tasks.jpg",
+      "relative_path": "screenshots/v3-empty-tasks.jpg",
+      "sha256": "1a57b622a29ded10d5038401596bd93f603f97ad498a50e3f7af9f4c58d51aed",
+      "bytes": 30896,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "任务",
+      "state": "无生成任务",
+      "observed": "还没有生成任务的空态与导入视频动作可见。",
+      "limitations": [
+        "不证明运行队列、暂停、恢复链或混合任务状态。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-first-reopened-engines.jpg",
+      "relative_path": "screenshots/v5-first-reopened-engines.jpg",
+      "sha256": "b72063e0817552786630ba95d3e55b2602fe653a82da2dd8ac078f4051e87a95",
+      "bytes": 63395,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "首次使用",
+      "state": "已配置后重开引导的识别方式",
+      "observed": "本机识别已选，自动解析为 Apple 原生；Qwen3 1.7B 及已验证加载在当前决策旁，直接开始使用与保存并继续可见。",
+      "limitations": [
+        "不是首次缺模型状态；静态图不证明修改引擎后直接开始的保存行为。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-first-engine-availability.jpg",
+      "relative_path": "screenshots/v5-first-engine-availability.jpg",
+      "sha256": "d14e55475fd125b4cc97e1bbf371226cd658d46bd7af7b6953fa5f848b132511",
+      "bytes": 87095,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "首次使用",
+      "state": "展开引擎选择",
+      "observed": "自动策略和固定引擎分层；Apple 原生、GPU、CPU 的运行环境就绪，Intel NPU 未检测到，底部继续动作固定。",
+      "limitations": [
+        "运行环境就绪不是每个引擎的模型已经下载或加载。",
+        "下方内容需滚动，静态图不证明选择往返或实际执行。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-first-ai.jpg",
+      "relative_path": "screenshots/v5-first-ai.jpg",
+      "sha256": "0e139f6ec33242beb278b40bae6ce8f8a3d1160cf7b94aae226cda36b476e3c7",
+      "bytes": 75015,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "首次使用",
+      "state": "已有 AI 服务配置",
+      "observed": "连接地址、认证、模型 ID 与校对和摘要开关同页；说明默认作用和文字外发，稍后配置可见。",
+      "limitations": [
+        "是已配置重入，不是新服务空字段、加载候选或测试失败。",
+        "原审查发现截图的保存并继续与 AX 的保留并继续不一致，不能将本图当稳定动作语义全部通过。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-first-bilibili.jpg",
+      "relative_path": "screenshots/v5-first-bilibili.jpg",
+      "sha256": "d7f5ad31c1b647e3f951916da0a6a7f4666c306e9fd66aa37713b4c10f417eef",
+      "bytes": 44760,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "首次使用",
+      "state": "Bilibili 未登录",
+      "observed": "未登录身份与登录、重新检查同组；说明权限范围并有跳过登录。",
+      "limitations": [
+        "未覆盖扫码、登录窗口返回、会话持久化或权限不足。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-first-model-ready.jpg",
+      "relative_path": "screenshots/v6-first-model-ready.jpg",
+      "sha256": "192ef4362a8146d46a9d1a9e8c864fddfe962c5dcc5bf0f89eef4c4768ce9812",
+      "bytes": 42105,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "首次使用",
+      "state": "模型已验证加载",
+      "observed": "Qwen3 1.7B / Apple 原生已验证加载、可以识别；维护动作安静，开始使用为主要动作。",
+      "limitations": [
+        "只覆盖 Loaded 终态，不证明下载、Partial、Cached 未验证、加载失败或重试。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-settings-checkboxes.jpg",
+      "relative_path": "screenshots/v5-settings-checkboxes.jpg",
+      "sha256": "de876253c34deb8c6f7a8ac3a9baf4986f426777ccf475598450e31fd1bd6bba",
+      "bytes": 72985,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置生成",
+      "state": "AI 与额外文件偏好",
+      "observed": "校对和摘要开启、截图外发关闭；三个同时导出复选框均未选且首行对齐；说明在各自设置内。",
+      "limitations": [
+        "自动导出取用文案仍是后续已修正的旧版更多路径；本图不能验证新说明。",
+        "未勾选的静态图不证明偏好保存或实际自动导出。"
+      ],
+      "related_later_evidence": [
+        "v6-automatic-export-menu.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-settings-application.jpg",
+      "relative_path": "screenshots/v5-settings-application.jpg",
+      "sha256": "5dbb8c093ba54992c847ee081437d80bfb0bcd417b09c57417fe5b96e03f81f8",
+      "bytes": 56549,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置应用",
+      "state": "环境可用与 Loaded 默认模型",
+      "observed": "视频处理、在线视频、本机识别环境可用；默认识别模型为 Apple 原生 / Qwen3-ASR 1.7B，已验证可加载；检查动作在缓存详情前。",
+      "limitations": [
+        "只证明这些已显示的环境与这一 Loaded 模型，不代表其它模型可用。",
+        "缺失、下载中、检查失败、展开缓存完整内容及关于区不在本视口。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-settings-service-default-relationship.jpg",
+      "relative_path": "screenshots/v5-settings-service-default-relationship.jpg",
+      "sha256": "16b8b49ace4d6e426539eea026f0eaac3b08f050656b79d5788abaae8f34bce6",
+      "bytes": 60363,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置服务",
+      "state": "新配置已测试而默认仍为旧配置",
+      "observed": "最新 fixture-summary 配置有校对与摘要通过，仍明确默认使用旧 v3 fixture-model；账号未登录、语音服务为空。",
+      "limitations": [
+        "旧图没有就近更新默认入口，保留 F2 发现事实。",
+        "测试通过按能力记录，不是全部能力可用。"
+      ],
+      "related_later_evidence": [
+        "v7-service-default-action.jpg",
+        "v7-default-confirmation.jpg",
+        "v7-default-updated.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v7-service-default-action.jpg",
+      "relative_path": "screenshots/v7-service-default-action.jpg",
+      "sha256": "f4afda4af49f7e52d0288e4f7a616357eb774701d8ace1c7f023488814e20133",
+      "bytes": 62417,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置服务",
+      "state": "旧默认的显式更新入口",
+      "observed": "未来笔记仍使用旧 v3 fixture-model 的说明旁，有用于以后生成动作；新配置及能力测试仍在同卡。",
+      "limitations": [
+        "本图证明入口和作用范围可见，不能单独证明取消、接受或磁盘持久化。"
+      ],
+      "related_later_evidence": [
+        "v7-default-confirmation.jpg",
+        "v7-default-updated.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v7-default-confirmation.jpg",
+      "relative_path": "screenshots/v7-default-confirmation.jpg",
+      "sha256": "60853a5d18ed82cfb7544a04003f09163934cae40f30a037798e83eed30c586b",
+      "bytes": 70724,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置服务确认",
+      "state": "等待确认默认更新",
+      "observed": "确认层同时列出当前 v3 fixture-model 和目标 v4 fixture-summary，并说明已有任务和笔记不变、不会开始补做；可保留原默认。",
+      "limitations": [
+        "这是等待用户确认，不是已经更新。取消和执行范围需要实际操作或数据证据。"
+      ],
+      "related_later_evidence": [
+        "v7-default-updated.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v7-default-updated.jpg",
+      "relative_path": "screenshots/v7-default-updated.jpg",
+      "sha256": "56e0ce1d7f2c8c6197685a7e523f7c12316b6ec88f36e1f786190bedea25493b",
+      "bytes": 59559,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置服务",
+      "state": "目标配置显示为默认服务",
+      "observed": "fixture-summary 卡显示默认服务，旧配置提示与更新入口消失，测试范围和时间保留。",
+      "limitations": [
+        "静态显示不证明所有重启持久化、冻结计划和取消行为；需结合主代理的操作记录。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v7-scoped-save-only.jpg",
+      "relative_path": "screenshots/v7-scoped-save-only.jpg",
+      "sha256": "9fca11b9d5b0f93ef43712b723a6fcb28bf301c7b747fc67e4cb4f18747f9240",
+      "bytes": 97162,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "任务服务修复",
+      "state": "配置已保存但尚未补做",
+      "observed": "顶部明确点击开始补做后才发送失败部分；底部显示配置已保存、尚未开始补做，只有开始补做会提交；仅保存不可用。",
+      "limitations": [
+        "通过测试的详细卡不在视口；不能用这张证明滚动区每一句提示。",
+        "截图本身不证明任务计数和默认配置字节不变；仅保存与后续提交需过程记录。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v7-readable-partial-ai-error.jpg",
+      "relative_path": "screenshots/v7-readable-partial-ai-error.jpg",
+      "sha256": "30ff81b8aca269ecde34c26993b93db84d3f27c3aaebe9946c7cf386ac954ece",
+      "bytes": 66941,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "阅读",
+      "state": "正文可读且 AI 部分未完成",
+      "observed": "正文和蓝色截图保留可读；提示 AI 校对、摘要未完成，提供修复 AI 服务并补做、查看任务和处理详情。",
+      "limitations": [
+        "蓝色图片是合成素材；该图没有展开具体技术原因，也不是修复完成。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-narrow-reader-settled.jpg",
+      "relative_path": "screenshots/v6-narrow-reader-settled.jpg",
+      "sha256": "4534a938c5f16cf143a92d3087de315508cfb8b15df8a28da171666c21449ce9",
+      "bytes": 95588,
+      "width_px": 860,
+      "height_px": 620,
+      "page": "阅读",
+      "state": "860×620、200% 普通阅读",
+      "observed": "导航与工具收在两排固定区，完整标题、摘要和放大的正文可读；标题属于滚动内容。",
+      "limitations": [
+        "首屏可读篇幅仍较短，不等于所有长标题、字号或搜索状态通过。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-narrow-viewer-image.jpg",
+      "relative_path": "screenshots/v6-narrow-viewer-image.jpg",
+      "sha256": "dad56fa2babf0688fe459a7730e3c2f38bd47257431187f6a0de30013993645b",
+      "bytes": 78231,
+      "width_px": 860,
+      "height_px": 620,
+      "page": "截图查看器",
+      "state": "860×620、200% 图片模式",
+      "observed": "00:06、1/40、23% 缩放和前后张同排；图片保持比例，底部有正文、观看、查看文字、关闭。",
+      "limitations": [
+        "是未筛选首张；不证明筛选范围、最后一张、放大拖动或恢复适应。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-narrow-viewer-text.jpg",
+      "relative_path": "screenshots/v6-narrow-viewer-text.jpg",
+      "sha256": "d13702466aadc5124f31172c9df28bfc9e3f328c7d9ea80c9b5bbb734e3fd2cc",
+      "bytes": 73086,
+      "width_px": 860,
+      "height_px": 620,
+      "page": "截图查看器",
+      "state": "860×620、200% 同期文字模式",
+      "observed": "文字模式显示 00:06、1/40 的同期转录，正文占据主体，底部返回图片等动作保留。",
+      "limitations": [
+        "当前只有短转录，不证明长文字滚动、快速切换或最后一张同步。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-wide-reader.jpg",
+      "relative_path": "screenshots/v5-wide-reader.jpg",
+      "sha256": "1aec3b0239571c268703367b2c6586b1c836d152a4692c301a7f144cecac385a",
+      "bytes": 138963,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "阅读",
+      "state": "宽窗深色阅读与目录展开",
+      "observed": "标题、摘要、正文截图沿阅读轴展开，目录在右侧独立列出章节和时间。",
+      "limitations": [
+        "当前视口只显示上部内容；不证明目录跳转、所有章节、其它配色或无摘要页。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-narrow-search-first.jpg",
+      "relative_path": "screenshots/v5-narrow-search-first.jpg",
+      "sha256": "c72c1479dd2d809c7105fecb20abd11fc3859b1fe8f708d9384a8b80553e05a4",
+      "bytes": 98847,
+      "width_px": 860,
+      "height_px": 620,
+      "page": "阅读搜索",
+      "state": "860×620、200% 首处命中",
+      "observed": "Buckmaster 的 1/4 与完整首处高亮、上下文可见；查询、清除与命中导航保留。",
+      "limitations": [
+        "命中导航另占稀疏一排，保留 P3 密度改善项。",
+        "单帧不证明循环、改查询、改字号或滚动后继续。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-narrow-search-last.jpg",
+      "relative_path": "screenshots/v5-narrow-search-last.jpg",
+      "sha256": "3ada0f74044e831024bdbe73b5734380fef0b90bbd80978f6b9e02777a46aa7f",
+      "bytes": 77856,
+      "width_px": 860,
+      "height_px": 620,
+      "page": "阅读搜索",
+      "state": "860×620、200% 最后命中",
+      "observed": "Buckmaster 的 4/4 与最后高亮、前后文可读；上方是滚出视口的前一张内嵌图片底部。",
+      "limitations": [
+        "该图片局部不是查看器塌缩。",
+        "单帧不证明完整双向循环或所有查询；搜索固定区仍占空间。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-narrow-gallery-search.jpg",
+      "relative_path": "screenshots/v5-narrow-gallery-search.jpg",
+      "sha256": "6075ff871190d482a7c3196d5d34b2e9d5ab0031a36ee91d22157fbb4eb17506",
+      "bytes": 84432,
+      "width_px": 860,
+      "height_px": 620,
+      "page": "图库搜索",
+      "state": "860×620、200% 筛选两张",
+      "observed": "截图视图的 Buckmaster 查询及 2 张计数可见，第一张图片仅上部在当前视口。",
+      "limitations": [
+        "时间、摘录及整张卡片不在此视口；不能据此关闭摘录或查看器翻页范围问题。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-automatic-export-result.jpg",
+      "relative_path": "screenshots/v6-automatic-export-result.jpg",
+      "sha256": "49cc905309a2c15078c6cc2d90cdafc29eca8b19af2be23ac41f7d85d3c7d2b6",
+      "bytes": 51110,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "阅读与自动导出",
+      "state": "合成课程完成并直接阅读",
+      "observed": "BV1UXPRODUCTEXPORT 的正文、00:00、来源和蓝色测试图片可见，没有额外完成页挡住阅读。",
+      "limitations": [
+        "这张只证明阅读落点；自动导出文件本身需菜单、Finder 和字节核验证据。"
+      ],
+      "related_later_evidence": [
+        "v6-automatic-export-menu.jpg",
+        "v6-automatic-export-finder-settled.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-automatic-export-menu.jpg",
+      "relative_path": "screenshots/v6-automatic-export-menu.jpg",
+      "sha256": "adb6537463023e4e4ed86b8233f09da3556a887e4bdc035743d9b95bfe926111",
+      "bytes": 64224,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "阅读导出菜单",
+      "state": "自动文件取用入口",
+      "observed": "导出菜单第一项为打开导出文件夹，与复制和新导出命令分组。",
+      "limitations": [
+        "按钮存在不独立证明目录或文件正确；本图不验证手动导出目标选择和取消。"
+      ],
+      "related_later_evidence": [
+        "v6-automatic-export-finder-settled.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-automatic-export-finder-settled.jpg",
+      "relative_path": "screenshots/v6-automatic-export-finder-settled.jpg",
+      "sha256": "ffb5d3aa5730584ee71c1ed3c157868cc06bd62a969f886234929bb0a0be3892",
+      "bytes": 53976,
+      "width_px": 920,
+      "height_px": 464,
+      "page": "Finder",
+      "state": "自动导出目录已有 HTML",
+      "observed": "Finder 位于 exports，列表显示 course.html；精确目的地与文件内容由 final-export-native-review.md 和 JSON 核对。",
+      "limitations": [
+        "仅这一 HTML 合成夹具，不是所有格式或浏览器页面视觉验收。",
+        "文件名仍为通用 course.html，保留课程身份较弱的 P3。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-onlyexports-library-reopened.jpg",
+      "relative_path": "screenshots/v6-onlyexports-library-reopened.jpg",
+      "sha256": "0b905a3bda3ecd0ee898a7b6b2dcffa17c7ee00ac3eea459f5366940fb48c711",
+      "bytes": 55231,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "笔记库",
+      "state": "重开后仅导出失败不再误标正文缺失",
+      "observed": "BV1UXPRODUCTDIRECT 卡有正常来源、时间、截图数与阅读动作，没有旧的部分内容待补全文案。",
+      "limitations": [
+        "结合导出字节报告才能证明旧历史未被改写；静态卡不能替代所有剩余失败组合。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-storage-move-result.jpg",
+      "relative_path": "screenshots/v5-storage-move-result.jpg",
+      "sha256": "b7c1f32f880b6ce4340cf0d689396079a480649410ca1c9e797c61972f572ac6",
+      "bytes": 59196,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "存储迁移",
+      "state": "正在复制课程库",
+      "observed": "弹层显示正在处理文件、正在复制课程库和取消迁移，背景迁移动作不可用。",
+      "limitations": [
+        "文件名含 result，但实际不是完成；不能据此宣称迁移或取消已经成功。"
+      ],
+      "related_later_evidence": [
+        "v5-storage-move-complete.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-storage-move-complete.jpg",
+      "relative_path": "screenshots/v5-storage-move-complete.jpg",
+      "sha256": "f99f1c2ad39b7dc70df66fa2821b85a9535f273deb0c456ed1ecdd5676dc6ba2",
+      "bytes": 77144,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "存储迁移",
+      "state": "迁移完成并保留旧位置备份",
+      "observed": "完成弹层报告新位置和已核验的旧位置备份；背景默认库已在新位置，旧备份有独立打开和清理动作。",
+      "limitations": [
+        "图片显示程序报告，不独立证明逐文件哈希核验或清理执行；真实文件检查需操作记录。"
+      ],
+      "related_later_evidence": [
+        "v6-migrated-note-focused.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-storage-offline.jpg",
+      "relative_path": "screenshots/v6-storage-offline.jpg",
+      "sha256": "7e9e171813eb835d9fe3cd3b854609a6b9622031730b06aa784e9fd9b7c0c898",
+      "bytes": 81800,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置存储",
+      "state": "一个位置暂时不可访问",
+      "observed": "概况为一个可访问、一个不可访问；阅读样本卡有失联状态、重新定位，默认迁移库和旧备份独立保留。",
+      "limitations": [
+        "不把整个库列表当空库；未在此图执行重新定位、取消或恢复。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v6-migrated-note-focused.jpg",
+      "relative_path": "screenshots/v6-migrated-note-focused.jpg",
+      "sha256": "fc440f1f751e2edeaf8373d9c10f758d35291863843266bfa050a85a4dd32e25",
+      "bytes": 63541,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "阅读",
+      "state": "迁移后笔记正文可读",
+      "observed": "BV1UXPRODUCTPAUSE 的摘要、正文、截图和目录在聚焦阅读页可见。",
+      "limitations": [
+        "正文画面本身不显示实际存储路径；迁移关联需与移动结果和主代理操作记录结合。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-preference-save-rejected-settled.jpg",
+      "relative_path": "screenshots/v5-preference-save-rejected-settled.jpg",
+      "sha256": "8c37a13d021140299b524e3e1c66970a96dab2dbd907e6c23a9c790a37136b40",
+      "bytes": 72511,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置外观",
+      "state": "偏好保存被拒",
+      "observed": "红色固定区说明设置目录暂时无法写入，保留重试保存与技术详情；当前页面仍为浅色。",
+      "limitations": [
+        "这是写入失败，不应把当前显示当作新偏好已持久化。",
+        "不替代服务或存储所有写入失败。"
+      ],
+      "related_later_evidence": [
+        "v5-preference-save-retried.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-preference-save-retried.jpg",
+      "relative_path": "screenshots/v5-preference-save-retried.jpg",
+      "sha256": "2eabd965415ea28d42d715041aacf4d4e4656c9f8981cb41494413d6f156951b",
+      "bytes": 66407,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置外观",
+      "state": "重试后的深色正常显示",
+      "observed": "深色已选，两个明暗主题预览保留，错误区消失，字号和减少动态效果仍可达。",
+      "limitations": [
+        "单帧只证明恢复后的显示；具体持久化值和重启行为需操作记录。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v5-scoped-service-401.jpg",
+      "relative_path": "screenshots/v5-scoped-service-401.jpg",
+      "sha256": "2b137854230a154be12ca2cc129fdc7235a9d31c0a576f9c96753436496d91ff",
+      "bytes": 102585,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "任务服务修复",
+      "state": "明确凭据拒绝且补做不可用",
+      "observed": "固定底部显示 AI 校对凭据拒绝短原因，保存并补做不可用，重测和仅保存可见。",
+      "limitations": [
+        "历史 v5 顶部仍泛称保存后补做，F1 文案缺陷保留；已保存状态的后续修正见 v7。",
+        "无需认证时提示检查 API Key 的可发现性仍有 P3；本图不证明 429/5xx 分类。"
+      ],
+      "related_later_evidence": [
+        "v7-scoped-save-only.jpg"
+      ],
+      "review_method": "直接查看原生原图；结合已有独立审查，未以文件名推定状态。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v8-reader-partial-before-repair.jpg",
+      "relative_path": "screenshots/v8-reader-partial-before-repair.jpg",
+      "sha256": "89e665742ba9f2723cdb12f1d595b902f6d47628423054ad6eb882c5c874bfc9",
+      "bytes": 65929,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "正文",
+      "state": "受控服务失败后可读部分结果",
+      "observed": "正文、截图保留，失败说明和修复入口同处。",
+      "limitations": [
+        "使用受控本地服务和合成课程；不是所有慢磁盘、窗口尺寸或操作交错的覆盖。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "主代理直接操作原生应用并实看原图；独立阅读代理交叉审查另见报告。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v8-reader-repair-auto-opened.jpg",
+      "relative_path": "screenshots/v8-reader-repair-auto-opened.jpg",
+      "sha256": "5b3b3d0a0d890f3a6f701f9b52b2b808e34a1468247aab85269698138a49794c",
+      "bytes": 69218,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "正文",
+      "state": "同页补做完成自动打开第2版",
+      "observed": "版本2、摘要和正文直接可读，没有再次点击查看新版。",
+      "limitations": [
+        "使用受控本地服务和合成课程；不是所有慢磁盘、窗口尺寸或操作交错的覆盖。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "主代理直接操作原生应用并实看原图；独立阅读代理交叉审查另见报告。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v8-repair-left-reader.jpg",
+      "relative_path": "screenshots/v8-repair-left-reader.jpg",
+      "sha256": "190a4fe81502c5ae41845d3677c952f931ad9a240e80dd85a7cfd5f5e1d1c504",
+      "bytes": 72867,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "设置",
+      "state": "补做进行中离开阅读页",
+      "observed": "设置可操作，任务计数为1。",
+      "limitations": [
+        "使用受控本地服务和合成课程；不是所有慢磁盘、窗口尺寸或操作交错的覆盖。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "主代理直接操作原生应用并实看原图；独立阅读代理交叉审查另见报告。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v8-repair-background-completed-settings.jpg",
+      "relative_path": "screenshots/v8-repair-background-completed-settings.jpg",
+      "sha256": "59af23ad6ae24c0dc8970855dda371e6d2621d5dacadfb4c6c75953edcf33b66",
+      "bytes": 72759,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "设置",
+      "state": "补做完成后保持当前位置",
+      "observed": "仍为设置页，实际任务已完成，计数清除。",
+      "limitations": [
+        "使用受控本地服务和合成课程；不是所有慢磁盘、窗口尺寸或操作交错的覆盖。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "主代理直接操作原生应用并实看原图；独立阅读代理交叉审查另见报告。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v9-repair-viewer-open-processing.jpg",
+      "relative_path": "screenshots/v9-repair-viewer-open-processing.jpg",
+      "sha256": "5d7f3e59a3358b3be0fe82dd5be066caaf9e57d65df4475545a20021b10510eb",
+      "bytes": 57782,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "截图查看器",
+      "state": "补做时查看截图",
+      "observed": "大图、同期文字和返回正文动作可用。",
+      "limitations": [
+        "使用受控本地服务和合成课程；不是所有慢磁盘、窗口尺寸或操作交错的覆盖。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "主代理直接操作原生应用并实看原图；独立阅读代理交叉审查另见报告。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v9-repair-viewer-completed.jpg",
+      "relative_path": "screenshots/v9-repair-viewer-completed.jpg",
+      "sha256": "69929a024add25fc55a8c1fe08d1bb16dcf879252c1130006a190a5d3db865c9",
+      "bytes": 57853,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "截图查看器",
+      "state": "补做完成保留弹层",
+      "observed": "实际任务已完成，大图没有关闭或换版。",
+      "limitations": [
+        "使用受控本地服务和合成课程；不是所有慢磁盘、窗口尺寸或操作交错的覆盖。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "主代理直接操作原生应用并实看原图；独立阅读代理交叉审查另见报告。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v9-repair-viewer-return-old-note.jpg",
+      "relative_path": "screenshots/v9-repair-viewer-return-old-note.jpg",
+      "sha256": "2a7ac51e1ebe2f3d70c44817ab19aca224d095102ac362a92db28df7930b9708",
+      "bytes": 71294,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "正文",
+      "state": "从查看器定位旧正文",
+      "observed": "原笔记位置仍有效，已有新版入口可见。",
+      "limitations": [
+        "使用受控本地服务和合成课程；不是所有慢磁盘、窗口尺寸或操作交错的覆盖。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "主代理直接操作原生应用并实看原图；独立阅读代理交叉审查另见报告。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "v9-repair-viewer-open-new-version.jpg",
+      "relative_path": "screenshots/v9-repair-viewer-open-new-version.jpg",
+      "sha256": "3b4846bc68a991c3a6090a80f91d012d4ac5975440dc36901c3d073a47db8e3d",
+      "bytes": 70349,
+      "width_px": 1330,
+      "height_px": 768,
+      "page": "正文",
+      "state": "显式打开新版",
+      "observed": "用户点击查看新版后版本2可读。",
+      "limitations": [
+        "使用受控本地服务和合成课程；不是所有慢磁盘、窗口尺寸或操作交错的覆盖。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "主代理直接操作原生应用并实看原图；独立阅读代理交叉审查另见报告。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "installed-release-about.jpg",
+      "relative_path": "screenshots/installed-release-about.jpg",
+      "sha256": "0310c0849cf4830d6a00e8059fe0239c46af9cff8e64b5b5b667b015fcde9205",
+      "bytes": 64586,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置 / 应用",
+      "state": "安装版构建身份",
+      "observed": "关于卡含logo和构建1f505a6e60b9，重开引导入口可见。",
+      "limitations": [
+        "安装版原生普通窗口；没有在真实用户配置中提交新转换、测试外部AI或登录账号。",
+        "用户开始操作应用后已停止自动GUI操作。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "根代理实看原生原图；独立跨审见 installed-release-cross.md。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "installed-release-generation.jpg",
+      "relative_path": "screenshots/installed-release-generation.jpg",
+      "sha256": "0ade63b98e96d3a6c74d940afd8f095c0809ad8ac5619ad6faf340f10bff8f1f",
+      "bytes": 73545,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "设置 / 生成",
+      "state": "保留用户真实选项",
+      "observed": "文字来源、识别方式、模型、说明与关联操作按完整设置单元布局。",
+      "limitations": [
+        "安装版原生普通窗口；没有在真实用户配置中提交新转换、测试外部AI或登录账号。",
+        "用户开始操作应用后已停止自动GUI操作。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "根代理实看原生原图；独立跨审见 installed-release-cross.md。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "installed-release-library.jpg",
+      "relative_path": "screenshots/installed-release-library.jpg",
+      "sha256": "5c5d131e2e63da1c1243b2082304eb4b9c1150aea27d6ccaaf12e104356f2305",
+      "bytes": 48037,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "我的笔记",
+      "state": "原有课程加载",
+      "observed": "原有40图课程的封面、标题、文件夹和继续阅读可见。",
+      "limitations": [
+        "安装版原生普通窗口；没有在真实用户配置中提交新转换、测试外部AI或登录账号。",
+        "用户开始操作应用后已停止自动GUI操作。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "根代理实看原生原图；独立跨审见 installed-release-cross.md。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    },
+    {
+      "filename": "installed-release-reader.jpg",
+      "relative_path": "screenshots/installed-release-reader.jpg",
+      "sha256": "2c4522e28d8c2800088dbefe544ba2d4df1a52cb839732dfc1e3dd3562b2a00f",
+      "bytes": 106099,
+      "width_px": 1068,
+      "height_px": 768,
+      "page": "正文",
+      "state": "恢复原有阅读位置",
+      "observed": "正文与图片可读，右侧目录和常驻搜索可见；画面位于原保存滚动位置。",
+      "limitations": [
+        "安装版原生普通窗口；没有在真实用户配置中提交新转换、测试外部AI或登录账号。",
+        "用户开始操作应用后已停止自动GUI操作。"
+      ],
+      "related_later_evidence": [],
+      "review_method": "根代理实看原生原图；独立跨审见 installed-release-cross.md。",
+      "copy_policy": "byte-for-byte original; no crop, recompression, compositing, or redaction"
+    }
+  ],
+  "missing_requested_files": [],
+  "request_name_resolution": [
+    {
+      "request_shorthand": "v5-first-reopened/engine",
+      "exact_files": [
+        "v5-first-reopened-engines.jpg",
+        "v5-first-engine-availability.jpg"
+      ]
+    },
+    {
+      "request_shorthand": "v5-gallery-search",
+      "exact_file": "v5-narrow-gallery-search.jpg",
+      "reason": "请求中的图库搜索项按实际现有文件名归档，没有改名或生成替代截图。"
+    }
+  ],
+  "excluded": [
+    {
+      "pattern": "v6-migrated-note-readable*",
+      "reason": "主代理明确排除：不是稳定的最终画面。"
+    },
+    {
+      "pattern": "v6-storage-restored*",
+      "reason": "主代理明确排除：不是稳定的最终画面。"
+    },
+    {
+      "pattern": "temporary config, credentials, exported HTML/transcript bodies, work directories, and unrequested raw AX",
+      "reason": "仅归档请求指定的报告、JSON 和原始截图；不复制它们指向的临时数据正文。"
+    }
+  ]
+}

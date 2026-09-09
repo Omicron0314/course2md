@@ -1,0 +1,26 @@
+[
+  {
+    "id": "task-18d3a60223a0d478-dbfe-1",
+    "state": "partial",
+    "title": "验收课程 · BV1UXPRODUCTFOLLOW",
+    "artifact": "/tmp/course2md-product-review-2026-09-09/config-wide/course2md/desktop-local-library/course-e848abe948626b1209d40b58cfcc4feb/versions/task-18d3a60223a0d478-dbfe-1"
+  },
+  {
+    "id": "task-18d3a61bf2bbda00-dbfe-2",
+    "state": "complete",
+    "title": "验收课程 · BV1UXPRODUCTFOLLOW",
+    "artifact": "/tmp/course2md-product-review-2026-09-09/config-wide/course2md/desktop-local-library/course-e848abe948626b1209d40b58cfcc4feb/versions/task-18d3a61bf2bbda00-dbfe-2"
+  },
+  {
+    "id": "task-18d3a6244ee42d48-dbfe-4",
+    "state": "partial",
+    "title": "验收课程 · BV1UXPRODUCTFOLLOWAWAY",
+    "artifact": "/tmp/course2md-product-review-2026-09-09/config-wide/course2md/desktop-local-library/course-431bba54b1aec00e48fcf873e387c0a0/versions/task-18d3a6244ee42d48-dbfe-4"
+  },
+  {
+    "id": "task-18d3a62cebbbdfc8-dbfe-5",
+    "state": "complete",
+    "title": "验收课程 · BV1UXPRODUCTFOLLOWAWAY",
+    "artifact": "/tmp/course2md-product-review-2026-09-09/config-wide/course2md/desktop-local-library/course-431bba54b1aec00e48fcf873e387c0a0/versions/task-18d3a62cebbbdfc8-dbfe-5"
+  }
+]

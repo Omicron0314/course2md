@@ -1,0 +1,22 @@
+{
+  "code_commit": "1f505a6e60b937c0a34bc0a024f228992353ccb5",
+  "app": "/Users/aac6fef/Applications/course2md Design Preview.app",
+  "backup": "/Users/aac6fef/Library/Application Support/course2md-design-preview/backups/product-audit-20260909T122427Z",
+  "bundle_version": "20260909.6",
+  "desktop_sha256": "d31a0089fb5172e5aa38a471fc857e22eeca254bad5f1ff8cf0ed432974f3b57",
+  "worker_sha256": "4601c7d5e04eb897217b6c7ee92b9ef0b98cd485186cda2724ab32b7b915058c",
+  "worker_unchanged": true,
+  "resources_unchanged": true,
+  "environment_unchanged": true,
+  "config_unchanged_before_launch": true,
+  "courses_unchanged_before_launch": true,
+  "config_file_count": 13,
+  "course_file_count": 150,
+  "config_changes_after_native_read": [
+    "course2md/desktop-workspace.json",
+    "course2md/desktop-workspace.json.bak"
+  ],
+  "config_added_after_native_read": [],
+  "courses_unchanged_after_native_read": true,
+  "preferences_and_auth_unchanged_after_native_read": true
+}

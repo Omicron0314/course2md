@@ -1,0 +1,146 @@
+{
+  "scope": "Read-only v6 export artifact comparison; no GUI or pipeline execution",
+  "artificial_failure_fixture": true,
+  "automatic_export": {
+    "path": "/tmp/course2md-product-review-2026-09-09/config-empty/course2md/desktop-local-library/course-7d00dd503ba2986dd63c414d6468928b/versions/task-18d3a4bde8a061d0-171ee-1/exports/course.html",
+    "bytes": 3341,
+    "sha256": "846ad7fda3babc2dcb784ad7d975dbb74a01605032f985a4f3847ee17f2815cf",
+    "body": [
+      "验收课程 · BV1UXPRODUCTEXPORT",
+      "作者 合成测试讲师 · 时长 00:18 ·",
+      "源视频",
+      "· 1 张截图 / 1 段文字",
+      "00:00",
+      "人工字幕：分散投资可以减少个别资产带来的影响。"
+    ],
+    "images": [
+      {
+        "type": "data:image/jpeg;base64",
+        "bytes": 1603,
+        "sha256": "b373d64501ddc0ebd4eb332e1160894990781a1c30a16cc7213ce8caff91d8df",
+        "matches_original_frame": true
+      }
+    ],
+    "external_resources": []
+  },
+  "onlyexports_export": {
+    "path": "/tmp/course2md-product-review-2026-09-09/config-empty/course2md/desktop-local-library/course-cf5eb7305461ac3ce92992ac0490e670/exports/task-18d3a1419be8a868-cbfe-2/task-18d3a38fec3ca0d0-157f7-0/course.html",
+    "bytes": 3341,
+    "sha256": "ff658b70cb0b8eff92dba879c5efd088f5c8bac18b03efde7644ce8211c52e95",
+    "body": [
+      "验收课程 · BV1UXPRODUCTDIRECT",
+      "作者 合成测试讲师 · 时长 00:18 ·",
+      "源视频",
+      "· 1 张截图 / 1 段文字",
+      "00:00",
+      "人工字幕：分散投资可以减少个别资产带来的影响。"
+    ],
+    "images": [
+      {
+        "type": "data:image/jpeg;base64",
+        "bytes": 1603,
+        "sha256": "b373d64501ddc0ebd4eb332e1160894990781a1c30a16cc7213ce8caff91d8df",
+        "matches_original_frame": true
+      }
+    ],
+    "external_resources": []
+  },
+  "content_hashes": {
+    "timeline.jsonl": {
+      "baseline_sha256": "593e53ae3d46948fc237f25b684f528ed0a086f04739a7bf092a691f43a40d52",
+      "current_sha256": "593e53ae3d46948fc237f25b684f528ed0a086f04739a7bf092a691f43a40d52",
+      "match": true
+    },
+    "document.json": {
+      "baseline_sha256": "2eb17ff1fa3ced374ce24879b3013efc0018e7e65d76bd0f3df19ca28a88ec7a",
+      "current_sha256": "2eb17ff1fa3ced374ce24879b3013efc0018e7e65d76bd0f3df19ca28a88ec7a",
+      "match": true
+    },
+    "course.md": {
+      "baseline_sha256": "8290408ab0d2955d6399aa1853a256efbd043c7654d92f417a1f34251235b5a0",
+      "current_sha256": "8290408ab0d2955d6399aa1853a256efbd043c7654d92f417a1f34251235b5a0",
+      "match": true
+    },
+    "meta.json": {
+      "baseline_sha256": "86d7c2a8add40950a2d434a8f5a59fe6d837b282029b8411916b19a5d0adf848",
+      "current_sha256": "86d7c2a8add40950a2d434a8f5a59fe6d837b282029b8411916b19a5d0adf848",
+      "match": true
+    },
+    "frames/slide_0001.jpg": {
+      "baseline_sha256": "b373d64501ddc0ebd4eb332e1160894990781a1c30a16cc7213ce8caff91d8df",
+      "current_sha256": "b373d64501ddc0ebd4eb332e1160894990781a1c30a16cc7213ce8caff91d8df",
+      "match": true
+    }
+  },
+  "manifest": {
+    "original_sha256": "4fa9864733818bdb7ef1b83a9095109e2f5e7f948a81eff1d41d6f08178b2b9a",
+    "injected_sha256": "1ebb461494130161b96cd33eb448ee60b4add1cdf1fb036b7423c67b70f48509",
+    "current_sha256": "1ebb461494130161b96cd33eb448ee60b4add1cdf1fb036b7423c67b70f48509",
+    "current_matches_injected": true
+  },
+  "current_pointer": {
+    "baseline_sha256": "b741c70738441070612f9ac745a3720a53112bcbcc2afce0b2384966b998a74f",
+    "current_sha256": "b741c70738441070612f9ac745a3720a53112bcbcc2afce0b2384966b998a74f"
+  },
+  "plans": {
+    "canonical_method": "JSON sorted keys, ensure_ascii=False, compact separators, UTF-8 SHA-256",
+    "original_sha256": "2bcf0c012eb463557ad8cdeb04ef4c9ecc548333c5d34d6a50507577036a501d",
+    "injected_sha256": "0c17e1b77ea81b185aab2ce4c8823908e5a67c54a7879c57386e9eb55550e3a6",
+    "current_sha256": "0c17e1b77ea81b185aab2ce4c8823908e5a67c54a7879c57386e9eb55550e3a6",
+    "export_task_sha256": "be6b7ca2a29c5d527dc9483561a8b9d32c0589675b35eb708a8402d0f26fd724",
+    "original_to_injected_changed_paths": [
+      "/config/defaults/formats",
+      "/options/formats"
+    ],
+    "injected_to_current_changed_paths": [],
+    "parent_to_export_changed_paths": [
+      "/operation/base_version_dir",
+      "/operation/components",
+      "/operation/kind",
+      "/operation/prior_work_dir"
+    ],
+    "all_baseline_task_plans_preserved": true
+  },
+  "parent_record": {
+    "before_sha256": "0179a05b11b8a31f1e32e627f9955b42bf1b5bce3ac354bca0ded0299fd0f017",
+    "current_sha256": "89166da52e73643f295b033fac467be3f9382a97608c7504be2e499afeafa557",
+    "injected_to_current_changed_paths": [
+      "/handled_by",
+      "/unread"
+    ],
+    "current_equals_workspace_task": true
+  },
+  "export_task": {
+    "id": "task-18d3a38fec3ca0d0-157f7-0",
+    "parent": "task-18d3a1419be8a868-cbfe-2",
+    "state": "complete",
+    "operation": {
+      "kind": "reprocess",
+      "base_version_dir": "/tmp/course2md-product-review-2026-09-09/config-empty/course2md/desktop-local-library/course-cf5eb7305461ac3ce92992ac0490e670/versions/task-18d3a1419be8a868-cbfe-2",
+      "components": [
+        "exports"
+      ],
+      "prior_work_dir": "/tmp/course2md-product-review-2026-09-09/config-empty/course2md/desktop-local-library/.course2md/work/task-18d3a1419be8a868-cbfe-2"
+    },
+    "artifact": "/tmp/course2md-product-review-2026-09-09/config-empty/course2md/desktop-local-library/course-cf5eb7305461ac3ce92992ac0490e670/versions/task-18d3a1419be8a868-cbfe-2",
+    "outcomes": {
+      "exports": {
+        "html": {
+          "status": "succeeded"
+        }
+      }
+    },
+    "stages": {},
+    "logs": [],
+    "requests_receipts": 0,
+    "receipt_matches_output": true
+  },
+  "onlyexports_descendants": 1,
+  "original_course_version_directories": [
+    "task-18d3a1419be8a868-cbfe-2"
+  ],
+  "configuration_baseline_checks": {
+    "desktop-preferences/application.json": true
+  },
+  "default_library_preserved": true
+}

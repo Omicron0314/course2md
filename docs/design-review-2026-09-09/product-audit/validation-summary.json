@@ -1,0 +1,20 @@
+{
+  "desktop_tests": {
+    "passed": 223,
+    "failed": 0,
+    "ignored": 3,
+    "log_sha256": "00246bded896d4ce08fb629c5c7ebfde157b56e2b8acfb1df628035f3b2c9b4d"
+  },
+  "release_build": {
+    "code_commit": "1f505a6e60b937c0a34bc0a024f228992353ccb5",
+    "profile": "release",
+    "performance_feature": false,
+    "apple_native_module": true,
+    "log_sha256": "fe24ecf38455ffbce21da8cedfc375ab90ccf180a35af6fdbdb6b750bf75c0a3"
+  },
+  "limits": [
+    "没有人为注入慢磁盘来原生触发读入期间滚动；该竞态有静态与边界测试覆盖。",
+    "没有执行真实Bilibili登录或向用户外部AI发送课程。",
+    "各格式、模型下载失败、磁盘满、所有配色×字号×页面组合未全部原生实走，详见主报告。"
+  ]
+}
