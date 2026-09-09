@@ -4,6 +4,7 @@ use crate::{notes::PreviewBlock, reader_navigation as nav, theme::*};
 use gpui_component::{
     button::*,
     menu::{DropdownMenu, PopupMenuItem},
+    scroll::{Scrollbar, ScrollbarMode},
 };
 use std::{
     cell::RefCell,
@@ -263,11 +264,17 @@ impl State {
 struct ImageDialog {
     desktop: Entity<Desktop>,
     _observation: Subscription,
+    footer: bool,
 }
 impl Render for ImageDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.desktop
-            .update(cx, |desktop, cx| desktop.reader_image_content(window, cx))
+        self.desktop.update(cx, |desktop, cx| {
+            if self.footer {
+                desktop.reader_image_actions(cx)
+            } else {
+                desktop.reader_image_content(window, cx)
+            }
+        })
     }
 }
 fn block_text(block: &PreviewBlock) -> Option<&str> {
@@ -3172,7 +3179,13 @@ impl Desktop {
         let desktop = cx.entity();
         let content = cx.new(|cx| ImageDialog {
             _observation: cx.observe(&desktop, |_, _, cx| cx.notify()),
+            desktop: desktop.clone(),
+            footer: false,
+        });
+        let footer = cx.new(|cx| ImageDialog {
+            _observation: cx.observe(&desktop, |_, _, cx| cx.notify()),
             desktop,
+            footer: true,
         });
         let weak = cx.weak_entity();
         window.open_dialog(cx, move |dialog, window, _| {
@@ -3180,13 +3193,17 @@ impl Desktop {
                 .min(1180.)
                 .max(280.);
             let closed = weak.clone();
+            let content = content.clone();
+            let top = task_dialog_top(window);
             dialog
-                .title("查看截图")
                 .w(px(width))
-                .margin_top(px(16.))
+                .h((window.bounds().size.height - top - px(24.)).max(px(0.)))
+                .min_h_0()
+                .margin_top(top)
                 .overlay_closable(false)
                 .close_button(false)
-                .child(content.clone())
+                .content(move |body, _, _| body.min_h_0().child(content.clone()))
+                .footer(footer.clone())
                 .on_close(move |_, window, cx| {
                     let _ =
                         closed.update(cx, |this, cx| this.restore_reader_image_focus(window, cx));
@@ -3217,20 +3234,16 @@ impl Desktop {
             cx.notify();
         }
     }
-    fn image_fit(viewer: &ImageViewer, window: &Window) -> f32 {
+    fn image_fit(viewer: &ImageViewer, _window: &Window) -> f32 {
         let frame = &viewer.frames[viewer.index];
-        let (width, height) =
-            if viewer.viewport_size.width > px(0.) && viewer.viewport_size.height > px(0.) {
-                (
-                    f32::from(viewer.viewport_size.width),
-                    f32::from(viewer.viewport_size.height),
-                )
-            } else {
-                (
-                    (f32::from(window.bounds().size.width) - 100.).clamp(180., 1120.),
-                    (f32::from(window.bounds().size.height) - 400.).max(140.),
-                )
-            };
+        // The first prepaint records the space that flex layout actually leaves
+        // for media after the toolbar, transcript and naturally sized footer.
+        // Until then, do not guess a fit from a presumed footer height.
+        let width = f32::from(viewer.viewport_size.width);
+        let height = f32::from(viewer.viewport_size.height);
+        if width <= 0. || height <= 0. {
+            return 0.;
+        }
         (width / frame.width.max(1) as f32)
             .min(height / frame.height.max(1) as f32)
             .min(1.)
@@ -3276,18 +3289,17 @@ impl Desktop {
             .zoom
             .unwrap_or_else(|| Self::image_fit(viewer, window));
         let version = viewer.version.clone();
-        let source_link = viewer
-            .source
-            .as_ref()
-            .and_then(|source| frame.seconds.and_then(|time| nav::seek_url(source, time)));
-        let original_source = viewer.source.clone();
-        let body_anchor = frame.body_anchor.clone();
-        let scroll = viewer.scroll.clone();
-        let reveal = |id: &'static str, child: AnyElement| {
-            crate::focus_scroll::RevealFocus::new(id, child, scroll.clone()).inline()
+        let content_width = (f32::from(window.bounds().size.width) - 48.).min(1180.) - 34.;
+        let compact = content_width < f32::from(window.rem_size()) * 52.;
+        let timestamp = frame.seconds.map(course2md::render::fmt_ts);
+        let heading = match timestamp {
+            Some(time) if compact => time,
+            Some(time) => format!("截图 · {time}"),
+            None => "截图".into(),
         };
         let mut body = v_flex()
             .id("reader-image-dialog")
+            .relative()
             .role(Role::Dialog)
             .aria_label(format!("查看{label}"))
             .track_focus(&viewer.focus)
@@ -3306,97 +3318,83 @@ impl Desktop {
             .on_action(
                 cx.listener(|this, _: &CloseImage, window, cx| this.close_reader_image(window, cx)),
             )
-            .gap_3()
-            .h(px((f32::from(window.bounds().size.height) - 125.).max(160.)))
+            .gap_2()
+            .h_full()
+            .w_full()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&scroll)
-            .child(
-                theme::accessible_text("image-title", label.clone())
-                    .role(Role::Heading)
-                    .w_full()
-                    .min_w_0()
-                    .flex_shrink_0()
-                    .whitespace_normal()
-                    .text_ellipsis()
-                    .line_clamp(2)
-                    .text_lg(),
-            )
             .child(
                 h_flex()
                     .gap_2()
+                    .items_center()
                     .flex_wrap()
                     .flex_shrink_0()
-                    .child(reveal(
-                        "reveal-image-previous",
-                        (control("image-previous")
+                    .child(
+                        theme::accessible_text("image-title", heading)
+                            .role(Role::Heading)
+                            .aria_label(label.clone())
+                            .whitespace_nowrap()
+                            .text_size(if compact { TEXT_BODY } else { TEXT_TITLE })
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        control("image-previous")
                             .icon(IconName::ChevronLeft)
-                            .label("上一张")
+                            .w(CONTROL_HEIGHT).px_0()
+                            .accessibility_label("上一张")
+                            .tooltip("上一张 · ←")
                             .disabled(index == 0)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.move_reader_image(-1, cx)),
-                            ))
-                        .into_any_element(),
-                    ))
+                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(-1, cx))),
+                    )
                     .child(theme::accessible_text(
                         "image-number",
                         format!("{} / {count}", index + 1),
-                    ))
-                    .child(reveal(
-                        "reveal-image-next",
-                        (control("image-next")
+                    ).whitespace_nowrap().text_size(TEXT_BODY))
+                    .child(
+                        control("image-next")
                             .icon(IconName::ChevronRight)
-                            .label("下一张")
+                            .w(CONTROL_HEIGHT).px_0()
+                            .accessibility_label("下一张")
+                            .tooltip("下一张 · →")
                             .disabled(index + 1 >= count)
-                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(1, cx))))
-                        .into_any_element(),
-                    ))
-                    .child(reveal(
-                        "reveal-image-zoom-out",
-                        (control("image-zoom-out")
+                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(1, cx))),
+                    )
+                    .child(
+                        control("image-zoom-out")
                             .icon(icons::zoom_out())
-                            .label("缩小")
+                            .w(CONTROL_HEIGHT).px_0()
+                            .accessibility_label("缩小")
+                            .tooltip("缩小 · −")
                             .disabled(scale <= 0.1)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.zoom_reader_image(Some(0.8), window, cx)
-                            })))
-                        .into_any_element(),
-                    ))
+                            })),
+                    )
                     .child(theme::accessible_text(
                         "image-scale",
-                        format!("{}%", (scale * 100.).round() as u32),
-                    ))
-                    .child(reveal(
-                        "reveal-image-zoom-in",
-                        (control("image-zoom-in")
+                        if scale > 0. { format!("{}%", (scale * 100.).round() as u32) } else { "—".into() },
+                    ).whitespace_nowrap().text_size(TEXT_BODY))
+                    .child(
+                        control("image-zoom-in")
                             .icon(icons::zoom_in())
-                            .label("放大")
+                            .w(CONTROL_HEIGHT).px_0()
+                            .accessibility_label("放大")
+                            .tooltip("放大 · +")
                             .disabled(scale >= 4.)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.zoom_reader_image(Some(1.25), window, cx)
-                            })))
-                        .into_any_element(),
-                    ))
-                    .child(reveal(
-                        "reveal-image-fit",
-                        (control("image-fit")
+                            })),
+                    )
+                    .child(
+                        control("image-fit")
                             .icon(icons::fit_screen())
-                            .label("适合窗口")
+                            .w(CONTROL_HEIGHT).px_0()
+                            .accessibility_label("适合窗口")
+                            .tooltip("适合窗口 · 0")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.zoom_reader_image(None, window, cx)
-                            })))
-                        .into_any_element(),
-                    ))
-                    .child(reveal(
-                        "reveal-image-close",
-                        (control("image-close")
-                            .icon(IconName::Close)
-                            .label("关闭截图")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_reader_image(window, cx)
-                            })))
-                        .into_any_element(),
-                    )),
+                            })),
+                    ),
             );
         if let Some(path) = frame.path {
             let viewport_scroll = viewer.viewport_scroll.clone();
@@ -3426,7 +3424,7 @@ impl Desktop {
                     .border_color(color(HAIRLINE))
                     .rounded(RADIUS_CARD)
                     .flex_1()
-                    .min_h(px(140.))
+                    .min_h_0()
                     .w_full()
                     .overflow_x_scroll()
                     .overflow_y_scroll()
@@ -3481,17 +3479,22 @@ impl Desktop {
         let mut details = v_flex()
             .id("image-details")
             .w_full()
+            // Short text keeps its natural height; the cap only constrains
+            // long text, leaving the media the rest of the measured body.
             .flex_shrink_0()
+            .max_h(relative(0.4))
+            .min_h_0()
             .gap_2()
-            .max_h(px(96.))
-            .overflow_y_scroll();
+            .pr_3()
+            .overflow_y_scroll()
+            .track_scroll(&viewer.scroll);
         if let Some(caption) = frame.caption {
             details = details.child(paragraph(
                 "image-caption",
                 format!("原图说明：{caption}"),
                 0,
                 Vec::new(),
-            ));
+            ).flex_shrink_0());
         }
         if !frame.transcript.is_empty() {
             details = details.child(paragraph(
@@ -3507,12 +3510,47 @@ impl Desktop {
                 ),
                 1,
                 Vec::new(),
-            ));
+            ).flex_shrink_0());
         }
         if has_details {
-            body = body.child(details);
+            body = body.child(details).child(
+                Scrollbar::vertical(&viewer.scroll).mode(ScrollbarMode::Always),
+            );
         }
-        let mut actions = h_flex().gap_2().flex_wrap().flex_shrink_0();
+        body.into_any_element()
+    }
+
+    fn reader_image_actions(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(viewer) = &self.reader_ui.viewer else {
+            return div().into_any_element();
+        };
+        let frame = &viewer.frames[viewer.index];
+        let version = viewer.version.clone();
+        let body_anchor = frame.body_anchor.clone();
+        let source_link = viewer.source.as_ref().and_then(|source| {
+            frame.seconds.and_then(|time| nav::seek_url(source, time))
+        });
+        let original_source = viewer.source.clone();
+        // Footer actions never need to scroll into the transcript viewport.
+        let reveal = |_: &'static str, child: AnyElement| child;
+        let mut actions = h_flex()
+            .id("reader-image-actions")
+            .key_context("ReaderImage")
+            .on_action(cx.listener(|this, _: &PreviousImage, _, cx| this.move_reader_image(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextImage, _, cx| this.move_reader_image(1, cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, window, cx| {
+                this.zoom_reader_image(Some(1.25), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, window, cx| {
+                this.zoom_reader_image(Some(0.8), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FitImage, window, cx| {
+                this.zoom_reader_image(None, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CloseImage, window, cx| {
+                this.close_reader_image(window, cx)
+            }))
+            .gap_2().w_full().flex_wrap().flex_shrink_0();
         if let Some(anchor) = body_anchor {
             actions =
                 actions.child(reveal(
@@ -3562,7 +3600,18 @@ impl Desktop {
                 .into_any_element(),
             ));
         }
-        body.child(actions).into_any_element()
+        actions
+            .child(div().flex_1())
+            .child(
+                control("image-close")
+                    .icon(IconName::Close)
+                    .label("关闭")
+                    .accessibility_label("关闭截图")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_reader_image(window, cx)
+                    })),
+            )
+            .into_any_element()
     }
 }
 
