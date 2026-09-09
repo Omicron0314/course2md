@@ -1002,6 +1002,13 @@ impl Desktop {
                 return;
             }
         };
+        // Starting again acknowledges only the terminal feedback belonging to
+        // the current foreground input, before the new task replaces its link.
+        let acknowledged_input = (self.page == Page::New)
+            .then(|| self.current_input_task(cx))
+            .flatten()
+            .filter(|task| task.state.finished())
+            .map(|task| task.id.clone());
         let Some(workspace) = &mut self.workspace else {
             return;
         };
@@ -1011,6 +1018,12 @@ impl Desktop {
             .and_then(|draft| draft.retry_of.clone());
         let result = workspace.transaction(|state| {
             let (id, created) = state.enqueue(plan, parent)?;
+            if let Some(previous) = acknowledged_input
+                .as_deref()
+                .and_then(|id| state.task_mut(id))
+            {
+                previous.unread = false;
+            }
             if created && let Some(draft) = state.draft_mut() {
                 draft.submitted_task = Some(id.clone());
             }

@@ -2529,6 +2529,9 @@ impl Desktop {
                     None
                 }
             });
+        let checking_components = !preferences_blocked
+            && self.environment.is_none()
+            && submission_error.as_deref() == Some("正在检查生成笔记需要的组件，请稍候");
         let mut inset = v_flex().w_full().min_w_0().gap_3();
         let mut actions = h_flex().gap_2().flex_wrap();
         if let Some(issue) = preferences_issue {
@@ -2695,13 +2698,31 @@ impl Desktop {
         }
         inset
             .when_some(submission_error, |view, message| {
-                view.child(
-                    accessible_text("import-submit-error", message)
-                        .role(Role::Alert)
-                        .text_sm()
-                        .whitespace_normal()
-                        .text_color(color(DANGER)),
-                )
+                if checking_components {
+                    view.child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_2()
+                            .items_center()
+                            .child(motion::spinner("import-component-check-spinner", cx))
+                            .child(
+                                accessible_text("import-component-check", message)
+                                    .role(Role::Status)
+                                    .text_sm()
+                                    .font_weight(FontWeight::NORMAL)
+                                    .whitespace_normal()
+                                    .text_color(color(GRAY)),
+                            ),
+                    )
+                } else {
+                    view.child(
+                        accessible_text("import-submit-error", message)
+                            .role(Role::Alert)
+                            .text_sm()
+                            .whitespace_normal()
+                            .text_color(color(DANGER)),
+                    )
+                }
             })
             .child(actions)
     }
