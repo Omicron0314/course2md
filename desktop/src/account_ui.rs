@@ -242,32 +242,37 @@ impl Desktop {
                     .gap_2()
                     .items_center()
                     .child(
-                        semantic_label(
-                            "bilibili-account-identity",
-                            if onboarding {
-                                "账号状态"
-                            } else {
-                                "Bilibili 账号"
-                            },
-                            icons::bilibili(),
-                        )
-                        .flex_1(),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(semantic_label(
+                                "bilibili-account-identity",
+                                if onboarding {
+                                    "账号状态"
+                                } else {
+                                    "Bilibili 账号"
+                                },
+                                icons::bilibili(),
+                            ))
+                            .when(show_detail, |view| {
+                                view.child(
+                                    accessible_text("bilibili-account-status", detail.clone())
+                                        .min_w_0()
+                                        .whitespace_normal()
+                                        .pl(rems(28. / 14.))
+                                        .text_size(TEXT_AUX)
+                                        .text_color(color(MUTED)),
+                                )
+                            }),
                     )
                     .when(self.account.checking, |row| {
                         row.child(crate::motion::spinner("account-checking", cx))
                     })
                     .child(badge(kind).child(label)),
             )
-            .when(show_detail, |view| {
-                view.child(
-                    accessible_text("bilibili-account-status", detail)
-                        .min_w_0()
-                        .whitespace_normal()
-                        .font_weight(FontWeight::SEMIBOLD),
-                )
-            })
             .child(
-                info_callout(
+                supporting_info(
                     "bilibili-account-policy",
                     if saved {
                         "读取字幕和视频时使用此账号的权限。退出登录不会删除课程和笔记。"
@@ -285,6 +290,7 @@ impl Desktop {
                 h_flex()
                     .w_full()
                     .gap_2()
+                    .justify_end()
                     .flex_wrap()
                     .when_some(login_action, |view, label| {
                         view.child(

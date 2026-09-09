@@ -7,7 +7,7 @@ const SHELL_GUTTER: f32 = 24.;
 const WIDE_COLUMN: Rems = rems(82.);
 pub(super) const SETTINGS_SIDEBAR_WIDTH: f32 = 200.;
 pub(super) const SETTINGS_COLUMN_GAP: f32 = 32.;
-const SETTINGS_CONTENT_MAX_WIDTH: f32 = 920.;
+const SETTINGS_CONTENT_MAX_WIDTH: f32 = 800.;
 const SETTINGS_SHELL_WIDTH: f32 =
     SETTINGS_SIDEBAR_WIDTH + SETTINGS_COLUMN_GAP + SETTINGS_CONTENT_MAX_WIDTH + SHELL_GUTTER * 2.;
 const SETTINGS_SIDEBAR_BREAKPOINT: f32 = 1100.;
@@ -63,22 +63,19 @@ fn shell_column_at(width: AbsoluteLength) -> Div {
 impl Desktop {
     /// Keep task results reachable while the user is on another page.
     fn shell_topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> TitleBar {
+        let tasks_need_attention = self.workspace.as_ref().is_some_and(|workspace| {
+            workspace.state.tasks.iter().any(|task| {
+                task.handled_by.is_none()
+                    && matches!(
+                        task.state,
+                        workspace::TaskState::NeedsAttention
+                            | workspace::TaskState::Uncertain
+                            | workspace::TaskState::Partial
+                    )
+            })
+        });
         let task_count = self.workspace.as_ref().map_or(0, |workspace| {
-            workspace
-                .state
-                .tasks
-                .iter()
-                .filter(|task| {
-                    task.handled_by.is_none()
-                        && (task.unread
-                            || matches!(
-                                task.state,
-                                workspace::TaskState::NeedsAttention
-                                    | workspace::TaskState::Uncertain
-                                    | workspace::TaskState::Partial
-                            ))
-                })
-                .count()
+            crate::task_ui::actionable_task_count(&workspace.state.tasks)
         });
         let current = match self.page {
             Page::Library | Page::Result => "library",
@@ -114,7 +111,7 @@ impl Desktop {
                 .icon("library", icons::book_open())
                 .icon(
                     "tasks",
-                    if compact && task_count > 0 {
+                    if compact && tasks_need_attention {
                         icons::warning()
                     } else {
                         icons::task()
@@ -142,6 +139,9 @@ impl Desktop {
                     if page == Page::Library {
                         this.folder_filter = None;
                     }
+                    if page == Page::New && !this.prepare_workbench_input(window, cx) {
+                        return;
+                    }
                     this.navigate(page, cx);
                 })),
         );
@@ -162,6 +162,12 @@ impl Desktop {
     }
 
     fn task_result_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // A new result can briefly announce itself. Historical unresolved work
+        // remains in Tasks; it must not consume every unrelated page's height.
+        let (announced_id, shown) = self.transient_task_result.as_ref()?;
+        if shown.elapsed() >= std::time::Duration::from_secs(8) {
+            return None;
+        }
         let visible_task = (self.page == Page::New)
             .then(|| self.current_input_task(cx).map(|task| task.id.as_str()))
             .flatten();
@@ -172,7 +178,8 @@ impl Desktop {
             .tasks
             .iter()
             .filter(|task| {
-                task.unread
+                &task.id == announced_id
+                    && task.unread
                     && task.handled_by.is_none()
                     && visible_task != Some(task.id.as_str())
                     && !(self.reading
@@ -184,17 +191,23 @@ impl Desktop {
             .max_by_key(|task| task.updated)?;
         let id = task.id.clone();
         let dismiss_id = id.clone();
-        let result = (task.state == workspace::TaskState::Complete)
-            .then(|| {
-                task.artifact.clone().map(|out_dir| Completed {
-                    out_dir,
-                    title: task.plan.title.clone(),
-                    ..Default::default()
-                })
+        let exports_only = task.exports_only() && task.state == workspace::TaskState::Complete;
+        let result = matches!(
+            task.state,
+            workspace::TaskState::Complete | workspace::TaskState::Partial
+        )
+        .then(|| {
+            task.artifact.clone().map(|out_dir| Completed {
+                out_dir,
+                title: task.plan.title.clone(),
+                ..Default::default()
             })
-            .flatten();
+        })
+        .flatten();
         let action = match task.state {
-            workspace::TaskState::Complete => "查看生成结果",
+            workspace::TaskState::Complete if exports_only => "打开导出位置",
+            workspace::TaskState::Complete => "阅读笔记",
+            workspace::TaskState::Partial if result.is_some() => "阅读笔记",
             workspace::TaskState::Partial => "查看未完成部分",
             workspace::TaskState::Uncertain => "确认请求结果",
             _ => "查看任务",
@@ -214,7 +227,15 @@ impl Desktop {
                     .child(
                         accessible_text(
                             "background-task-result",
-                            format!("《{}》：{}", task.plan.title, task.state.label(),),
+                            format!(
+                                "《{}》：{}",
+                                task.plan.title,
+                                if exports_only {
+                                    "文件已导出"
+                                } else {
+                                    task.state.label()
+                                },
+                            ),
                         )
                         .flex_1()
                         .min_w_0()
@@ -226,7 +247,9 @@ impl Desktop {
                             .icon(icons::arrow_forward())
                             .label(action)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(done) = &result {
+                                if exports_only {
+                                    this.open_task_export_location(id.clone(), cx);
+                                } else if let Some(done) = &result {
                                     this.open_course(Course::from_completed(done), cx);
                                 } else {
                                     this.select_task(&id, cx);
@@ -240,6 +263,7 @@ impl Desktop {
                             .icon(IconName::Close)
                             .accessibility_label("关闭这条任务提示")
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                this.transient_task_result = None;
                                 if let Some(workspace) = &mut this.workspace {
                                     if let Err(error) = workspace.transaction(|state| {
                                         if let Some(task) = state.task_mut(&dismiss_id) {

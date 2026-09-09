@@ -3,7 +3,7 @@ use super::*;
 use crate::{notes::PreviewBlock, reader_navigation as nav, theme::*};
 use gpui_component::{
     button::*,
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     scroll::{Scrollbar, ScrollbarMode},
 };
 use std::{
@@ -63,6 +63,7 @@ struct ReaderData {
     frames: Vec<Frame>,
     versions: Vec<Version>,
     issues: Vec<String>,
+    export_folder: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -145,6 +146,7 @@ struct ImageViewer {
     viewport_scroll: ScrollHandle,
     viewport_size: gpui::Size<Pixels>,
     frames: Vec<Frame>,
+    filtered: bool,
     index: usize,
     title: String,
     source: Option<nav::SourceTarget>,
@@ -155,12 +157,163 @@ struct ImageViewer {
     return_focus: Option<FocusHandle>,
     focus: FocusHandle,
 }
+
+#[derive(Clone)]
+struct ExportFeedback {
+    title: String,
+    format: course2md::config::OutputFormat,
+    result: Result<PathBuf, String>,
+}
+
+#[derive(Default)]
+struct ExportState {
+    generation: u64,
+    pending: Option<(u64, PathBuf)>,
+    feedback: BTreeMap<PathBuf, ExportFeedback>,
+}
+
+impl ExportState {
+    fn begin(&mut self, version: PathBuf) -> Option<u64> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = Some((self.generation, version));
+        Some(self.generation)
+    }
+
+    fn is_pending(&self, generation: u64, version: &std::path::Path) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|(current, source)| *current == generation && source == version)
+    }
+
+    fn cancel(&mut self, generation: u64, version: &std::path::Path) -> bool {
+        if !self.is_pending(generation, version) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+
+    fn finish(
+        &mut self,
+        generation: u64,
+        version: &std::path::Path,
+        feedback: ExportFeedback,
+    ) -> bool {
+        if !self.cancel(generation, version) {
+            return false;
+        }
+        self.feedback.insert(version.to_path_buf(), feedback);
+        true
+    }
+}
+
+fn exported_file_label(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "导出文件".into());
+    format!("已导出 · {name}")
+}
+
+fn reader_export_items(
+    mut menu: PopupMenu,
+    desktop: WeakEntity<Desktop>,
+    course: Course,
+    folder: Option<PathBuf>,
+    exporting: bool,
+) -> PopupMenu {
+    if let Some(folder) = folder {
+        menu = menu
+            .item(
+                PopupMenuItem::new("打开导出文件夹")
+                    .icon(icons::folder_open())
+                    .on_click(move |_, _, cx| {
+                        if let Ok(url) = url::Url::from_directory_path(&folder) {
+                            cx.open_url(url.as_str());
+                        }
+                    }),
+            )
+            .separator();
+    }
+    for (markdown, label, icon) in [
+        (false, "复制整份笔记 · 纯文本", icons::content_copy()),
+        (true, "复制整份笔记 · Markdown 文本", icons::article()),
+    ] {
+        let weak = desktop.clone();
+        let version = course.dir.clone();
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .icon(icon)
+                .on_click(move |_, _, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        if let Some(preview) = this
+                            .preview
+                            .as_ref()
+                            .filter(|preview| preview.course.dir == version)
+                        {
+                            let text = if markdown {
+                                &preview.markdown_text
+                            } else {
+                                &preview.plain_text
+                            };
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            this.message = Some(
+                                if markdown {
+                                    "已复制 Markdown 文本，不含图片引用。"
+                                } else {
+                                    "已复制纯文本，不含图片。"
+                                }
+                                .into(),
+                            );
+                            cx.notify();
+                        }
+                    });
+                }),
+        );
+    }
+    menu = menu.separator();
+    for (format, label) in [
+        (
+            course2md::config::OutputFormat::Md,
+            "导出 Markdown 包（含图片）…",
+        ),
+        (
+            course2md::config::OutputFormat::Html,
+            "导出网页文件（可独立阅读）…",
+        ),
+        (
+            course2md::config::OutputFormat::Json,
+            "导出 JSON 数据（不含图片文件）…",
+        ),
+    ] {
+        let weak = desktop.clone();
+        let source = course.clone();
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .icon(icons::download())
+                .disabled(exporting)
+                .on_click(move |_, window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.export_course(source.clone(), format, window, cx);
+                    });
+                }),
+        );
+    }
+    menu
+}
+
 pub(crate) struct State {
     controls_scroll: ScrollHandle,
     information_scroll: ScrollHandle,
     toc_scroll: ScrollHandle,
     view_focus: [FocusHandle; 2],
+    menu_focus: FocusHandle,
     find: Entity<InputState>,
+    gallery_find: Entity<InputState>,
+    gallery_search_position: Option<workspace::ReadingPosition>,
     focus: FocusHandle,
     find_open: bool,
     info_open: bool,
@@ -178,6 +331,7 @@ pub(crate) struct State {
     versions: Vec<Version>,
     issues: Vec<String>,
     pending_restore: Option<workspace::ReadingPosition>,
+    pending_search: Option<Match>,
     restoring: bool,
     restore_generation: u64,
     last_position: Option<(String, workspace::ReadingPosition)>,
@@ -185,6 +339,8 @@ pub(crate) struct State {
     item_layout: Rc<RefCell<nav::ReadingLayout>>,
     viewer: Option<ImageViewer>,
     exports: BTreeMap<PathBuf, PathBuf>,
+    export_folder: Option<PathBuf>,
+    export_state: ExportState,
     source_loading: bool,
     source: Option<nav::SourceTarget>,
     source_available: bool,
@@ -194,12 +350,17 @@ pub(crate) struct State {
 }
 impl State {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
-        let find = cx.new(|cx| InputState::new(window, cx).placeholder("在这份笔记中查找"));
+        let find = cx.new(|cx| InputState::new(window, cx).placeholder("查找笔记内容"));
+        let gallery_find = cx.new(|cx| InputState::new(window, cx).placeholder("搜索截图对应文字"));
         let subscription = cx.subscribe_in(&find, window, |this, _, event, window, cx| {
             match event {
                 InputEvent::Change => {
+                    this.reader_ui.find_open =
+                        !this.reader_ui.find.read(cx).value().trim().is_empty();
                     this.update_reader_matches(cx);
-                    this.move_reader_match(0, cx);
+                    if this.result_tab == 0 {
+                        this.move_reader_match(0, cx);
+                    }
                 }
                 InputEvent::PressEnter { shift, .. } => {
                     this.move_reader_match(if *shift { -1 } else { 1 }, cx)
@@ -208,6 +369,31 @@ impl State {
             }
             let _ = window;
         });
+        let gallery_subscription =
+            cx.subscribe_in(&gallery_find, window, |this, _, event, _, cx| {
+                if matches!(event, InputEvent::Change) && this.result_tab == 1 {
+                    let searching = !this
+                        .reader_ui
+                        .gallery_find
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .is_empty();
+                    if searching {
+                        if this.reader_ui.gallery_search_position.is_none() {
+                            this.save_reading_position(cx);
+                            this.reader_ui.gallery_search_position =
+                                this.capture_reading_position();
+                        }
+                        this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                    } else if let Some(position) = this.reader_ui.gallery_search_position.take() {
+                        this.reader_ui.pending_restore = Some(position);
+                        this.reader_ui.restore_generation += 1;
+                        this.reader_ui.restoring = false;
+                    }
+                    cx.notify();
+                }
+            });
         cx.bind_keys([
             KeyBinding::new("cmd-f", FindInNote, Some("CourseReader")),
             KeyBinding::new("cmd-g", NextMatch, Some("CourseReader")),
@@ -232,7 +418,10 @@ impl State {
             information_scroll: ScrollHandle::new(),
             toc_scroll: ScrollHandle::new(),
             view_focus: std::array::from_fn(|_| cx.focus_handle()),
+            menu_focus: cx.focus_handle(),
             find,
+            gallery_find,
+            gallery_search_position: None,
             focus: cx.focus_handle(),
             find_open: false,
             info_open: false,
@@ -249,6 +438,7 @@ impl State {
             versions: Vec::new(),
             issues: Vec::new(),
             pending_restore: None,
+            pending_search: None,
             restoring: false,
             restore_generation: 0,
             last_position: None,
@@ -256,12 +446,14 @@ impl State {
             item_layout: Rc::default(),
             viewer: None,
             exports: BTreeMap::new(),
+            export_folder: None,
+            export_state: ExportState::default(),
             source_loading: false,
             source: None,
             source_available: false,
             offline_video: OfflineVideo::NotRequested,
             offline_opening: false,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, gallery_subscription],
         }
     }
 }
@@ -373,6 +565,102 @@ fn frame_label(title: &str, frame: &Frame, index: usize) -> String {
         None => format!("{title}，第 {} 张图片", index + 1),
     }
 }
+
+fn matching_frames(frames: &[Frame], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    frames
+        .iter()
+        .enumerate()
+        .filter(|(_, frame)| {
+            query.is_empty()
+                || frame.transcript.to_lowercase().contains(&query)
+                || frame
+                    .caption
+                    .as_ref()
+                    .is_some_and(|caption| caption.to_lowercase().contains(&query))
+                || frame
+                    .seconds
+                    .is_some_and(|seconds| course2md::render::fmt_ts(seconds).contains(&query))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn frame_excerpt(frame: &Frame, query: &str) -> String {
+    let query = query.trim();
+    if !query.is_empty() {
+        for text in std::iter::once(frame.transcript.as_str()).chain(frame.caption.as_deref()) {
+            if let Some(found) = nav::text_matches(text, query).first() {
+                let mut start = text[..found.start]
+                    .char_indices()
+                    .rev()
+                    .nth(15)
+                    .map(|(index, _)| index)
+                    .unwrap_or(0);
+                while start > 0
+                    && text.as_bytes()[start].is_ascii_alphanumeric()
+                    && text.as_bytes()[start - 1].is_ascii_alphanumeric()
+                {
+                    start -= 1;
+                }
+                let mut end = text[found.end..]
+                    .char_indices()
+                    .nth(100)
+                    .map(|(index, _)| found.end + index)
+                    .unwrap_or(text.len());
+                while end < text.len()
+                    && text.as_bytes()[end - 1].is_ascii_alphanumeric()
+                    && text.as_bytes()[end].is_ascii_alphanumeric()
+                {
+                    end += 1;
+                }
+                return format!(
+                    "{}{}{}",
+                    if start > 0 { "…" } else { "" },
+                    text[start..end].trim(),
+                    if end < text.len() { "…" } else { "" },
+                );
+            }
+        }
+    }
+    if !frame.transcript.trim().is_empty() {
+        frame.transcript.clone()
+    } else {
+        frame
+            .caption
+            .clone()
+            .filter(|caption| !caption.trim().is_empty())
+            .unwrap_or_else(|| "这张截图没有对应文字".into())
+    }
+}
+
+fn reader_outline(preview: &notes::Preview) -> Vec<(usize, String, Option<f64>)> {
+    let headings = preview
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            if let PreviewBlock::Heading { text, seconds, .. } = block {
+                Some((index, text.clone(), *seconds))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let topics = preview
+        .document
+        .as_ref()
+        .and_then(|document| document.summary.as_ref())
+        .map(|summary| {
+            summary
+                .outline
+                .iter()
+                .map(|item| (item.t, item.title.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    nav::content_outline(&headings, &topics)
+}
 /// Selectable paragraph text with word-level find highlights. Selection plumbing
 /// mirrors gpui_base::SelectableText (which accepts no highlight runs).
 struct ReaderText {
@@ -381,6 +669,14 @@ struct ReaderText {
     text: SharedString,
     styled_text: StyledText,
     document_order: u64,
+    search_target: Option<ReaderSearchTarget>,
+}
+
+struct ReaderSearchTarget {
+    block: usize,
+    byte: usize,
+    scroll: ScrollHandle,
+    positions: Rc<RefCell<nav::ReadingLayout>>,
 }
 impl ReaderText {
     fn new(
@@ -401,7 +697,13 @@ impl ReaderText {
             },
             text,
             document_order,
+            search_target: None,
         }
+    }
+
+    fn with_search_target(mut self, target: Option<ReaderSearchTarget>) -> Self {
+        self.search_target = target;
+        self
     }
 }
 impl IntoElement for ReaderText {
@@ -453,6 +755,17 @@ impl Element for ReaderText {
     ) -> Self::PrepaintState {
         self.styled_text
             .prepaint(global_id, inspector_id, bounds, &mut (), window, cx);
+        if let Some(target) = &self.search_target {
+            let layout = self.styled_text.layout();
+            if let Some(position) = layout.position_for_index(target.byte) {
+                target.positions.borrow_mut().record_search_line(
+                    target.block,
+                    target.byte,
+                    f32::from(position.y - target.scroll.bounds().top() - target.scroll.offset().y),
+                    f32::from(layout.line_height()),
+                );
+            }
+        }
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         handle.register(
             gpui_base::TextSelectionRegistration::new(hitbox.clone(), bounds)
@@ -547,6 +860,7 @@ fn paragraph(
     text: String,
     order: usize,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    search_target: Option<ReaderSearchTarget>,
 ) -> Stateful<Div> {
     let id = id.into();
     div()
@@ -556,9 +870,15 @@ fn paragraph(
         .text_size(TEXT_READER)
         .font_weight(FontWeight::NORMAL)
         .line_height(relative(1.7))
-        .child(ReaderText::new(id, text, order as u64, highlights))
+        .child(
+            ReaderText::new(id, text, order as u64, highlights).with_search_target(search_target),
+        )
 }
 impl Desktop {
+    pub(super) fn reader_viewer_open(&self) -> bool {
+        self.reader_ui.viewer.is_some()
+    }
+
     fn scroll_reader_page(&mut self, direction: f32, cx: &mut Context<Self>) {
         let step = self.reader_scroll.bounds().size.height * 0.85 * direction;
         let offset = self.reader_scroll.offset() + point(px(0.), step);
@@ -622,6 +942,7 @@ impl Desktop {
     pub fn save_reading_position(&mut self, cx: &mut Context<Self>) {
         if self.page != Page::Result
             || self.reading
+            || (self.result_tab == 1 && self.reader_ui.gallery_search_position.is_some())
             || self.reader_ui.restoring
             || self.reader_ui.pending_restore.is_some()
         {
@@ -649,6 +970,7 @@ impl Desktop {
     }
     pub fn restore_reading_position(&mut self, cx: &mut Context<Self>) {
         self.ensure_reader_data(cx);
+        self.reader_ui.pending_search = None;
         self.reader_ui.pending_restore = Some(
             self.reading_key()
                 .and_then(|key| self.workspace.as_ref()?.state.positions.get(&key))
@@ -696,17 +1018,22 @@ impl Desktop {
             return;
         };
         self.reader_ui.restoring = true;
+        let search = self.reader_ui.pending_search.take();
         let generation = self.reader_ui.restore_generation;
         let key = self.reading_key();
         cx.on_next_frame(window, move |this, _, cx| {
             if this.reader_ui.restore_generation != generation || this.reading_key() != key {
                 return;
             }
-            let target = px(restored_reader_offset(
-                &this.reader_ui.item_layout.borrow(),
-                this.position_index(&position),
-                &position,
-            ));
+            let positions = this.reader_ui.item_layout.borrow();
+            let target = search
+                .as_ref()
+                .and_then(|found| positions.search_offset(found.block, found.range.start))
+                .unwrap_or_else(|| {
+                    restored_reader_offset(&positions, this.position_index(&position), &position)
+                });
+            drop(positions);
+            let target = px(target);
             let maximum = this.reader_scroll.max_offset().y;
             this.reader_scroll
                 .set_offset(point(px(0.), target.max(-maximum).min(px(0.))));
@@ -734,9 +1061,11 @@ impl Desktop {
         self.reader_ui.issues.clear();
         self.reader_ui.source = None;
         self.reader_ui.source_available = false;
+        self.reader_ui.export_folder = None;
         self.reader_ui.offline_video = OfflineVideo::NotRequested;
         self.reader_ui.offline_opening = false;
         self.reader_ui.matches.clear();
+        self.reader_ui.gallery_search_position = None;
         self.reader_ui.find_open = false;
         self.reader_ui.info_open = false;
         self.reader_ui.processing_details_open = false;
@@ -802,6 +1131,7 @@ impl Desktop {
                 this.reader_ui.frames = data.frames;
                 this.reader_ui.versions = data.versions;
                 this.reader_ui.issues = data.issues;
+                this.reader_ui.export_folder = data.export_folder;
                 this.reader_ui.source = source;
                 this.reader_ui.source_available = source_available;
                 this.reader_ui.offline_video = offline_video;
@@ -923,37 +1253,6 @@ impl Desktop {
             }
         }
     }
-    fn reader_screenshot_retry(&self) -> Option<String> {
-        let manifest = self.preview.as_ref()?.course.manifest.as_ref()?;
-        if !matches!(
-            manifest.outcomes.screenshots.status,
-            course2md::artifact::Status::Failed | course2md::artifact::Status::Partial
-        ) {
-            return None;
-        }
-        self.workspace
-            .as_ref()?
-            .state
-            .tasks
-            .iter()
-            .find(|task| {
-                task.id == manifest.task_id
-                    && task.handled_by.is_none()
-                    && !matches!(
-                        task.state,
-                        workspace::TaskState::Running
-                            | workspace::TaskState::Pausing
-                            | workspace::TaskState::Queued
-                    )
-                    && !task
-                        .blocked
-                        .iter()
-                        .any(|blocked| blocked.reason == "uncertain")
-                    && task.artifact.as_ref()
-                        == self.preview.as_ref().map(|preview| &preview.course.dir)
-            })
-            .map(|task| task.id.clone())
-    }
     fn relocate_reader_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.reader_ui.source_loading {
             return;
@@ -1026,18 +1325,30 @@ impl Desktop {
         if !self.reader_ui.find_open {
             self.reader_ui.find_return_focus = window.focused(cx);
         }
-        self.reader_ui.find_open = true;
-        self.reader_ui.info_open = false;
-        self.reader_ui
-            .find
-            .update(cx, |input, cx| input.focus(window, cx));
-        self.update_reader_matches(cx);
+        let input = if self.result_tab == 0 {
+            self.reader_ui.find_open = true;
+            self.reader_ui.find.clone()
+        } else {
+            self.reader_ui.gallery_find.clone()
+        };
+        input.update(cx, |input, cx| input.focus(window, cx));
+        if self.result_tab == 0 {
+            self.update_reader_matches(cx);
+        }
         cx.notify();
     }
     fn close_reader_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reader_ui.find_open = false;
+        let input = if self.result_tab == 0 {
+            self.reader_ui.find.clone()
+        } else {
+            self.reader_ui.gallery_find.clone()
+        };
+        input.update(cx, |input, cx| input.set_value("", window, cx));
         if let Some(focus) = self.reader_ui.find_return_focus.take() {
             focus.focus(window, cx);
+        } else {
+            self.reader_ui.focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -1065,6 +1376,9 @@ impl Desktop {
         cx.notify();
     }
     fn move_reader_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.result_tab != 0 {
+            return;
+        }
         let count = self.reader_ui.matches.len();
         if count == 0 {
             return;
@@ -1083,8 +1397,10 @@ impl Desktop {
             })
             .unwrap_or(0.);
         self.jump_reader_block(found.block, fraction, cx);
+        self.reader_ui.pending_search = Some(found);
     }
     fn jump_reader_block(&mut self, index: usize, fraction: f32, cx: &mut Context<Self>) {
+        self.reader_ui.pending_search = None;
         if self.result_tab != 0 {
             self.save_reading_position(cx);
             self.result_tab = 0;
@@ -1223,6 +1539,10 @@ impl Desktop {
             return;
         }
         let version = course.dir.clone();
+        let Some(generation) = self.reader_ui.export_state.begin(version.clone()) else {
+            return;
+        };
+        self.exporting = true;
         let title = self.course_display_title(&course);
         let stem = title
             .chars()
@@ -1235,22 +1555,45 @@ impl Desktop {
         };
         let suggested = format!("{stem}.{extension}");
         let receiver = cx.prompt_for_new_path(&self.output(cx), Some(&suggested));
+        cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let path = match receiver.await {
                 Ok(Ok(Some(path))) => path,
-                Ok(Ok(None)) => return,
+                Ok(Ok(None)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.reader_ui.export_state.cancel(generation, &version) {
+                            this.exporting = false;
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
                 _ => {
                     let _ = this.update(cx, |this, cx| {
-                        this.message = Some("无法打开导出文件选择器，请重试。".into());
-                        cx.notify();
+                        if this.reader_ui.export_state.finish(
+                            generation,
+                            &version,
+                            ExportFeedback {
+                                title,
+                                format,
+                                result: Err("无法打开文件选择器，请重试。".into()),
+                            },
+                        ) {
+                            this.exporting = false;
+                            cx.notify();
+                        }
                     });
                     return;
                 }
             };
-            let _ = this.update(cx, |this, cx| {
-                this.exporting = true;
-                cx.notify();
-            });
+            if !this
+                .update(cx, |this, _| {
+                    this.reader_ui.export_state.is_pending(generation, &version)
+                })
+                .unwrap_or(false)
+            {
+                return;
+            }
             let target = path.clone();
             let source = version.clone();
             let exported = cx
@@ -1293,24 +1636,146 @@ impl Desktop {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let result = exported
+                    .map(|()| path.clone())
+                    .map_err(|error| format!("{error:#}。笔记正文仍可阅读。"));
+                let success = result.is_ok();
+                if !this.reader_ui.export_state.finish(
+                    generation,
+                    &version,
+                    ExportFeedback {
+                        title,
+                        format,
+                        result,
+                    },
+                ) {
+                    return;
+                }
                 this.exporting = false;
-                this.message = Some(match exported {
-                    Ok(()) => {
-                        this.reader_ui.exports.insert(version, path.clone());
-                        format!("已导出“{title}”到 {}", path.display())
-                    }
-                    Err(error) => format!("导出未完成：{error:#}。笔记正文仍可阅读。"),
-                });
+                if success {
+                    this.reader_ui.exports.insert(version, path);
+                }
                 cx.notify();
             });
         })
         .detach();
     }
+
+    pub(super) fn course_export_feedback(
+        &self,
+        course: &Course,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let feedback = self
+            .reader_ui
+            .export_state
+            .feedback
+            .get(&course.dir)?
+            .clone();
+        let id = format!("export-feedback:{}", course.dir.display());
+        let source = course.dir.clone();
+        let dismiss = quiet(SharedString::from(format!("{id}:dismiss")))
+            .icon(icons::close())
+            .w(CONTROL_HEIGHT)
+            .px_0()
+            .accessibility_label("关闭这份笔记的导出提示")
+            .tooltip("关闭提示")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.reader_ui.export_state.feedback.remove(&source);
+                cx.notify();
+            }));
+        Some(match feedback.result {
+            Ok(path) => {
+                let label = exported_file_label(&path);
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        icons::check()
+                            .size(rems(18. / 14.))
+                            .flex_shrink_0()
+                            .text_color(color(SUCCESS)),
+                    )
+                    .child(
+                        theme::accessible_text(SharedString::from(id.clone()), label.clone())
+                            .aria_label(format!("《{}》{label}", feedback.title))
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(TEXT_AUX)
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(color(GRAY)),
+                    )
+                    .child(
+                        quiet(SharedString::from(format!("{id}:reveal")))
+                            .icon(icons::folder_open())
+                            .label("打开导出位置")
+                            .tooltip(format!("显示《{}》的导出文件", feedback.title))
+                            .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                    )
+                    .child(dismiss)
+            }
+            Err(error) => {
+                let retry = course.clone();
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        theme::accessible_text(
+                            SharedString::from(id.clone()),
+                            format!("导出未完成：{error}"),
+                        )
+                        .text_size(TEXT_AUX)
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(color(DANGER))
+                        .whitespace_normal(),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                outline_pill(SharedString::from(format!("{id}:retry")))
+                                    .icon(icons::refresh())
+                                    .label("重试导出")
+                                    .disabled(self.exporting)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.export_course(
+                                            retry.clone(),
+                                            feedback.format,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(dismiss),
+                    )
+            }
+        })
+    }
+
     fn select_reader_view(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.result_tab != index {
             self.save_reading_position(cx);
             self.result_tab = index;
-            self.restore_reading_position(cx);
+            if index == 1
+                && !self
+                    .reader_ui
+                    .gallery_find
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .is_empty()
+            {
+                self.reader_ui.pending_restore = None;
+                self.reader_scroll.set_offset(point(px(0.), px(0.)));
+            } else {
+                self.restore_reading_position(cx);
+            }
         }
         self.reader_ui.view_focus[index].focus(window, cx);
         cx.notify();
@@ -1336,6 +1801,9 @@ impl Desktop {
             self.reader_ui.clear_find = false;
             self.reader_ui
                 .find
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.reader_ui
+                .gallery_find
                 .update(cx, |input, cx| input.set_value("", window, cx));
         }
         let layout = (
@@ -1364,6 +1832,7 @@ impl Desktop {
         let toc_fits_beside = reader_width >= rem_size * 56. + 24.;
         let available_height = (layout.1 - rem_size * (40. / 14.) - 64.).max(0.);
         let compact = reader_width < rem_size * 60. || available_height < rem_size * 36.;
+        let short_reader = available_height < rem_size * 24.;
         let root = v_flex()
             .id("reader-page")
             .track_focus(&self.reader_ui.focus)
@@ -1385,8 +1854,14 @@ impl Desktop {
                 this.reader_scroll.scroll_to_bottom();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &CloseFind, window, cx| {
-                if this.reader_ui.find_open {
+            .on_action(cx.listener(move |this, _: &CloseFind, window, cx| {
+                if !toc_fits_beside && this.reader_ui.toc_open == Some(true) {
+                    this.reader_ui.toc_open = Some(false);
+                    cx.notify();
+                } else if (this.result_tab == 0 && this.reader_ui.find_open)
+                    || (this.result_tab == 1
+                        && !this.reader_ui.gallery_find.read(cx).value().is_empty())
+                {
                     this.close_reader_find(window, cx);
                 } else {
                     cx.propagate();
@@ -1399,8 +1874,8 @@ impl Desktop {
             .mx_auto()
             .gap_3()
             .when(compact, |view| view.gap_2());
-        // Ordinary windows retain the full header. In a compact window the
-        // title and tools stay visible; only explicitly opened details scroll.
+        // Short windows reserve fixed space for reading controls. Document
+        // identity scrolls with the content instead of consuming a second header.
         let controls_scroll = self.reader_ui.controls_scroll.clone();
         let reveal = |id: &'static str, child: AnyElement| {
             if compact {
@@ -1447,63 +1922,68 @@ impl Desktop {
                 .find(|(time, _)| (time - seconds).abs() < 1.5)
                 .map(|(_, title)| title.clone())
         };
-        let headings: Vec<(usize, String, Option<f64>)> = preview
-            .blocks
-            .iter()
-            .enumerate()
-            .filter_map(|(index, block)| {
-                if let PreviewBlock::Heading { text, seconds, .. } = block {
-                    Some((
-                        index,
-                        chapter_title(*seconds).unwrap_or_else(|| text.clone()),
-                        *seconds,
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let headings = reader_outline(&preview);
         let return_label = match self.result_origin {
             Page::New => "工作台",
             Page::Task => "任务",
             Page::Settings => "设置",
             _ => "我的笔记",
         };
-        page = page.child(
-            v_flex()
-                .w_full()
+        let title = theme::accessible_text("reader-title", preview.course.title.clone())
+            .role(Role::Heading)
+            .when(!short_reader, |title| title.flex_1())
+            .when(short_reader, |title| title.flex_shrink_0())
+            .min_w_0()
+            .whitespace_normal()
+            .when(compact && !short_reader, |title| {
+                title.whitespace_nowrap().text_ellipsis()
+            })
+            .text_size(if compact { TEXT_TITLE } else { TEXT_DISPLAY })
+            .font_weight(FontWeight::SEMIBOLD);
+        let title = if compact && !short_reader {
+            control("reader-title-details")
+                .ghost()
+                .flex_1()
                 .min_w_0()
-                .gap_1()
-                .items_start()
-                .child(reveal(
-                    "reveal-reader-back",
-                    (quiet("reader-back")
-                        .icon(IconName::ArrowLeft)
-                        .label(format!("返回{return_label}"))
-                        .accessibility_label(format!("返回{return_label}"))
-                        .tooltip(format!("返回{return_label}"))
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.navigate(this.result_origin, cx)),
-                        ))
-                    .into_any_element(),
-                ))
-                .child(
-                    theme::accessible_text("reader-title", preview.course.title.clone())
-                        .role(Role::Heading)
-                        .w_full()
-                        .min_w_0()
-                        .whitespace_normal()
-                        .when(!compact, |title| title.text_size(TEXT_DISPLAY))
-                        .when(compact, |title| {
-                            title
-                                .text_ellipsis()
-                                .line_clamp(2)
-                                .line_height(relative(1.3))
-                                .text_size(TEXT_TITLE)
-                        })
-                        .font_weight(FontWeight::SEMIBOLD),
-                ),
+                .h_auto()
+                .p_0()
+                .justify_start()
+                .tooltip(preview.course.title.clone())
+                .accessibility_label("查看完整标题与笔记详情")
+                .child(title)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.reader_ui.info_open = !this.reader_ui.info_open;
+                    cx.notify();
+                }))
+                .into_any_element()
+        } else {
+            title.into_any_element()
+        };
+        let back = reveal(
+            "reveal-reader-back",
+            quiet("reader-back")
+                .icon(IconName::ArrowLeft)
+                .w(CONTROL_HEIGHT)
+                .px_0()
+                .accessibility_label(format!("返回{return_label}"))
+                .tooltip(format!("返回{return_label}"))
+                .on_click(cx.listener(|this, _, _, cx| this.navigate(this.result_origin, cx)))
+                .into_any_element(),
         );
+        let (short_back, scrolling_title) = if short_reader {
+            (Some(back), Some(title))
+        } else {
+            page = page.child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_start()
+                    .gap_3()
+                    .child(back)
+                    .child(title),
+            );
+            (None, None)
+        };
         // Meta line 1: 作者 · 时长 · 平台 BV 号 · 打开原视频；无数据的字段省略。
         let mut facts: Vec<String> = Vec::new();
         for (label, value) in &preview.metadata {
@@ -1643,7 +2123,6 @@ impl Desktop {
             }
             OfflineVideo::NotRequested => {}
         }
-        let mut information_action = None;
         // A single version needs no selector. Keep its revision and date in
         // generation information; multiple versions retain a visible choice.
         if let Some(manifest) = &preview.course.manifest {
@@ -1688,45 +2167,6 @@ impl Desktop {
                 ));
             }
         }
-        if preview.course.manifest.is_some() || self.reader_source().is_some() || compact {
-            let information = reveal(
-                "reveal-reader-information",
-                (quiet("reader-information")
-                    .icon(IconName::Info)
-                    .accessibility_label(if self.reader_ui.info_open {
-                        "收起生成信息"
-                    } else {
-                        "生成信息"
-                    })
-                    .tooltip(if self.reader_ui.info_open {
-                        "收起生成信息"
-                    } else {
-                        "生成信息"
-                    })
-                    .when(!compact, |button| {
-                        button.label(if self.reader_ui.info_open {
-                            "收起生成信息"
-                        } else {
-                            "生成信息"
-                        })
-                    })
-                    .when(compact, |button| button.w(CONTROL_HEIGHT).px_0())
-                    .min_h(rems(1.6))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if compact && !this.reader_ui.info_open && this.reader_ui.find_open {
-                            this.close_reader_find(window, cx);
-                        }
-                        this.reader_ui.info_open = !this.reader_ui.info_open;
-                        cx.notify();
-                    })))
-                .into_any_element(),
-            );
-            if compact {
-                information_action = Some(information);
-            } else {
-                meta_facts = meta_facts.child(information);
-            }
-        }
         let mut compact_metadata = None;
         if !facts.is_empty()
             || self.reader_source().is_some()
@@ -1739,202 +2179,337 @@ impl Desktop {
                 page = page.child(meta_facts);
             }
         }
-        let mut toolbar = h_flex().gap_2().flex_wrap().items_center().child(
-            SingleChoiceGroup::new("reader-tabs", "阅读视图")
-                .tabs()
-                .options([("note", "笔记"), ("images", "截图")])
-                .when(!compact, |choices| {
-                    choices
+        let note_query = self.reader_ui.find.read(cx).value().to_string();
+        let gallery_query = self.reader_ui.gallery_find.read(cx).value().to_string();
+        let gallery_indices = matching_frames(&self.reader_ui.frames, &gallery_query);
+        let reading_note = self.result_tab == 0;
+        let active_query = if reading_note {
+            &note_query
+        } else {
+            &gallery_query
+        };
+        let input = if reading_note {
+            self.reader_ui.find.clone()
+        } else {
+            self.reader_ui.gallery_find.clone()
+        };
+        let mut search = h_flex()
+            .min_w_0()
+            .flex_1()
+            .when(!short_reader, |row| row.flex_basis(rems(18.)))
+            .gap_1()
+            .items_center()
+            .child(
+                div().flex_1().min_w_0().child(
+                    text_input(&input)
+                        .w_full()
+                        .aria_label(if reading_note {
+                            "查找笔记内容"
+                        } else {
+                            "搜索截图对应文字"
+                        })
+                        .prefix(
+                            icons::search()
+                                .size(rems(18. / 14.))
+                                .text_color(color(GRAY)),
+                        )
+                        .cleanable(true),
+                ),
+            );
+        let mut short_matches = None;
+        if !active_query.trim().is_empty() {
+            let count = if reading_note {
+                self.reader_ui.matches.len()
+            } else {
+                gallery_indices.len()
+            };
+            let mut matches = h_flex().gap_1().items_center().child(
+                theme::accessible_text(
+                    "find-status",
+                    if reading_note && count > 0 {
+                        format!("{}/{count}", self.reader_ui.match_index + 1)
+                    } else if reading_note {
+                        "无匹配".into()
+                    } else {
+                        format!("{count} 张")
+                    },
+                )
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_size(TEXT_AUX)
+                .text_color(color(GRAY)),
+            );
+            if reading_note {
+                for (id, label, icon, delta) in [
+                    ("previous-match", "上一处", IconName::ArrowUp, -1),
+                    ("next-match", "下一处", IconName::ArrowDown, 1),
+                ] {
+                    matches =
+                        matches.child(
+                            quiet(id)
+                                .icon(icon)
+                                .w(CONTROL_HEIGHT)
+                                .px_0()
+                                .accessibility_label(label)
+                                .tooltip(label)
+                                .disabled(count == 0)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.move_reader_match(delta, cx)
+                                })),
+                        );
+                }
+            }
+            if short_reader {
+                short_matches = Some(matches.w_full().justify_end());
+            } else {
+                search = search.child(matches);
+            }
+        }
+        let mut toolbar = h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .when(!compact, |row| row.flex_wrap())
+            .items_center()
+            .children(short_back)
+            .when(!short_reader, |row| {
+                row.child(
+                    SingleChoiceGroup::new("reader-tabs", "阅读视图")
+                        .tabs()
+                        .options([("note", "笔记"), ("images", "截图")])
                         .icon("note", icons::article())
                         .icon("images", icons::image())
-                })
-                .focus_handles(self.reader_ui.view_focus.iter().cloned())
-                .selected(if self.result_tab == 0 {
-                    "note"
-                } else {
-                    "images"
-                })
-                .on_change(cx.listener(|this, selected: &SharedString, window, cx| {
-                    this.select_reader_view(usize::from(selected.as_ref() == "images"), window, cx);
-                })),
-        );
-        toolbar = toolbar.child(div().flex_1());
-        toolbar = toolbar.child(reveal(
-            "reveal-find-note",
-            (quiet("find-note")
-                .icon(icons::search())
-                .when(!compact, |button| button.label("查找"))
-                .when(compact, |button| button.w(CONTROL_HEIGHT).px_0())
-                .tooltip("查找 · Command F")
-                .accessibility_label("在笔记中查找，Command F")
-                .on_click(cx.listener(|this, _, window, cx| this.open_reader_find(window, cx))))
-            .into_any_element(),
-        ));
-        if !headings.is_empty() && self.result_tab == 0 {
+                        .focus_handles(self.reader_ui.view_focus.iter().cloned())
+                        .selected(if reading_note { "note" } else { "images" })
+                        .on_change(cx.listener(|this, selected: &SharedString, window, cx| {
+                            this.select_reader_view(
+                                usize::from(selected.as_ref() == "images"),
+                                window,
+                                cx,
+                            );
+                        })),
+                )
+            });
+        let mut search_row = h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_2()
+            .items_center()
+            .child(search);
+        if !headings.is_empty() && reading_note {
             let toc_on = self.reader_ui.toc_open.unwrap_or(toc_fits_beside);
-            toolbar = toolbar.child(reveal(
-                "reveal-note-contents",
-                div()
-                    .rounded(RADIUS_PILL)
+            search_row = search_row.child(
+                quiet("note-contents")
+                    .icon(icons::toc())
+                    .label("目录")
                     .bg(color(if toc_on { ACCENT_SOFT } else { SURFACE }))
-                    .child(
-                        control("note-contents")
-                            .ghost()
-                            .px(px(12.))
-                            .border_1()
-                            .border_color(color(CONTROL))
-                            .when(toc_on, |button| button.text_color(color(ACCENT_STRONG)))
-                            .accessibility_label(if toc_on {
-                                "目录：开"
-                            } else {
-                                "目录：关"
-                            })
-                            .icon(icons::toc())
-                            .when(!compact, |button| button.label("目录"))
-                            .when(compact, |button| button.w(CONTROL_HEIGHT).px_0())
-                            .tooltip("目录")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.reader_ui.pending_restore = this.capture_reading_position();
-                                this.reader_ui.restore_generation += 1;
-                                this.reader_ui.toc_open = Some(!toc_on);
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element(),
-            ));
+                    .when(toc_on, |button| button.text_color(color(ACCENT_STRONG)))
+                    .accessibility_label(if toc_on {
+                        "收起目录"
+                    } else {
+                        "打开目录"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.reader_ui.pending_restore = this.capture_reading_position();
+                        this.reader_ui.restore_generation += 1;
+                        this.reader_ui.toc_open = Some(!toc_on);
+                        cx.notify();
+                    })),
+            );
         }
-        let copy_weak = cx.entity().downgrade();
-        toolbar = toolbar.child(reveal(
-            "reveal-copy-note",
-            (outline_pill("copy-note")
-                .icon(icons::content_copy())
-                .accessibility_label("复制笔记")
-                .tooltip("复制笔记")
-                .when(!compact, |button| {
-                    button
-                        .label("复制纯文本")
-                        .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
-                })
-                .when(compact, |button| button.w(CONTROL_HEIGHT).px_0())
-                .dropdown_menu(move |menu, _, _| {
-                    let plain = copy_weak.clone();
-                    let markdown = copy_weak.clone();
-                    menu.item(
-                        PopupMenuItem::new("复制纯文本")
-                            .icon(icons::content_copy())
-                            .on_click(move |_, _, cx| {
-                                let _ = plain.update(cx, |this, cx| {
-                                    if let Some(preview) = &this.preview {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            preview.plain_text.clone(),
-                                        ));
-                                        this.message = Some("已复制纯文本，不含图片。".into());
-                                        cx.notify();
-                                    }
-                                });
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("复制 Markdown 文本")
-                            .icon(icons::article())
-                            .on_click(move |_, _, cx| {
-                                let _ = markdown.update(cx, |this, cx| {
-                                    if let Some(preview) = &this.preview {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            preview.markdown_text.clone(),
-                                        ));
-                                        this.message =
-                                            Some("已复制 Markdown 文本，不含图片引用。".into());
-                                        cx.notify();
-                                    }
-                                });
-                            }),
-                    )
-                }))
-            .into_any_element(),
-        ));
-        let export_weak = cx.entity().downgrade();
-        toolbar = toolbar.child(reveal(
-            "reveal-export-note",
-            (outline_pill("export-note")
-                .icon(icons::download())
-                .accessibility_label(if self.exporting {
-                    "正在导出…"
-                } else {
-                    "导出"
-                })
-                .tooltip("导出")
-                .when(!compact, |button| {
-                    button
-                        .label(if self.exporting {
-                            "正在导出…"
+        let (compact_search, short_search) = if short_reader {
+            (None, Some(search_row))
+        } else if compact {
+            toolbar = toolbar.child(div().flex_1());
+            (Some(search_row.w_full()), None)
+        } else {
+            toolbar = toolbar.child(search_row);
+            (None, None)
+        };
+        let output_weak = cx.entity().downgrade();
+        let exporting = self.exporting;
+        let exporting_current = self
+            .reader_ui
+            .export_state
+            .pending
+            .as_ref()
+            .is_some_and(|(_, source)| *source == preview.course.dir);
+        let export_course = preview.course.clone();
+        let export_folder = self.reader_ui.export_folder.clone();
+        if !short_reader {
+            toolbar = toolbar.child(
+                outline_pill("export-note")
+                    .icon(icons::download())
+                    .label(if exporting_current {
+                        "正在导出…"
+                    } else {
+                        "导出"
+                    })
+                    .tooltip("复制或导出整份笔记")
+                    .accessibility_label("复制或导出整份笔记")
+                    .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
+                    .loading(exporting_current)
+                    .disabled(exporting)
+                    .dropdown_menu(move |menu, _, _| {
+                        reader_export_items(
+                            menu,
+                            output_weak.clone(),
+                            export_course.clone(),
+                            export_folder.clone(),
+                            exporting,
+                        )
+                    }),
+            );
+        }
+        let more_weak = cx.weak_entity();
+        let original = self.reader_source();
+        let has_source = original.is_some();
+        let missing_local = matches!(original, Some(nav::SourceTarget::Local(_)))
+            && !self.reader_ui.source_available;
+        let exported = self.reader_ui.exports.get(&preview.course.dir).cloned();
+        let short_export_course = preview.course.clone();
+        let short_export_folder = self.reader_ui.export_folder.clone();
+        toolbar = toolbar
+            .child(
+                quiet("reader-more")
+                    .when(short_reader, |button| {
+                        button.track_focus(&self.reader_ui.menu_focus)
+                    })
+                    .icon(if short_reader {
+                        if reading_note {
+                            icons::article()
                         } else {
-                            "导出"
-                        })
-                        .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
-                })
-                .when(compact, |button| button.w(CONTROL_HEIGHT).px_0())
-                .loading(self.exporting)
-                .disabled(self.exporting || self.preview.is_none())
-                .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
-                    for (format, label) in [
-                        (course2md::config::OutputFormat::Md, "Markdown 包（含图片）"),
-                        (
-                            course2md::config::OutputFormat::Html,
-                            "网页文件（可独立阅读）",
-                        ),
-                        (
-                            course2md::config::OutputFormat::Json,
-                            "JSON 数据（不含图片文件）",
-                        ),
-                    ] {
-                        let weak = export_weak.clone();
-                        menu =
-                            menu.item(PopupMenuItem::new(label).icon(icons::download()).on_click(
-                                move |_, window, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.export_note(format, window, cx)
+                            icons::image()
+                        }
+                    } else {
+                        icons::ellipsis()
+                    })
+                    .label(if short_reader {
+                        if reading_note { "笔记" } else { "截图" }
+                    } else {
+                        "更多"
+                    })
+                    .when(short_reader, |button| {
+                        button.child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
+                    })
+                    .tooltip(if short_reader {
+                        "切换视图、导出与笔记详情"
+                    } else {
+                        "更多笔记操作"
+                    })
+                    .accessibility_label(if short_reader {
+                        "阅读视图与笔记操作"
+                    } else {
+                        "更多笔记操作"
+                    })
+                    .dropdown_menu(move |menu, window, cx| {
+                        let details = more_weak.clone();
+                        let source = more_weak.clone();
+                        let files = more_weak.clone();
+                        let mut menu = menu;
+                        if short_reader {
+                            for (index, label, icon) in
+                                [(0, "笔记", icons::article()), (1, "截图", icons::image())]
+                            {
+                                let weak = more_weak.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(label)
+                                        .icon(icon)
+                                        .checked((index == 0) == reading_note)
+                                        .on_click(move |_, window, cx| {
+                                            let _ = weak.update(cx, |this, cx| {
+                                                this.select_reader_view(index, window, cx);
+                                                this.reader_ui.menu_focus.focus(window, cx);
+                                            });
+                                        }),
+                                );
+                            }
+                            let output = more_weak.clone();
+                            let course = short_export_course.clone();
+                            let folder = short_export_folder.clone();
+                            menu = menu
+                                .separator()
+                                .submenu_with_icon(
+                                    Some(icons::download()),
+                                    "复制与导出",
+                                    window,
+                                    cx,
+                                    move |menu, _, _| {
+                                        reader_export_items(
+                                            menu,
+                                            output.clone(),
+                                            course.clone(),
+                                            folder.clone(),
+                                            exporting,
+                                        )
+                                    },
+                                )
+                                .separator();
+                        }
+                        menu = menu
+                            .item(PopupMenuItem::new("笔记详情").icon(icons::info()).on_click(
+                                move |_, _, cx| {
+                                    let _ = details.update(cx, |this, cx| {
+                                        this.reader_ui.info_open = !this.reader_ui.info_open;
+                                        cx.notify();
                                     });
                                 },
-                            ));
-                    }
-                    menu
-                }))
-            .into_any_element(),
-        ));
-        let files_action = reveal(
-            "reveal-note-files",
-            (control("note-files")
-                .ghost()
-                .icon(IconName::FolderOpen)
-                .label("在文件夹中显示")
-                .accessibility_label("在文件夹中显示这份笔记")
-                .tooltip("显示笔记文件")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(preview) = &this.preview {
-                        cx.reveal_path(&preview.course.dir);
-                    }
-                })))
-            .into_any_element(),
-        );
-        if compact {
-            compact_metadata = Some(
-                v_flex()
-                    .gap_2()
-                    .children(compact_metadata)
-                    .child(files_action)
-                    .into_any_element(),
-            );
-        } else {
-            toolbar = toolbar.child(files_action);
-        }
-        toolbar = toolbar.children(information_action);
+                            ))
+                            .when(has_source, |menu| {
+                                menu.item(
+                                    PopupMenuItem::new(if missing_local {
+                                        "定位原视频…"
+                                    } else {
+                                        "打开原视频"
+                                    })
+                                    .icon(icons::movie())
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            let _ = source.update(cx, |this, cx| {
+                                                if missing_local {
+                                                    this.relocate_reader_source(window, cx);
+                                                } else {
+                                                    this.open_reader_source(None, cx);
+                                                }
+                                            });
+                                        },
+                                    ),
+                                )
+                            })
+                            .separator()
+                            .item(
+                                PopupMenuItem::new("显示笔记保存位置")
+                                    .icon(icons::folder_open())
+                                    .on_click(move |_, _, cx| {
+                                        let _ = files.update(cx, |this, cx| {
+                                            if let Some(preview) = &this.preview {
+                                                cx.reveal_path(&preview.course.dir);
+                                            }
+                                        });
+                                    }),
+                            );
+                        if let Some(path) = exported.clone() {
+                            menu = menu.item(
+                                PopupMenuItem::new("显示上次导出的文件")
+                                    .icon(icons::folder_open())
+                                    .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .children(short_search);
         page = page.child(
-            toolbar
-                .when(!compact, |toolbar| toolbar.py_2())
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .py_2()
                 .border_b_1()
-                .border_color(color(HAIRLINE)),
+                .border_color(color(HAIRLINE))
+                .child(toolbar)
+                .children(compact_search)
+                .children(short_matches),
         );
         let (fixed_header, mut page) = if compact {
             (
@@ -1953,6 +2528,7 @@ impl Desktop {
         } else {
             (None, page)
         };
+        page = page.children(self.course_export_feedback(&preview.course, cx));
         let reveal = |id: &'static str, child: AnyElement| {
             crate::focus_scroll::RevealFocus::new(id, child, controls_scroll.clone()).inline()
         };
@@ -1970,31 +2546,12 @@ impl Desktop {
                 cx,
             ));
         }
-        let mut details = Vec::new();
+        let mut details = vec![("标题", icons::article(), preview.course.title.clone())];
         let local_source = self.reader_source().and_then(|source| match source {
             nav::SourceTarget::Local(path) => Some(path),
             _ => None,
         });
         if let Some(manifest) = &preview.course.manifest {
-            for (name, icon, outcome) in [
-                ("文字", icons::subtitles(), &manifest.outcomes.transcript),
-                ("截图", icons::image(), &manifest.outcomes.screenshots),
-                (
-                    "AI 校对",
-                    icons::auto_fix(),
-                    &manifest.outcomes.proofreading,
-                ),
-                ("摘要", icons::article(), &manifest.outcomes.summary),
-            ] {
-                use course2md::artifact::Status;
-                let value = match outcome.status {
-                    Status::NotRequested => "未使用",
-                    Status::Succeeded => "已完成",
-                    Status::Partial => "部分完成",
-                    Status::Failed => "未完成",
-                };
-                details.push((name, icon, value.to_owned()));
-            }
             let stamp = nav::timestamp_local(manifest.created_at_ms);
             let date = stamp.get(..10).unwrap_or(&stamp);
             details.push((
@@ -2041,9 +2598,6 @@ impl Desktop {
                         task.plan.config.llm.model.clone(),
                     ));
                 }
-            }
-            if !manifest.source_id.is_empty() {
-                details.push(("来源身份", icons::code(), manifest.source_id.clone()));
             }
         }
         let information_panel = if !details.is_empty() || compact_metadata.is_some() {
@@ -2125,7 +2679,7 @@ impl Desktop {
                             .gap_2()
                             .child(semantic_label(
                                 "reader-information-title",
-                                "生成信息",
+                                "笔记详情",
                                 Icon::new(IconName::Info),
                             ))
                             .child(div().flex_1())
@@ -2133,7 +2687,7 @@ impl Desktop {
                                 quiet("collapse-reader-information")
                                     .icon(IconName::ChevronUp)
                                     .label("收起")
-                                    .accessibility_label("收起生成信息")
+                                    .accessibility_label("收起笔记详情")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.reader_ui.info_open = false;
                                         this.reader_ui.focus.focus(window, cx);
@@ -2210,142 +2764,6 @@ impl Desktop {
                 ));
             }
         }
-        let mut fixed_find = None;
-        if self.reader_ui.find_open {
-            let reveal_find = |id: &'static str, child: AnyElement| {
-                if compact {
-                    child
-                } else {
-                    reveal(id, child).into_any_element()
-                }
-            };
-            let query = self.reader_ui.find.read(cx).value().to_string();
-            let count = self.reader_ui.matches.len();
-            let status = if query.trim().is_empty() {
-                None
-            } else if count == 0 {
-                Some("未找到匹配内容".into())
-            } else {
-                Some(format!(
-                    "第 {} 处，共 {count} 处",
-                    self.reader_ui.match_index + 1
-                ))
-            };
-            let mut find_panel = v_flex()
-                .w_full()
-                .min_w_0()
-                .flex_shrink_0()
-                .gap_2()
-                .p_3()
-                .bg(color(INSET))
-                .rounded(RADIUS_CARD)
-                .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .flex_shrink_0()
-                        .items_center()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            div().min_w(rems(12.)).flex_1().child(reveal_find(
-                                "reveal-reader-find",
-                                text_input(&self.reader_ui.find)
-                                    .aria_label("在这份笔记中查找")
-                                    .w_full()
-                                    .into_any_element(),
-                            )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(reveal_find(
-                                    "reveal-previous-match",
-                                    quiet("previous-match")
-                                        .icon(IconName::ArrowUp)
-                                        .w(CONTROL_HEIGHT)
-                                        .px_0()
-                                        .accessibility_label("上一处")
-                                        .tooltip("上一处")
-                                        .disabled(count == 0)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.move_reader_match(-1, cx)
-                                        }))
-                                        .into_any_element(),
-                                ))
-                                .child(reveal_find(
-                                    "reveal-next-match",
-                                    quiet("next-match")
-                                        .icon(IconName::ArrowDown)
-                                        .w(CONTROL_HEIGHT)
-                                        .px_0()
-                                        .accessibility_label("下一处")
-                                        .tooltip("下一处")
-                                        .disabled(count == 0)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.move_reader_match(1, cx)
-                                        }))
-                                        .into_any_element(),
-                                ))
-                                .child(reveal_find(
-                                    "reveal-close-find",
-                                    quiet("close-find")
-                                        .icon(IconName::Close)
-                                        .w(CONTROL_HEIGHT)
-                                        .px_0()
-                                        .accessibility_label("关闭查找")
-                                        .tooltip("关闭查找")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_reader_find(window, cx)
-                                        }))
-                                        .into_any_element(),
-                                )),
-                        ),
-                )
-                .when_some(status, |panel, status: String| {
-                    panel.child(
-                        theme::accessible_text("find-status", status)
-                            .flex_shrink_0()
-                            .text_size(TEXT_AUX)
-                            .text_color(color(GRAY)),
-                    )
-                });
-            if let Some(found) = self
-                .reader_ui
-                .matches
-                .get(self.reader_ui.match_index)
-                .filter(|_| !query.trim().is_empty() && !compact)
-            {
-                if let Some(text) = preview.blocks.get(found.block).and_then(block_text) {
-                    let before = text[..found.range.start]
-                        .chars()
-                        .rev()
-                        .take(32)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<String>();
-                    let after = text[found.range.end..].chars().take(64).collect::<String>();
-                    find_panel = find_panel.child(
-                        theme::accessible_text(
-                            "find-excerpt",
-                            format!(
-                                "匹配内容：{before}【{}】{after}",
-                                &text[found.range.clone()]
-                            ),
-                        )
-                        .text_sm(),
-                    );
-                }
-            }
-            let find = crate::motion::enter("reader-find-panel", find_panel, cx);
-            if compact {
-                fixed_find = Some(find);
-            } else {
-                page = page.child(find);
-            }
-        }
         if let Some(notice) = processing_notice(&preview.processing_issues) {
             let mut problem = v_flex()
                 .gap_3()
@@ -2377,9 +2795,89 @@ impl Desktop {
                 });
             let mut actions = h_flex().gap_2().flex_wrap();
             if let Some(id) = task_id {
+                let task = self
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.state.tasks.iter().find(|task| task.id == id));
+                let requires_repair =
+                    task.is_some_and(crate::task_ui::task_requires_service_repair);
+                let can_retry = task.is_some_and(|task| {
+                    task.handled_by.is_none()
+                        && !matches!(
+                            task.state,
+                            workspace::TaskState::Running
+                                | workspace::TaskState::Pausing
+                                | workspace::TaskState::Queued
+                                | workspace::TaskState::Uncertain
+                        )
+                        && !task
+                            .blocked
+                            .iter()
+                            .any(|blocked| blocked.reason == "uncertain")
+                        && task.artifact.as_ref() == Some(&preview.course.dir)
+                });
+                let components = preview
+                    .processing_issues
+                    .iter()
+                    .filter_map(|issue| match issue.stage {
+                        notes::ProcessingStage::Screenshots => Some("screenshots".to_owned()),
+                        notes::ProcessingStage::Proofreading if !requires_repair => {
+                            Some("proofreading".to_owned())
+                        }
+                        notes::ProcessingStage::Summary if !requires_repair => {
+                            Some("summary".to_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if can_retry && !components.is_empty() {
+                    let retry = id.clone();
+                    let label = if components.len() > 1 {
+                        "补全未完成部分"
+                    } else {
+                        match components[0].as_str() {
+                            "screenshots" => "补生成截图",
+                            "proofreading" => "重试 AI 校对",
+                            _ => "补生成摘要",
+                        }
+                    };
+                    actions = actions.child(
+                        outline_pill("reader-retry-incomplete")
+                            .icon(icons::refresh())
+                            .label(label)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.save_reading_position(cx);
+                                this.reprocess_task(
+                                    retry.clone(),
+                                    components.clone(),
+                                    Vec::new(),
+                                    cx,
+                                );
+                            })),
+                    );
+                }
+                if can_retry
+                    && preview.processing_issues.iter().any(|issue| {
+                        matches!(
+                            issue.stage,
+                            notes::ProcessingStage::Proofreading | notes::ProcessingStage::Summary
+                        )
+                    })
+                {
+                    let repair = id.clone();
+                    actions = actions.child(
+                        outline_pill("reader-repair-ai")
+                            .icon(icons::settings())
+                            .label("修复 AI 服务并补做")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.save_reading_position(cx);
+                                this.repair_task_service(repair.clone(), window, cx);
+                            })),
+                    );
+                }
                 actions = actions.child(reveal(
                     "reveal-reader-view-incomplete-task",
-                    (outline_pill("reader-view-incomplete-task")
+                    (quiet("reader-view-incomplete-task")
                         .icon(icons::task())
                         .label("查看任务")
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2516,40 +3014,6 @@ impl Desktop {
                 cx,
             ));
         }
-        if let Some(task) = self.reader_screenshot_retry() {
-            page = page.child(reveal(
-                "reveal-reader-retry-screenshots",
-                (outline_pill("reader-retry-screenshots")
-                    .icon(icons::image())
-                    .label("仅补截图")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.save_reading_position(cx);
-                        this.reprocess_task(
-                            task.clone(),
-                            vec!["screenshots".into()],
-                            Vec::new(),
-                            cx,
-                        );
-                    })))
-                .into_any_element(),
-            ));
-        }
-        if let Some(path) = self.reader_ui.exports.get(&preview.course.dir).cloned() {
-            let label = format!(
-                "已导出：{}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-            page = page.child(reveal(
-                "reveal-reveal-reader-export",
-                (control("reveal-reader-export")
-                    .icon(IconName::FolderOpen)
-                    .ghost()
-                    .label(label)
-                    .accessibility_label(format!("在访达中显示导出文件：{}", path.display()))
-                    .on_click(move |_, _, cx| cx.reveal_path(&path)))
-                .into_any_element(),
-            ));
-        }
         // Find highlights group per block; the current match reads stronger.
         let mut find_marks: BTreeMap<usize, Vec<(Range<usize>, bool)>> = BTreeMap::new();
         if self.reader_ui.find_open {
@@ -2601,6 +3065,21 @@ impl Desktop {
         self.reader_ui.item_layout = Rc::default();
         let item_layout = self.reader_ui.item_layout.clone();
         let measured_scroll = self.reader_scroll.clone();
+        let current_match = self
+            .reader_ui
+            .matches
+            .get(self.reader_ui.match_index)
+            .filter(|_| self.reader_ui.find_open);
+        let search_target = |index: usize| {
+            current_match
+                .filter(|found| found.block == index)
+                .map(|found| ReaderSearchTarget {
+                    block: index,
+                    byte: found.range.start,
+                    scroll: measured_scroll.clone(),
+                    positions: item_layout.clone(),
+                })
+        };
         let reading_note = self.result_tab == 0;
         let measured = |index: usize, child: AnyElement| {
             let positions = item_layout.clone();
@@ -2639,7 +3118,8 @@ impl Desktop {
             .overflow_y_scroll()
             .track_scroll(&self.reader_scroll)
             .gap_3()
-            .py_3();
+            .py_3()
+            .children(scrolling_title);
         let article_scroll = self.reader_scroll.clone();
         let reveal_article = |id: ElementId, child: AnyElement, full_width: bool| {
             let view = crate::focus_scroll::RevealFocus::new(id, child, article_scroll.clone());
@@ -2695,6 +3175,7 @@ impl Desktop {
                                     text.clone(),
                                     *index,
                                     highlight_runs(*index),
+                                    search_target(*index),
                                 )
                                 .into_any_element(),
                             )
@@ -2745,12 +3226,15 @@ impl Desktop {
                                     .aria_label(text.clone())
                                     .text_size(TEXT_TITLE)
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(ReaderText::new(
-                                        ("reader-heading-marks", index),
-                                        text.clone(),
-                                        index as u64,
-                                        marks,
-                                    ))
+                                    .child(
+                                        ReaderText::new(
+                                            ("reader-heading-marks", index),
+                                            text.clone(),
+                                            index as u64,
+                                            marks,
+                                        )
+                                        .with_search_target(search_target(index)),
+                                    )
                                     .into_any_element(),
                             )
                         };
@@ -2826,6 +3310,7 @@ impl Desktop {
                         text.clone(),
                         index,
                         highlight_runs(index),
+                        search_target(index),
                     )
                     .into_any_element(),
                     PreviewBlock::Image(path) => {
@@ -2865,7 +3350,8 @@ impl Desktop {
                                 control(("note-image", index))
                                     .ghost()
                                     .p_0()
-                                    .w_full()
+                                    .w(px((available_height * 0.32).min(224.) * aspect_ratio))
+                                    .max_w_full()
                                     .h_auto()
                                     .min_h(px(0.))
                                     .border_0()
@@ -2942,6 +3428,19 @@ impl Desktop {
                                 .font_weight(FontWeight::SEMIBOLD),
                         )
                         .child(
+                            theme::accessible_text(
+                                "no-note-images-reason",
+                                if preview.processing_issues.iter().any(|issue| {
+                                    matches!(issue.stage, notes::ProcessingStage::Screenshots)
+                                }) {
+                                    "截图生成未完成，文字内容仍可阅读。"
+                                } else {
+                                    "本次没有生成截图，文字内容已保存在笔记中。"
+                                },
+                            )
+                            .text_color(color(MUTED)),
+                        )
+                        .child(
                             outline_pill("empty-images-to-note")
                                 .icon(icons::article())
                                 .label("阅读笔记")
@@ -2951,6 +3450,37 @@ impl Desktop {
                         ),
                     cx,
                 ));
+            }
+            if !self.reader_ui.frames.is_empty() && gallery_indices.is_empty() {
+                article = article.child(
+                    v_flex()
+                        .w_full()
+                        .py_8()
+                        .gap_3()
+                        .items_center()
+                        .child(semantic_label(
+                            "gallery-no-matches",
+                            "没有对应的截图",
+                            icons::search(),
+                        ))
+                        .child(
+                            theme::accessible_text(
+                                "gallery-no-matches-help",
+                                "搜索范围是截图说明和对应文字。试试更短的关键词。",
+                            )
+                            .text_color(color(MUTED)),
+                        )
+                        .child(
+                            quiet("clear-gallery-search")
+                                .icon(icons::close())
+                                .label("清除搜索")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.reader_ui
+                                        .gallery_find
+                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                })),
+                        ),
+                );
             }
             // Each screenshot needs enough width for both the slide and a readable
             // text excerpt. The final row keeps the same column widths as the rest.
@@ -2968,7 +3498,8 @@ impl Desktop {
                 .min_w_0()
                 .flex_shrink_0()
                 .gap(px(16.));
-            for (index, frame) in self.reader_ui.frames.iter().enumerate() {
+            for index in gallery_indices.iter().copied() {
+                let frame = &self.reader_ui.frames[index];
                 let label = frame_label(&preview.course.title, frame, index);
                 let mut card = v_flex()
                     .id(SharedString::from(frame.anchor.clone()))
@@ -3030,10 +3561,17 @@ impl Desktop {
                             ),
                     );
                 }
-                let mut card_body = v_flex().flex_1().min_w_0().p_4().gap_3().child(
+                let body_index = frame.body_anchor.as_ref().and_then(|anchor| {
+                    preview
+                        .blocks
+                        .iter()
+                        .enumerate()
+                        .position(|(i, block)| block_anchor(block, i) == *anchor)
+                });
+                let mut card_body = v_flex().flex_1().min_w_0().p_3().gap_2().child(
                     h_flex()
                         .items_center()
-                        .min_h(CONTROL_HEIGHT)
+                        .flex_wrap()
                         .gap_2()
                         .child(
                             theme::accessible_text(
@@ -3045,43 +3583,48 @@ impl Desktop {
                             )
                             .role(Role::Heading)
                             .flex_1()
-                            .text_size(TEXT_READER)
+                            .text_size(TEXT_BODY)
                             .font_weight(FontWeight::SEMIBOLD),
                         )
-                        .when(frame.path.is_some(), |row| {
+                        .when_some(body_index, |row, body_index| {
                             row.child(reveal_article(
-                                ("reveal-frame-enlarge", index).into(),
-                                control(("frame-enlarge", index))
-                                    .ghost()
-                                    .icon(icons::zoom_in())
-                                    .w(CONTROL_HEIGHT)
-                                    .px_0()
-                                    .accessibility_label("放大截图")
-                                    .tooltip("放大截图")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.open_reader_image(index, window, cx)
+                                ("reveal-frame-to-body", index).into(),
+                                quiet(("frame-to-body", index))
+                                    .icon(icons::article())
+                                    .label("正文")
+                                    .tooltip("在笔记中查看")
+                                    .accessibility_label("在笔记中查看")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.jump_reader_block(body_index, 0., cx)
                                     }))
                                     .into_any_element(),
                                 false,
                             ))
                         }),
                 );
-                let excerpt = if !frame.transcript.trim().is_empty() {
-                    frame.transcript.clone()
-                } else {
-                    frame
-                        .caption
-                        .clone()
-                        .filter(|caption| !caption.trim().is_empty())
-                        .unwrap_or_else(|| "这张截图没有对应文字".into())
-                };
+                let excerpt = frame_excerpt(frame, &gallery_query);
+                let excerpt_marks = nav::text_matches(&excerpt, &gallery_query)
+                    .into_iter()
+                    .map(|range| {
+                        (
+                            range,
+                            HighlightStyle {
+                                background_color: Some(color(FIND_HIGHLIGHT).into()),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 // The three-line preview is a defined content slot. Full captions
                 // and transcripts remain readable in the image viewer and article.
                 card_body = card_body.child(
-                    theme::accessible_text(("frame-excerpt", index), excerpt)
+                    div()
+                        .id(("frame-excerpt", index))
+                        .role(Role::Paragraph)
+                        .aria_label(excerpt.clone())
                         .w_full()
                         .min_w_0()
-                        .h(excerpt_line_height * 3.)
+                        .max_h(excerpt_line_height * 3.)
                         .flex_shrink_0()
                         .whitespace_normal()
                         .text_ellipsis()
@@ -3089,69 +3632,11 @@ impl Desktop {
                         .text_size(TEXT_BODY)
                         .font_weight(FontWeight::NORMAL)
                         .line_height(excerpt_line_height)
-                        .text_color(color(GRAY)),
+                        .text_color(color(GRAY))
+                        .child(StyledText::new(excerpt).with_highlights(excerpt_marks)),
                 );
-                let body_index = frame.body_anchor.as_ref().and_then(|anchor| {
-                    preview
-                        .blocks
-                        .iter()
-                        .enumerate()
-                        .position(|(i, block)| block_anchor(block, i) == *anchor)
-                });
-                let mut actions = h_flex()
-                    .mt_auto()
-                    .gap_2()
-                    .items_center()
-                    .flex_wrap()
-                    .flex_shrink_0();
-                if let Some(body_index) = body_index {
-                    actions = actions.child(reveal_article(
-                        ("reveal-frame-to-body", index).into(),
-                        (outline_pill(("frame-to-body", index))
-                            .icon(icons::article())
-                            .label("定位正文")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.jump_reader_block(body_index, 0., cx)
-                            })))
-                        .into_any_element(),
-                        false,
-                    ));
-                }
-                if let Some(url) = source.as_ref().and_then(|source| {
-                    frame
-                        .seconds
-                        .and_then(|seconds| nav::seek_url(source, seconds))
-                }) {
-                    actions = actions.child(reveal_article(
-                        ("reveal-frame-to-source", index).into(),
-                        (quiet(("frame-to-source", index))
-                            .icon(icons::play_arrow())
-                            .label("观看")
-                            .on_click(move |_, _, cx| cx.open_url(&url)))
-                        .into_any_element(),
-                        false,
-                    ));
-                } else if source.is_some() && self.reader_ui.source_available {
-                    actions = actions.child(reveal_article(
-                        ("reveal-frame-open-original", index).into(),
-                        (quiet(("frame-open-original", index))
-                            .icon(icons::movie())
-                            .label("原视频")
-                            .tooltip("打开原视频")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.open_reader_source(None, cx)),
-                            ))
-                        .into_any_element(),
-                        false,
-                    ));
-                }
-                grid = grid.child(
-                    measured(
-                        index,
-                        card.child(card_body.child(actions)).into_any_element(),
-                    )
-                    .h_full(),
-                );
+                grid =
+                    grid.child(measured(index, card.child(card_body).into_any_element()).h_full());
             }
             article = article.child(grid);
         }
@@ -3172,13 +3657,20 @@ impl Desktop {
                 .child(self.reader_toc_panel(&headings, current_chapter, true, cx))
                 .into_any_element()
         } else if toc_open {
-            v_flex()
+            div()
+                .relative()
                 .flex_1()
                 .min_h_0()
                 .w_full()
-                .gap_3()
-                .child(article)
-                .child(self.reader_toc_panel(&headings, current_chapter, false, cx))
+                .h_full()
+                .child(article.h_full())
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(color(SURFACE))
+                        .child(self.reader_toc_panel(&headings, current_chapter, false, cx)),
+                )
                 .into_any_element()
         } else {
             article.into_any_element()
@@ -3189,7 +3681,6 @@ impl Desktop {
                 .min_h_0()
                 .flex_shrink_0()
                 .child(header)
-                .children(fixed_find)
                 .child(page)
                 .into_any_element()
         } else {
@@ -3239,17 +3730,26 @@ impl Desktop {
                 .border_l_1()
                 .border_color(color(HAIRLINE))
         } else {
-            panel
-                .w_full()
-                .flex_shrink_0()
-                .max_h(relative(0.4))
-                .border_t_1()
-                .border_color(color(HAIRLINE))
+            panel.w_full().h_full().min_h_0().px_3()
         };
         panel = panel.child(
-            semantic_label("toc-title", "目录", icons::toc())
+            h_flex()
+                .items_center()
+                .gap_2()
                 .flex_shrink_0()
-                .mb_2(),
+                .mb_2()
+                .child(semantic_label("toc-title", "目录", icons::toc()).flex_1())
+                .when(!side, |row| {
+                    row.child(
+                        quiet("close-note-toc")
+                            .icon(icons::close())
+                            .label("关闭")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.reader_ui.toc_open = Some(false);
+                                cx.notify();
+                            })),
+                    )
+                }),
         );
         for (index, label, seconds) in headings {
             let index = *index;
@@ -3312,7 +3812,10 @@ impl Desktop {
                                     }),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.jump_reader_block(index, 0., cx)
+                                if !side {
+                                    this.reader_ui.toc_open = Some(false);
+                                }
+                                this.jump_reader_block(index, 0., cx);
                             })),
                     ),
                 self.reader_ui.toc_scroll.clone(),
@@ -3333,12 +3836,37 @@ impl Desktop {
             return;
         }
         let focus = cx.focus_handle();
+        let visible = if self.result_tab == 1 {
+            matching_frames(
+                &self.reader_ui.frames,
+                &self.reader_ui.gallery_find.read(cx).value(),
+            )
+        } else {
+            (0..self.reader_ui.frames.len()).collect()
+        };
+        let Some(viewer_index) = visible.iter().position(|candidate| *candidate == index) else {
+            return;
+        };
+        crate::import_ui::ConversionFollow::interrupt_for_reader_viewer(
+            &mut self.following_conversion,
+        );
         self.reader_ui.viewer = Some(ImageViewer {
             scroll: ScrollHandle::new(),
             viewport_scroll: ScrollHandle::new(),
             viewport_size: size(px(0.), px(0.)),
-            frames: self.reader_ui.frames.clone(),
-            index,
+            frames: visible
+                .iter()
+                .map(|index| self.reader_ui.frames[*index].clone())
+                .collect(),
+            filtered: self.result_tab == 1
+                && !self
+                    .reader_ui
+                    .gallery_find
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .is_empty(),
+            index: viewer_index,
             title: preview.course.title.clone(),
             source: self.reader_source(),
             source_available: self.reader_ui.source_available,
@@ -3402,6 +3930,7 @@ impl Desktop {
                 .clamp(0, viewer.frames.len().saturating_sub(1) as isize)
                 as usize;
             viewer.zoom = None;
+            viewer.scroll.set_offset(point(px(0.), px(0.)));
             viewer.viewport_scroll.set_offset(point(px(0.), px(0.)));
             cx.notify();
         }
@@ -3425,7 +3954,20 @@ impl Desktop {
             f32::from(window.bounds().size.height) >= f32::from(window.rem_size()) * 32.
         })
     }
+    fn image_separate_modes(window: &Window) -> bool {
+        let available = window.bounds().size.height - task_dialog_top(window) - px(24.);
+        f32::from(available) < f32::from(window.rem_size()) * 24.
+    }
     fn zoom_reader_image(&mut self, factor: Option<f32>, window: &Window, cx: &mut Context<Self>) {
+        if Self::image_separate_modes(window)
+            && self
+                .reader_ui
+                .viewer
+                .as_ref()
+                .is_some_and(|viewer| Self::image_details_open(viewer, window))
+        {
+            return;
+        }
         if let Some(viewer) = &mut self.reader_ui.viewer {
             let old_scale = viewer
                 .zoom
@@ -3468,77 +4010,74 @@ impl Desktop {
         let version = viewer.version.clone();
         let content_width = (f32::from(window.bounds().size.width) - 48.).min(1180.) - 34.;
         let compact = content_width < f32::from(window.rem_size()) * 52.;
+        let text_only =
+            Self::image_separate_modes(window) && Self::image_details_open(viewer, window);
         let timestamp = frame.seconds.map(course2md::render::fmt_ts);
         let heading = match timestamp {
+            Some(time) if text_only => format!("文字 · {time}"),
             Some(time) if compact => time,
             Some(time) => format!("截图 · {time}"),
-            None => "截图".into(),
+            None => if text_only { "截图文字" } else { "截图" }.into(),
         };
-        let mut body = v_flex()
-            .id("reader-image-dialog")
-            .relative()
-            .role(Role::Dialog)
-            .aria_label(format!("查看{label}"))
-            .track_focus(&viewer.focus)
-            .key_context("ReaderImage")
-            .on_action(cx.listener(|this, _: &PreviousImage, _, cx| this.move_reader_image(-1, cx)))
-            .on_action(cx.listener(|this, _: &NextImage, _, cx| this.move_reader_image(1, cx)))
-            .on_action(cx.listener(|this, _: &ZoomIn, window, cx| {
-                this.zoom_reader_image(Some(1.25), window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ZoomOut, window, cx| {
-                this.zoom_reader_image(Some(0.8), window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FitImage, window, cx| {
-                this.zoom_reader_image(None, window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &CloseImage, window, cx| this.close_reader_image(window, cx)),
+        let zoom_controls = if text_only {
+            None
+        } else if compact {
+            let weak = cx.weak_entity();
+            let fit = viewer.zoom.is_none();
+            Some(
+                quiet("image-zoom-menu")
+                    .icon(icons::zoom_in())
+                    .label(if scale > 0. {
+                        format!("{}%", (scale * 100.).round() as u32)
+                    } else {
+                        "缩放".into()
+                    })
+                    .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
+                    .accessibility_label("缩放图片")
+                    .tooltip("缩放图片")
+                    .dropdown_menu(move |menu, _, _| {
+                        let larger = weak.clone();
+                        let smaller = weak.clone();
+                        let fitted = weak.clone();
+                        menu.item(
+                            PopupMenuItem::new("放大 · +")
+                                .icon(icons::zoom_in())
+                                .disabled(scale >= 4.)
+                                .on_click(move |_, window, cx| {
+                                    let _ = larger.update(cx, |this, cx| {
+                                        this.zoom_reader_image(Some(1.25), window, cx)
+                                    });
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("缩小 · −")
+                                .icon(icons::zoom_out())
+                                .disabled(scale <= 0.1)
+                                .on_click(move |_, window, cx| {
+                                    let _ = smaller.update(cx, |this, cx| {
+                                        this.zoom_reader_image(Some(0.8), window, cx)
+                                    });
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("适合窗口 · 0")
+                                .icon(icons::fit_screen())
+                                .checked(fit)
+                                .on_click(move |_, window, cx| {
+                                    let _ = fitted.update(cx, |this, cx| {
+                                        this.zoom_reader_image(None, window, cx)
+                                    });
+                                }),
+                        )
+                    })
+                    .into_any_element(),
             )
-            .gap_2()
-            .h_full()
-            .w_full()
-            .min_h_0()
-            .child(
-                h_flex()
+        } else {
+            Some(
+                (h_flex()
                     .gap_2()
                     .items_center()
-                    .flex_wrap()
-                    .flex_shrink_0()
-                    .child(
-                        theme::accessible_text("image-title", heading)
-                            .role(Role::Heading)
-                            .aria_label(label.clone())
-                            .whitespace_nowrap()
-                            .text_size(if compact { TEXT_BODY } else { TEXT_TITLE })
-                            .font_weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        control("image-previous")
-                            .icon(IconName::ChevronLeft)
-                            .w(CONTROL_HEIGHT)
-                            .px_0()
-                            .accessibility_label("上一张")
-                            .tooltip("上一张 · ←")
-                            .disabled(index == 0)
-                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(-1, cx))),
-                    )
-                    .child(
-                        theme::accessible_text("image-number", format!("{} / {count}", index + 1))
-                            .whitespace_nowrap()
-                            .text_size(TEXT_BODY),
-                    )
-                    .child(
-                        control("image-next")
-                            .icon(IconName::ChevronRight)
-                            .w(CONTROL_HEIGHT)
-                            .px_0()
-                            .accessibility_label("下一张")
-                            .tooltip("下一张 · →")
-                            .disabled(index + 1 >= count)
-                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(1, cx))),
-                    )
                     .child(
                         control("image-zoom-out")
                             .icon(icons::zoom_out())
@@ -3585,95 +4124,179 @@ impl Desktop {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.zoom_reader_image(None, window, cx)
                             })),
-                    ),
-            );
-        if let Some(path) = frame.path {
-            let viewport_scroll = viewer.viewport_scroll.clone();
-            let viewport_owner = cx.weak_entity();
-            let viewport_version = version.clone();
-            body = body.child(
-                div()
-                    .on_children_prepainted(move |_, window, cx| {
-                        let size = viewport_scroll.bounds().size;
-                        let owner = viewport_owner.clone();
-                        let version = viewport_version.clone();
-                        window.defer(cx, move |_, cx| {
-                            let _ = owner.update(cx, |this, cx| {
-                                if let Some(viewer) = &mut this.reader_ui.viewer
-                                    && viewer.version == version
-                                    && viewer.viewport_size != size
-                                {
-                                    viewer.viewport_size = size;
-                                    cx.notify();
-                                }
-                            });
-                        });
-                    })
-                    .id("image-viewport")
-                    .bg(color(INSET))
-                    .border_1()
-                    .border_color(color(HAIRLINE))
-                    .rounded(RADIUS_CARD)
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_x_scroll()
-                    .overflow_y_scroll()
-                    .track_scroll(&viewer.viewport_scroll)
+                    ))
+                .into_any_element(),
+            )
+        };
+        let mut body = v_flex()
+            .id("reader-image-dialog")
+            .relative()
+            .role(Role::Dialog)
+            .aria_label(if text_only {
+                format!("阅读{label}对应文字")
+            } else {
+                format!("查看{label}")
+            })
+            .track_focus(&viewer.focus)
+            .key_context("ReaderImage")
+            .on_action(cx.listener(|this, _: &PreviousImage, _, cx| this.move_reader_image(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextImage, _, cx| this.move_reader_image(1, cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, window, cx| {
+                this.zoom_reader_image(Some(1.25), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, window, cx| {
+                this.zoom_reader_image(Some(0.8), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FitImage, window, cx| {
+                this.zoom_reader_image(None, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &CloseImage, window, cx| this.close_reader_image(window, cx)),
+            )
+            .gap_2()
+            .h_full()
+            .w_full()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .flex_wrap()
+                    .flex_shrink_0()
                     .child(
-                        div()
-                            .id("reader-image-canvas")
-                            .flex_none()
-                            .w(px(frame.width as f32 * scale))
-                            .h(px(frame.height as f32 * scale))
-                            .min_w(relative(1.))
-                            .min_h(relative(1.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .id("enlarged-reader-image")
-                                    .flex_none()
-                                    .w(px(frame.width as f32 * scale))
-                                    .h(px(frame.height as f32 * scale))
-                                    .role(Role::Image)
-                                    .aria_label(
-                                        frame
-                                            .caption
-                                            .as_ref()
-                                            .map(|caption| format!("{label}。原图说明：{caption}"))
-                                            .unwrap_or(label),
-                                    )
-                                    .child(
-                                        img(path)
-                                            .size_full()
-                                            .object_fit(ObjectFit::Contain)
-                                            .with_fallback(|| {
-                                                theme::accessible_text(
-                                                    "failed-reader-image",
-                                                    "这张截图无法读取；对应正文仍可阅读。",
-                                                )
-                                                .into_any_element()
-                                            }),
-                                    ),
-                            ),
-                    ),
+                        theme::accessible_text("image-title", heading)
+                            .role(Role::Heading)
+                            .aria_label(label.clone())
+                            .whitespace_nowrap()
+                            .text_size(if compact { TEXT_BODY } else { TEXT_TITLE })
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        control("image-previous")
+                            .icon(IconName::ChevronLeft)
+                            .w(CONTROL_HEIGHT)
+                            .px_0()
+                            .accessibility_label("上一张")
+                            .tooltip("上一张 · ←")
+                            .disabled(index == 0)
+                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(-1, cx))),
+                    )
+                    .child(
+                        theme::accessible_text(
+                            "image-number",
+                            if viewer.filtered {
+                                format!("匹配截图 {} / {count}", index + 1)
+                            } else {
+                                format!("{} / {count}", index + 1)
+                            },
+                        )
+                        .whitespace_nowrap()
+                        .text_size(TEXT_BODY),
+                    )
+                    .child(
+                        control("image-next")
+                            .icon(IconName::ChevronRight)
+                            .w(CONTROL_HEIGHT)
+                            .px_0()
+                            .accessibility_label("下一张")
+                            .tooltip("下一张 · →")
+                            .disabled(index + 1 >= count)
+                            .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(1, cx))),
+                    )
+                    .children(zoom_controls),
             );
-        } else {
-            body = body.child(theme::accessible_text(
-                "image-unreadable",
-                "这张截图无法读取。对应正文保留在下方。",
-            ));
+        if !text_only {
+            if let Some(path) = frame.path {
+                let viewport_scroll = viewer.viewport_scroll.clone();
+                let viewport_owner = cx.weak_entity();
+                let viewport_version = version.clone();
+                body = body.child(
+                    div()
+                        .on_children_prepainted(move |_, window, cx| {
+                            let size = viewport_scroll.bounds().size;
+                            let owner = viewport_owner.clone();
+                            let version = viewport_version.clone();
+                            window.defer(cx, move |_, cx| {
+                                let _ = owner.update(cx, |this, cx| {
+                                    if let Some(viewer) = &mut this.reader_ui.viewer
+                                        && viewer.version == version
+                                        && viewer.viewport_size != size
+                                    {
+                                        viewer.viewport_size = size;
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                        })
+                        .id("image-viewport")
+                        .bg(color(INSET))
+                        .border_1()
+                        .border_color(color(HAIRLINE))
+                        .rounded(RADIUS_CARD)
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_x_scroll()
+                        .overflow_y_scroll()
+                        .track_scroll(&viewer.viewport_scroll)
+                        .child(
+                            div()
+                                .id("reader-image-canvas")
+                                .flex_none()
+                                .w(px(frame.width as f32 * scale))
+                                .h(px(frame.height as f32 * scale))
+                                .min_w(relative(1.))
+                                .min_h(relative(1.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .id("enlarged-reader-image")
+                                        .flex_none()
+                                        .w(px(frame.width as f32 * scale))
+                                        .h(px(frame.height as f32 * scale))
+                                        .role(Role::Image)
+                                        .aria_label(
+                                            frame
+                                                .caption
+                                                .as_ref()
+                                                .map(|caption| {
+                                                    format!("{label}。原图说明：{caption}")
+                                                })
+                                                .unwrap_or(label),
+                                        )
+                                        .child(
+                                            img(path)
+                                                .size_full()
+                                                .object_fit(ObjectFit::Contain)
+                                                .with_fallback(|| {
+                                                    theme::accessible_text(
+                                                        "failed-reader-image",
+                                                        "这张截图无法读取；对应正文仍可阅读。",
+                                                    )
+                                                    .into_any_element()
+                                                }),
+                                        ),
+                                ),
+                        ),
+                );
+            } else {
+                body = body.child(theme::accessible_text(
+                    "image-unreadable",
+                    "这张截图无法读取；对应正文仍可在笔记中查看。",
+                ));
+            }
         }
         let has_details = frame.caption.is_some() || !frame.transcript.is_empty();
         let mut details = v_flex()
             .id("image-details")
             .w_full()
-            // Short text keeps its natural height; the cap only constrains
-            // long text, leaving the media the rest of the measured body.
-            .flex_shrink_0()
-            .max_h(relative(0.4))
+            // Short windows show either the image or its text, giving the
+            // chosen content the whole available viewport.
+            .when(text_only, |view| view.flex_1())
+            .when(!text_only, |view| view.flex_shrink_0().max_h(relative(0.4)))
             .min_h_0()
             .gap_2()
             .pr_3()
@@ -3686,6 +4309,7 @@ impl Desktop {
                     format!("原图说明：{caption}"),
                     0,
                     Vec::new(),
+                    None,
                 )
                 .flex_shrink_0(),
             );
@@ -3705,11 +4329,22 @@ impl Desktop {
                     ),
                     1,
                     Vec::new(),
+                    None,
                 )
                 .flex_shrink_0(),
             );
         }
-        if has_details && Self::image_details_open(viewer, window) {
+        if text_only && !has_details {
+            details = details.child(
+                theme::accessible_text(
+                    "image-no-text",
+                    "这张截图没有对应文字。可以返回图片，或在笔记中查看上下文。",
+                )
+                .text_size(TEXT_READER)
+                .whitespace_normal(),
+            );
+        }
+        if text_only || (has_details && Self::image_details_open(viewer, window)) {
             body = body
                 .child(details)
                 .child(Scrollbar::vertical(&viewer.scroll).mode(ScrollbarMode::Always));
@@ -3726,6 +4361,8 @@ impl Desktop {
         let compact = content_width < f32::from(window.rem_size()) * 52.;
         let has_details = frame.caption.is_some() || !frame.transcript.is_empty();
         let details_open = Self::image_details_open(viewer, window);
+        let separate_modes = Self::image_separate_modes(window);
+        let text_only = separate_modes && details_open;
         let version = viewer.version.clone();
         let body_anchor = frame.body_anchor.clone();
         let source_link = viewer
@@ -3819,11 +4456,19 @@ impl Desktop {
                 .into_any_element(),
             ));
         }
-        if has_details {
+        if has_details || text_only {
             actions = actions.child(
                 quiet("image-toggle-details")
-                    .icon(icons::article())
-                    .label(if details_open {
+                    .icon(if text_only {
+                        icons::image()
+                    } else {
+                        icons::article()
+                    })
+                    .label(if text_only {
+                        "返回图片"
+                    } else if separate_modes {
+                        "查看文字"
+                    } else if details_open {
                         "收起文字"
                     } else {
                         "显示文字"
@@ -3854,6 +4499,7 @@ impl Desktop {
 fn load_reader_data(preview: &notes::Preview) -> ReaderData {
     let mut data = ReaderData::default();
     let dir = &preview.course.dir;
+    data.export_folder = existing_export_folder(dir, &preview.outputs);
     let provenance = if preview.course.manifest.is_some() {
         course2md::legacy::provenance(dir)
     } else {
@@ -4008,7 +4654,7 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
                                     "第 {} 版 · {}{}",
                                     other.revision,
                                     nav::timestamp_local(other.created_at_ms),
-                                    if other.partial {
+                                    if notes::has_incomplete_content(&other) {
                                         " · 部分完成"
                                     } else {
                                         ""
@@ -4041,6 +4687,15 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
         }
     }
     data
+}
+
+fn existing_export_folder(dir: &std::path::Path, outputs: &[String]) -> Option<PathBuf> {
+    let folder = course2md::artifact::safe_asset_path(dir, "exports").ok()?;
+    let has_file = outputs.iter().any(|output| {
+        std::path::Path::new(output).starts_with("exports")
+            && course2md::artifact::safe_asset_path(dir, output).is_ok_and(|path| path.is_file())
+    });
+    has_file.then_some(folder)
 }
 fn checked_frame(mut frame: Frame) -> Frame {
     if let Some((width, height)) = frame
@@ -4092,11 +4747,99 @@ fn image_zoom_offset(viewport: f32, old_extent: f32, new_extent: f32, offset: f3
 #[cfg(test)]
 mod tests {
     use super::{
-        OfflineVideo, OfflineVideoRequest, PreviewBlock, block_anchor, block_time,
-        capture_reader_position, files_need_reload, image_zoom_offset, load_reader_data, nav,
-        note_position_index, processing_notice, restored_reader_offset,
+        ExportFeedback, ExportState, Frame, OfflineVideo, OfflineVideoRequest, PreviewBlock,
+        block_anchor, block_time, capture_reader_position, existing_export_folder,
+        exported_file_label, files_need_reload, frame_excerpt, image_zoom_offset, load_reader_data,
+        matching_frames, nav, note_position_index, processing_notice, restored_reader_offset,
     };
     use crate::{ConversionOptions, notes::Course, source, workspace};
+
+    #[test]
+    fn saved_export_folder_requires_a_listed_file_inside_the_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let exports = temp.path().join("exports");
+        let outputs = vec!["exports/course.html".into()];
+        assert!(existing_export_folder(temp.path(), &outputs).is_none());
+        std::fs::create_dir(&exports).unwrap();
+        assert!(existing_export_folder(temp.path(), &outputs).is_none());
+        std::fs::write(exports.join("course.html"), "<p>笔记</p>").unwrap();
+        assert_eq!(existing_export_folder(temp.path(), &outputs), Some(exports));
+        assert!(existing_export_folder(temp.path(), &[]).is_none());
+        assert!(existing_export_folder(temp.path(), &["exports/../course.html".into()]).is_none());
+    }
+
+    #[test]
+    fn export_feedback_stays_with_its_version_and_ignores_cancelled_callbacks() {
+        let old = std::path::PathBuf::from("/library/old-note/versions/one");
+        let other = std::path::PathBuf::from("/library/other-note/versions/two");
+        let path = std::path::PathBuf::from("/exports/old-note.html");
+        let success = || ExportFeedback {
+            title: "旧笔记".into(),
+            format: course2md::config::OutputFormat::Html,
+            result: Ok(path.clone()),
+        };
+        let mut state = ExportState::default();
+        let cancelled = state.begin(old.clone()).unwrap();
+        assert!(state.cancel(cancelled, &old));
+        assert!(state.feedback.is_empty());
+        let next = state.begin(other.clone()).unwrap();
+        assert!(!state.finish(cancelled, &old, success()));
+        assert!(state.is_pending(next, &other));
+        assert!(state.finish(
+            next,
+            &other,
+            ExportFeedback {
+                title: "另一份笔记".into(),
+                format: course2md::config::OutputFormat::Html,
+                result: Err("保存位置不可写".into()),
+            }
+        ));
+        let cancelled_retry = state.begin(other.clone()).unwrap();
+        assert!(state.cancel(cancelled_retry, &other));
+        assert!(state.feedback[&other].result.is_err());
+        let completed = state.begin(old.clone()).unwrap();
+        assert!(state.finish(completed, &old, success()));
+        assert_eq!(state.feedback[&old].result.as_ref().unwrap(), &path);
+        assert!(state.feedback[&other].result.is_err());
+    }
+
+    #[test]
+    fn export_confirmation_uses_the_filename_without_the_private_directory() {
+        let file = std::path::Path::new("/private/library/export/这份笔记.html");
+        assert_eq!(exported_file_label(file), "已导出 · 这份笔记.html");
+    }
+
+    #[test]
+    fn gallery_search_matches_its_own_text_and_preserves_frame_identity() {
+        let frame = |index, transcript: &str, caption: Option<&str>| Frame {
+            anchor: format!("frame-{index}"),
+            path: None,
+            seconds: Some(index as f64 * 10.),
+            caption: caption.map(str::to_owned),
+            transcript: transcript.into(),
+            body_anchor: Some(format!("section-{index}")),
+            width: 16,
+            height: 9,
+        };
+        let frames = vec![
+            frame(0, "结构与分组", None),
+            frame(1, "OpenAI 与模型", Some("中文示意图")),
+            frame(2, "结语", None),
+        ];
+        assert_eq!(matching_frames(&frames, "  OPENAI  "), vec![1]);
+        assert_eq!(matching_frames(&frames, "示意图"), vec![1]);
+        assert_eq!(frame_excerpt(&frames[1], "示意图"), "中文示意图");
+        assert_eq!(matching_frames(&frames, "00:20"), vec![2]);
+        assert!(matching_frames(&frames, "不存在的内容").is_empty());
+        assert_eq!(matching_frames(&frames, ""), vec![0, 1, 2]);
+        assert_eq!(frames[1].body_anchor.as_deref(), Some("section-1"));
+        let phrase = frame(
+            3,
+            "Some introductory words. OpenAI said that Buckmaster offered terms.",
+            None,
+        );
+        assert!(frame_excerpt(&phrase, "Buckmaster").starts_with("…OpenAI said that Buckmaster"));
+    }
 
     fn reading_blocks() -> Vec<PreviewBlock> {
         vec![

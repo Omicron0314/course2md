@@ -15,6 +15,90 @@ enum PlanValidation {
     Submission,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TaskGroup {
+    Attention,
+    Processing,
+    Finished,
+    History,
+}
+
+impl TaskGroup {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Attention => "需要处理",
+            Self::Processing => "进行中",
+            Self::Finished => "已结束",
+            Self::History => "此前处理记录",
+        }
+    }
+}
+
+fn task_group(task: &TaskRecord) -> TaskGroup {
+    if task.handled_by.is_some() {
+        TaskGroup::History
+    } else {
+        match task.state {
+            TaskState::Paused
+            | TaskState::NeedsAttention
+            | TaskState::Uncertain
+            | TaskState::Partial => TaskGroup::Attention,
+            TaskState::Queued | TaskState::Running | TaskState::Pausing => TaskGroup::Processing,
+            TaskState::Complete | TaskState::Cancelled => TaskGroup::Finished,
+        }
+    }
+}
+
+pub(super) fn actionable_task_count(tasks: &[TaskRecord]) -> usize {
+    tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task_group(task),
+                TaskGroup::Attention | TaskGroup::Processing
+            )
+        })
+        .count()
+}
+
+/// Published task state and its visible card change together. A full library
+/// scan can include slow locations, so its old manifest cannot be the only
+/// source of the card while the newly published version is already readable.
+fn update_published_course(
+    courses: &mut Vec<Course>,
+    done: &Completed,
+    manifest: &course2md::artifact::Manifest,
+    thumbnail: Option<PathBuf>,
+) {
+    let mut course = Course {
+        dir: done.out_dir.clone(),
+        title: manifest.title.clone(),
+        modified: std::time::UNIX_EPOCH + std::time::Duration::from_millis(manifest.created_at_ms),
+        slides: manifest.frames.len(),
+        segments: done.segments,
+        thumbnail,
+        manifest: Some(manifest.clone()),
+        warning: None,
+    };
+    let storage = course.storage_dir();
+    if let Some(previous) = courses
+        .iter()
+        .find(|previous| previous.storage_dir() == storage)
+    {
+        // A user-facing library alias belongs to the course across versions.
+        if previous
+            .manifest
+            .as_ref()
+            .is_some_and(|manifest| previous.title != manifest.title)
+        {
+            course.title = previous.title.clone();
+        }
+    }
+    courses.retain(|previous| previous.storage_dir() != storage);
+    courses.push(course);
+    courses.sort_by_key(|course| std::cmp::Reverse(course.modified));
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkerWait {
     Starting,
@@ -213,7 +297,7 @@ fn task_feedback(state: TaskState, error: Option<&str>) -> Option<TaskFeedback> 
             TaskFeedback::Failure(if localized && summary.chars().count() <= 140 {
                 summary.into()
             } else {
-                "转换未完成，已保存的进度仍保留。可以继续任务，或查看原始日志。".into()
+                "转换未完成，已保存的进度仍保留。可以继续任务，或查看技术详情。".into()
             })
         }),
     }
@@ -227,11 +311,89 @@ pub(crate) fn task_attention_summary(task: &TaskRecord) -> String {
     {
         return task_status_label(task);
     }
+    if let Some(reason) = task_service_repair_reason(task) {
+        return reason.into();
+    }
     match task_feedback(task.state, task.error.as_deref()) {
         Some(TaskFeedback::Information(message)) => message.into(),
         Some(TaskFeedback::Failure(message)) => message,
         None => task_status_label(task),
     }
+}
+
+/// Only concrete configuration rejections change recovery from Retry to Repair.
+/// Rate limiting, timeouts and unknown outcomes must keep their own recovery.
+fn service_configuration_issue(message: &str) -> Option<&'static str> {
+    let lower = message.to_ascii_lowercase();
+    if [
+        "api key",
+        "api_key",
+        "unauthorized",
+        "forbidden",
+        "http 401",
+        "http 403",
+    ]
+    .iter()
+    .any(|hint| lower.contains(hint))
+        || ["凭据", "鉴权失败", "认证失败", "认证被拒绝"]
+            .iter()
+            .any(|hint| message.contains(hint))
+    {
+        Some("AI 服务未接受此任务的凭据或权限，请修复服务后补做。")
+    } else if ["http 404", "model not found", "unknown model"]
+        .iter()
+        .any(|hint| lower.contains(hint))
+        || message.contains("服务未找到此任务指定的接口或模型")
+    {
+        Some("AI 服务未找到此任务使用的接口或模型，请修复服务后补做。")
+    } else if ["http 400", "http 422"]
+        .iter()
+        .any(|hint| lower.contains(hint))
+        || message.contains("服务拒绝了请求参数")
+    {
+        Some("AI 服务拒绝了此任务的请求设置，请修复服务后补做。")
+    } else {
+        None
+    }
+}
+
+fn task_service_repair_reason(task: &TaskRecord) -> Option<&'static str> {
+    if task.handled_by.is_some()
+        || task
+            .blocked
+            .iter()
+            .any(|request| request.reason == "uncertain")
+    {
+        return None;
+    }
+    let outcomes = task.outcomes.as_ref()?;
+    let failures: Vec<_> = ["proofreading", "summary"]
+        .into_iter()
+        .filter_map(|component| outcomes.get(component))
+        .filter(|outcome| {
+            matches!(
+                outcome.get("status").and_then(|status| status.as_str()),
+                Some("failed" | "partial")
+            )
+        })
+        .collect();
+    if failures.is_empty() {
+        return None;
+    }
+    failures
+        .iter()
+        .filter_map(|outcome| outcome.get("message").and_then(|message| message.as_str()))
+        .chain(task.blocked.iter().filter_map(|request| {
+            let purpose = request.purpose.as_deref().unwrap_or_default();
+            (purpose.contains("proof") || purpose.contains("summary"))
+                .then_some(request.message.as_str())
+        }))
+        .chain(task.error.as_deref())
+        .find_map(service_configuration_issue)
+}
+
+pub(crate) fn task_requires_service_repair(task: &TaskRecord) -> bool {
+    task_service_repair_reason(task).is_some()
 }
 
 #[derive(IntoElement)]
@@ -318,7 +480,6 @@ impl RenderOnce for TaskProcessingDetails {
             |_, _| false,
         );
         let open = *state.read(cx);
-        let count = self.rows.len();
         v_flex()
             .w_full()
             .min_w_0()
@@ -335,9 +496,9 @@ impl RenderOnce for TaskProcessingDetails {
                     icons::chevron_down()
                 })
                 .label(if open {
-                    "收起处理详情".into()
+                    "收起处理详情"
                 } else {
-                    format!("处理详情 · {count} 个已完成步骤")
+                    "查看已完成的处理"
                 })
                 .on_click(move |_, _, cx| {
                     state.update(cx, |open, cx| {
@@ -386,9 +547,9 @@ impl RenderOnce for TaskRawLogs {
                     icons::info()
                 })
                 .label(if open {
-                    "收起原始日志"
+                    "收起技术详情"
                 } else {
-                    "原始日志"
+                    "技术详情"
                 })
                 .on_click(move |_, _, cx| {
                     state.update(cx, |open, cx| {
@@ -544,6 +705,11 @@ fn update_input_form(
         if changed {
             draft.overrides.insert(field);
         }
+    }
+    if options.provider != 5 {
+        draft.local_provider = Some(options.provider);
+    } else if draft.options.provider != 5 {
+        draft.local_provider = Some(draft.options.provider);
     }
     draft.options = options;
     draft.folder = folder;
@@ -1320,6 +1486,19 @@ impl Desktop {
                 id: id.to_owned(),
                 source_revision: self.preview_generation,
             });
+        } else if self.page == Page::Result && !self.reading {
+            self.following_conversion = self
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.state.task(id))
+                .zip(self.preview.as_ref())
+                .and_then(|(task, preview)| {
+                    crate::import_ui::ConversionFollow::reader_reprocess(
+                        task,
+                        &preview.course.dir,
+                        self.read_generation,
+                    )
+                });
         }
     }
 
@@ -1406,6 +1585,110 @@ impl Desktop {
             Err(error) => self.workspace_error = Some(format!("补做任务尚未建立：{error:#}")),
         }
         cx.notify();
+    }
+
+    pub(super) fn repair_task_service(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(task) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.task(&id))
+        {
+            if let Some(next) = task.handled_by.clone() {
+                self.select_task(&next, cx);
+                self.navigate(Page::Task, cx);
+                return;
+            }
+            if task
+                .blocked
+                .iter()
+                .any(|request| request.reason == "uncertain")
+            {
+                self.select_task(&id, cx);
+                self.navigate(Page::Task, cx);
+                return;
+            }
+        }
+        let components = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.task(&id))
+            .and_then(|task| task.artifact.as_ref().map(|path| (task, path)))
+            .map(|(task, path)| {
+                task_component_failures(task, path)
+                    .into_iter()
+                    .map(|(component, _, _)| component)
+                    .filter(|component| matches!(component.as_str(), "proofreading" | "summary"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if components.is_empty() {
+            self.message = Some("这份笔记没有需要修复的校对或摘要".into());
+            cx.notify();
+            return;
+        }
+        self.open_reprocess_service_editor(id, components, window, cx);
+    }
+
+    pub(crate) fn reprocess_task_with_service(
+        &mut self,
+        id: String,
+        components: Vec<String>,
+        ai_service: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let result = (|| -> Result<String> {
+            ensure!(
+                self.active_task.as_deref() != Some(&id) || self.job.is_none(),
+                "正在保存当前结果，请等待任务停止后再补做"
+            );
+            let task = self
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.state.task(&id))
+                .context("原任务记录暂时不可用")?;
+            let mut base = task.plan.config.clone();
+            base.defaults.transcript_source = Some(course2md::config::TranscriptSource::Subtitle);
+            base.llm.enabled = components.iter().any(|part| part == "proofreading");
+            base.llm.summarize = components.iter().any(|part| part == "summary");
+            let config = self.preferences.config_for_refs(
+                &base,
+                &ServiceRefs {
+                    asr: None,
+                    llm: Some(ai_service.clone()),
+                },
+            )?;
+            self.workspace
+                .as_mut()
+                .context("任务记录暂时不可用")?
+                .transaction(|state| {
+                    state.reprocess_with_service(
+                        &id,
+                        components,
+                        Vec::new(),
+                        Some((ai_service, config)),
+                    )
+                })
+        })();
+        match result {
+            Ok(next) => {
+                self.workspace_error = None;
+                self.select_task(&next, cx);
+                self.follow_resumed_input_task(&next, cx);
+                self.start_next_task(cx);
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                self.workspace_error = Some(format!("服务已保存，补做任务尚未建立：{error:#}"));
+                cx.notify();
+                false
+            }
+        }
     }
 
     pub fn adjust_task(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1523,7 +1806,14 @@ impl Desktop {
             let task = state.task_mut(id).context("任务记录不存在")?;
             task.updated = workspace::now();
             task.unread = !visible;
-            task.outcomes = done.as_ref().and_then(|done| done.outcomes.clone());
+            task.outcomes = done
+                .as_ref()
+                .and_then(|done| done.outcomes.clone())
+                .or_else(|| {
+                    manifest
+                        .as_ref()
+                        .and_then(|manifest| serde_json::to_value(&manifest.outcomes).ok())
+                });
             workspace::reconcile_receipts(task)?;
             if let (Some(done), Some(manifest)) = (&done, &manifest) {
                 task.artifact = Some(done.out_dir.clone());
@@ -1552,17 +1842,26 @@ impl Desktop {
                         if success {
                             "处理已结束，但尚未发布可读笔记。任务材料和进度已保留。"
                         } else {
-                            "生成中断，已保存的进度仍保留。可以继续任务，或查看原始日志。"
+                            "生成中断，已保存的进度仍保留。可以继续任务，或查看技术详情。"
                         }
                         .into(),
                     );
                 }
             }
-            Ok(task.clone())
+            let record = task.clone();
+            if record.state == TaskState::Complete && state.selected_task.as_deref() == Some(id) {
+                state.selected_task = None;
+            }
+            Ok(record)
         });
         match result {
             Ok(task) => {
-                let follow_completion = self
+                if self.reader_viewer_open() {
+                    crate::import_ui::ConversionFollow::interrupt_for_reader_viewer(
+                        &mut self.following_conversion,
+                    );
+                }
+                let follow_input_completion = self
                     .following_conversion
                     .as_ref()
                     .zip(self.workspace.as_ref())
@@ -1576,6 +1875,17 @@ impl Desktop {
                         )
                     })
                     .is_some_and(|task| task.id == id);
+                let follow_reader_completion = !self.reading
+                    && self.following_conversion.as_ref().is_some_and(|follow| {
+                        follow.completed_reader_task(
+                            &task,
+                            self.page,
+                            self.read_generation,
+                            self.preview
+                                .as_ref()
+                                .map(|preview| preview.course.dir.as_path()),
+                        )
+                    });
                 if let Some(done) = &done {
                     self.completed = Some(done.clone());
                     if let Some(root) = self
@@ -1598,12 +1908,24 @@ impl Desktop {
                                 Some(format!("笔记已保存，文件夹归属暂未更新：{error:#}"));
                         }
                     }
+                    if let Some(manifest) = &manifest {
+                        let cover = done.out_dir.join("cover.jpg");
+                        let thumbnail = cover.is_file().then_some(cover).or_else(|| {
+                            manifest.frames.iter().find_map(|frame| {
+                                course2md::artifact::safe_asset_path(&done.out_dir, &frame.image)
+                                    .ok()
+                            })
+                        });
+                        update_published_course(&mut self.courses, done, manifest, thumbnail);
+                    }
                     self.refresh_library(cx);
-                    if follow_completion {
+                    if !task.exports_only() && (follow_input_completion || follow_reader_completion)
+                    {
                         self.open_completed_conversion(Course::from_completed(done), cx);
                     }
                 }
                 self.task_status = task.state.label().into();
+                self.transient_task_result = Some((id.to_owned(), std::time::Instant::now()));
             }
             Err(error) => {
                 self.workspace_error =
@@ -1613,7 +1935,23 @@ impl Desktop {
         cx.notify();
     }
 
-    pub fn queue_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn open_task_export_location(&mut self, id: String, cx: &mut Context<Self>) {
+        let destination = (|| {
+            let state = &self.workspace.as_ref().context("任务记录暂时不可用")?.state;
+            let task = state.task(&id).context("任务记录不存在")?;
+            let location = state
+                .library(&task.plan.library_id)
+                .context("任务保存位置暂时不可用")?;
+            workspace::available_task_export(task, location)
+        })();
+        match destination {
+            Ok(path) => cx.reveal_path(&path),
+            Err(error) => self.message = Some(format!("无法打开导出位置：{error:#}")),
+        }
+        cx.notify();
+    }
+
+    pub fn queue_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(workspace) = &self.workspace else {
             return v_flex()
                 .gap_3()
@@ -1648,13 +1986,22 @@ impl Desktop {
                     primary_pill("task-new")
                         .icon(icons::plus())
                         .label("导入视频")
-                        .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::New, cx))),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.prepare_workbench_input(window, cx) {
+                                this.navigate(Page::New, cx);
+                            }
+                        })),
                 )
                 .into_any_element();
         }
         let selected = workspace.state.selected_task.clone();
-        let tasks = workspace.state.tasks.clone();
-        let pending = tasks.iter().filter(|task| !task.state.finished()).count();
+        let mut tasks = workspace.state.tasks.clone();
+        tasks.sort_by_key(|task| (task_group(task), std::cmp::Reverse(task.created)));
+        let pending = actionable_task_count(&tasks);
+        let current_count = tasks
+            .iter()
+            .filter(|task| task.handled_by.is_none())
+            .count();
         let mut content = v_flex().pt(px(24.)).gap_4().child(
             h_flex()
                 .gap_3()
@@ -1669,7 +2016,11 @@ impl Desktop {
                 .child(
                     accessible_text(
                         "tasks-page-summary",
-                        format!("{} 个任务 · {pending} 个未完成", tasks.len()),
+                        if pending == 0 {
+                            format!("{current_count} 个任务 · 全部已结束")
+                        } else {
+                            format!("{current_count} 个任务 · {pending} 个进行中或待处理")
+                        },
                     )
                     .text_sm()
                     .text_color(color(MUTED)),
@@ -1706,9 +2057,56 @@ impl Desktop {
             }
             historical_content = Some(historical);
         }
-        for task in tasks.iter().rev() {
+        let history_open = window.use_keyed_state("task-history-open", cx, |_, _| false);
+        let mut previous_group = None;
+        for task in &tasks {
+            let group = task_group(task);
+            if previous_group != Some(group) {
+                previous_group = Some(group);
+                let count = tasks
+                    .iter()
+                    .filter(|task| task_group(task) == group)
+                    .count();
+                if group == TaskGroup::History {
+                    let toggle = history_open.clone();
+                    content = content.child(
+                        quiet("toggle-task-history")
+                            .self_start()
+                            .icon(if *history_open.read(cx) {
+                                icons::chevron_up()
+                            } else {
+                                icons::chevron_down()
+                            })
+                            .label(format!("此前处理记录 · {count}"))
+                            .on_click(move |_, _, cx| {
+                                toggle.update(cx, |open, cx| {
+                                    *open = !*open;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                } else {
+                    content = content.child(
+                        semantic_label(
+                            SharedString::from(format!("task-group-{group:?}")),
+                            format!("{} · {count}", group.label()),
+                            match group {
+                                TaskGroup::Attention => icons::warning(),
+                                TaskGroup::Processing => icons::play_arrow(),
+                                _ => icons::check_circle(),
+                            },
+                        )
+                        .pt_2()
+                        .text_size(TEXT_TITLE),
+                    );
+                }
+            }
+            if group == TaskGroup::History && !*history_open.read(cx) {
+                continue;
+            }
             let id = task.id.clone();
             let is_selected = selected.as_ref() == Some(&id);
+            let cover = self.task_cover(task);
             let heading = control(SharedString::from(format!("select-{id}")))
                 .ghost()
                 .accessibility_label(format!(
@@ -1729,12 +2127,24 @@ impl Desktop {
                 .cursor_pointer()
                 .rounded(RADIUS_SMALL)
                 .p_0()
-                .child(
-                    icons::task()
-                        .size(rems(20. / 14.))
-                        .flex_shrink_0()
-                        .text_color(color(MUTED)),
-                )
+                .when_some(cover, |heading, cover| {
+                    heading.child(
+                        img(cover)
+                            .w(rems(6.))
+                            .h(rems(3.375))
+                            .object_fit(ObjectFit::Cover)
+                            .rounded(RADIUS_SMALL)
+                            .flex_shrink_0(),
+                    )
+                })
+                .when(self.task_cover(task).is_none(), |heading| {
+                    heading.child(
+                        icons::task()
+                            .size(rems(20. / 14.))
+                            .flex_shrink_0()
+                            .text_color(color(MUTED)),
+                    )
+                })
                 .child(
                     v_flex()
                         .flex_1()
@@ -1791,6 +2201,52 @@ impl Desktop {
                         }
                     }
                 }));
+            let mut row = h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_3()
+                .items_center()
+                .flex_wrap()
+                .child(div().flex_1().min_w(rems(14.)).max_w_full().child(heading));
+            let has_exports = self
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.state.library(&task.plan.library_id))
+                .is_some_and(|location| !workspace::task_export_files(task, location).is_empty());
+            if let Some(path) = &task.artifact {
+                let path = path.clone();
+                let title = task.plan.title.clone();
+                row = row.child(
+                    control(SharedString::from(format!("task-read-direct-{id}")))
+                        .icon(icons::book_open())
+                        .label("阅读笔记")
+                        .when(!(task.exports_only() && has_exports), |button| {
+                            button.primary()
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_course(
+                                Course::from_completed(&Completed {
+                                    out_dir: path.clone(),
+                                    title: title.clone(),
+                                    ..Default::default()
+                                }),
+                                cx,
+                            );
+                        })),
+                );
+            }
+            if has_exports {
+                let task_id = id.clone();
+                row = row.child(
+                    control(SharedString::from(format!("task-open-exports-{id}")))
+                        .icon(icons::folder_open())
+                        .label("打开导出位置")
+                        .when(task.exports_only(), |button| button.primary())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_task_export_location(task_id.clone(), cx)
+                        })),
+                );
+            }
             let mut card = v_flex()
                 .gap_3()
                 .p_4()
@@ -1799,7 +2255,7 @@ impl Desktop {
                 .border_1()
                 .border_color(color(if is_selected { BLUE } else { LINE }))
                 .rounded(RADIUS_CARD)
-                .child(heading);
+                .child(row);
             if is_selected {
                 let mut details = v_flex()
                     .gap_4()
@@ -1829,15 +2285,19 @@ impl Desktop {
                     ))
                     .child(self.task_processing_facts(task));
                 let (progress, history) = self.task_progress_sections(task, cx);
-                details = details
-                    .child(facts)
-                    .when_some(progress, |view, progress| view.child(progress));
+                details = details.child(facts).when_some(
+                    progress.filter(|_| task.state != TaskState::Partial),
+                    |view, progress| view.child(progress),
+                );
                 let uncertain: Vec<_> = task
                     .blocked
                     .iter()
                     .filter(|b| b.reason == "uncertain")
                     .collect();
-                if let Some(message) = self.task_feedback_view(task) {
+                if let Some(message) = self
+                    .task_feedback_view(task)
+                    .filter(|_| task.state != TaskState::Partial)
+                {
                     details = details.child(message);
                 }
                 if let Some(block) = self.uncertain_block(task, cx) {
@@ -1932,29 +2392,34 @@ impl Desktop {
                             })),
                     );
                 }
-                if task.handled_by.is_none()
-                    && !matches!(
-                        task.state,
-                        TaskState::Running | TaskState::Pausing | TaskState::Queued
-                    )
-                {
-                    actions = actions.child(
-                        control(SharedString::from(format!("adjust-{id}")))
-                            .icon(icons::tune())
-                            .label(if task.state == TaskState::Complete {
-                                "调整并生成新版"
-                            } else if task.state == TaskState::Paused {
-                                "调整选项"
-                            } else {
-                                "调整后重试"
-                            })
-                            .on_click(cx.listener({
-                                let id = id.clone();
-                                move |this, _, window, cx| this.adjust_task(id.clone(), window, cx)
-                            })),
-                    );
-                }
                 if let Some(path) = &task.artifact {
+                    let requires_repair = task_requires_service_repair(task);
+                    if let Some(reason) = task_service_repair_reason(task) {
+                        details = details.child(
+                            accessible_text(
+                                SharedString::from(format!("service-repair-reason-{id}")),
+                                reason,
+                            )
+                            .text_sm(),
+                        );
+                    }
+                    let repairable =
+                        task_component_failures(task, path)
+                            .iter()
+                            .any(|(component, _, _)| {
+                                matches!(component.as_str(), "proofreading" | "summary")
+                            });
+                    if repairable && uncertain.is_empty() && task.handled_by.is_none() {
+                        let repair_id = id.clone();
+                        actions = actions.child(
+                            outline_pill(SharedString::from(format!("repair-ai-task-{id}")))
+                                .icon(icons::settings())
+                                .label("修复 AI 服务并补做")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.repair_task_service(repair_id.clone(), window, cx);
+                                })),
+                        );
+                    }
                     for (component, label, outcome) in task_component_failures(task, path) {
                         let unknown_component = uncertain.iter().any(|request| {
                             let purpose = request.purpose.as_deref().unwrap_or_default();
@@ -1966,14 +2431,20 @@ impl Desktop {
                         }
                         let reason =
                             activity::component_failure_message(&label, outcome.message.as_deref());
-                        details = details.child(
-                            accessible_text(
-                                SharedString::from(format!("outcome-{id}-{component}")),
-                                reason,
-                            )
-                            .text_sm(),
-                        );
-                        if uncertain.is_empty() && task.handled_by.is_none() {
+                        let ai_component = matches!(component.as_str(), "proofreading" | "summary");
+                        if !(requires_repair && ai_component) {
+                            details = details.child(
+                                accessible_text(
+                                    SharedString::from(format!("outcome-{id}-{component}")),
+                                    reason,
+                                )
+                                .text_sm(),
+                            );
+                        }
+                        if uncertain.is_empty()
+                            && task.handled_by.is_none()
+                            && !(requires_repair && ai_component)
+                        {
                             let task_id = id.clone();
                             actions = actions.child(
                                 control(SharedString::from(format!("retry-{id}-{component}")))
@@ -1990,35 +2461,74 @@ impl Desktop {
                             );
                         }
                     }
-                    let path = path.clone();
+                }
+                if task.handled_by.is_none()
+                    && !matches!(
+                        task.state,
+                        TaskState::Running | TaskState::Pausing | TaskState::Queued
+                    )
+                {
                     actions = actions.child(
-                        control(SharedString::from(format!("open-{id}")))
-                            .primary()
-                            .icon(icons::book_open())
-                            .label("阅读笔记")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let done = Completed {
-                                    out_dir: path.clone(),
-                                    title: task_title(&path),
-                                    slides: 0,
-                                    segments: 0,
-                                    ..Default::default()
-                                };
-                                this.open_course(Course::from_completed(&done), cx);
+                        quiet(SharedString::from(format!("adjust-{id}")))
+                            .icon(icons::tune())
+                            .label(if task.artifact.is_some() {
+                                "调整并生成新版"
+                            } else if task.state == TaskState::Paused {
+                                "调整选项"
+                            } else {
+                                "调整后重试"
+                            })
+                            .on_click(cx.listener({
+                                let id = id.clone();
+                                move |this, _, window, cx| this.adjust_task(id.clone(), window, cx)
                             })),
                     );
                 }
-                details = details
-                    .child(actions)
-                    .when_some(history, |view, history| view.child(history));
-                if let Some(logs) = self.task_log_view(task) {
-                    details = details.child(logs);
+                details = details.child(actions);
+                if matches!(
+                    task.state,
+                    TaskState::NeedsAttention | TaskState::Partial | TaskState::Uncertain
+                ) {
+                    details = details.when_some(history, |view, history| view.child(history));
+                    if let Some(logs) = self.task_log_view(task) {
+                        details = details.child(logs);
+                    }
                 }
                 card = card.child(crate::motion::enter(
                     SharedString::from(format!("task-detail-{id}")),
                     details,
                     cx,
                 ));
+            } else if group == TaskGroup::Processing {
+                if let Some(progress) = self.task_progress_sections(task, cx).0 {
+                    card = card.child(progress);
+                }
+            } else if group == TaskGroup::Attention {
+                if let Some(feedback) = self.task_feedback_view(task) {
+                    card = card.child(feedback);
+                }
+                if task.state == TaskState::Partial {
+                    if let Some(path) = &task.artifact {
+                        let failures = task_component_failures(task, path);
+                        if !failures.is_empty() {
+                            card = card.child(
+                                accessible_text(
+                                    SharedString::from(format!("task-partial-summary-{id}")),
+                                    format!(
+                                        "正文已保存，{}尚未完成",
+                                        failures
+                                            .iter()
+                                            .map(|(_, label, _)| label.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("、")
+                                    ),
+                                )
+                                .text_size(TEXT_BODY)
+                                .text_color(color(GRAY)),
+                            );
+                        }
+                    }
+                }
             }
             content = content.child(card);
         }
@@ -2223,43 +2733,71 @@ impl Desktop {
         )
     }
 
+    fn task_cover(&self, task: &TaskRecord) -> Option<PathBuf> {
+        task.plan.source.cover.clone().or_else(|| {
+            self.courses
+                .iter()
+                .find(|course| {
+                    task.artifact.as_ref() == Some(&course.dir)
+                        || course
+                            .manifest
+                            .as_ref()
+                            .is_some_and(|manifest| manifest.source_id == task.plan.source_id)
+                })
+                .and_then(|course| course.thumbnail.clone())
+        })
+    }
+
     fn task_heading(&self, task: &TaskRecord) -> Div {
-        v_flex()
+        h_flex()
             .w_full()
             .min_w_0()
-            .gap_3()
+            .gap_4()
+            .items_start()
+            .when_some(self.task_cover(task), |row, cover| {
+                row.child(
+                    img(cover)
+                        .w(rems(8.))
+                        .h(rems(4.5))
+                        .object_fit(ObjectFit::Cover)
+                        .rounded(RADIUS_SMALL)
+                        .flex_shrink_0(),
+                )
+            })
             .child(
-                h_flex()
-                    .w_full()
+                v_flex()
+                    .flex_1()
                     .min_w_0()
-                    .gap_3()
-                    .items_start()
-                    .flex_wrap()
+                    .gap_2()
                     .child(
-                        semantic_label(
+                        accessible_text(
                             SharedString::from(format!("workbench-task-title-{}", task.id)),
                             task.plan.title.clone(),
-                            icons::task()
-                                .size(rems(20. / 14.))
-                                .text_color(color(ACCENT_STRONG)),
                         )
-                        .flex_1()
-                        .min_w(rems(16.))
-                        .max_w_full(),
+                        .text_size(TEXT_TITLE)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .whitespace_normal(),
                     )
-                    .child(badge(task_badge_kind(task.state)).child(task_status_label(task))),
-            )
-            .child(
-                accessible_text(
-                    SharedString::from(format!("workbench-task-created-{}", task.id)),
-                    format!(
-                        "{} 加入",
-                        crate::reader_navigation::timestamp_local(task.created * 1000)
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .items_center()
+                            .child(
+                                badge(task_badge_kind(task.state)).child(task_status_label(task)),
+                            )
+                            .child(
+                                accessible_text(
+                                    SharedString::from(format!(
+                                        "workbench-task-created-{}",
+                                        task.id
+                                    )),
+                                    crate::reader_navigation::timestamp_local(task.created * 1000),
+                                )
+                                .text_size(TEXT_AUX)
+                                .text_color(color(GRAY)),
+                            ),
                     ),
-                )
-                .pl(rems(2.))
-                .text_size(TEXT_AUX)
-                .text_color(color(GRAY)),
             )
     }
 
@@ -2344,8 +2882,7 @@ impl Desktop {
             .w_full()
             .min_w_0()
             .gap_4()
-            .child(self.task_heading(task))
-            .child(self.task_processing_facts(task));
+            .child(self.task_heading(task));
         if task.plan.options.source_mode == 0
             && task.plan.source.selected_subtitle.is_none()
             && matches!(
@@ -2368,7 +2905,9 @@ impl Desktop {
                         .tasks
                         .iter()
                         .take_while(|other| other.id != id)
-                        .filter(|other| !other.state.finished())
+                        .filter(|other| {
+                            other.handled_by.is_none() && other.state == TaskState::Queued
+                        })
                         .count()
                 })
                 .unwrap_or(0);
@@ -2381,7 +2920,7 @@ impl Desktop {
                 },
             ));
         }
-        let (progress, history) = self.task_progress_sections(task, cx);
+        let (progress, _) = self.task_progress_sections(task, cx);
         card = card.when_some(progress, |view, progress| view.child(progress));
         let mut actions = h_flex().gap_2().flex_wrap();
         if matches!(
@@ -2448,7 +2987,11 @@ impl Desktop {
                 w.state
                     .tasks
                     .iter()
-                    .filter(|other| other.id != id && !other.state.finished())
+                    .filter(|other| {
+                        other.id != id
+                            && other.handled_by.is_none()
+                            && other.state == TaskState::Queued
+                    })
                     .count()
             })
             .unwrap_or(0);
@@ -2459,10 +3002,6 @@ impl Desktop {
                     .text_color(color(GRAY))
                     .child(format!("队列中还有 {more} 个任务等待处理。")),
             );
-        }
-        card = card.when_some(history, |view, history| view.child(history));
-        if let Some(logs) = self.task_log_view(task) {
-            card = card.child(logs);
         }
         card
     }
@@ -2496,16 +3035,35 @@ impl Desktop {
         } else {
             Vec::new()
         };
+        let requires_repair = task_requires_service_repair(task);
         let mut card = v_flex()
             .w_full()
             .min_w_0()
             .gap_4()
-            .child(self.task_heading(task))
-            .child(self.task_processing_facts(task));
-        if let Some(message) = self.task_feedback_view(task) {
+            .child(self.task_heading(task));
+        if let Some(message) = self
+            .task_feedback_view(task)
+            .filter(|_| partial_failures.is_empty())
+        {
             card = card.child(message);
         }
-        for (component, _, reason) in &partial_failures {
+        if let Some(reason) = task_service_repair_reason(task) {
+            let missing = partial_failures
+                .iter()
+                .map(|(_, label, _)| label.as_str())
+                .collect::<Vec<_>>()
+                .join("、");
+            card = card.child(
+                accessible_text(
+                    SharedString::from(format!("box-service-repair-reason-{id}")),
+                    format!("{missing}尚未完成。{reason}"),
+                )
+                .text_sm(),
+            );
+        }
+        for (component, _, reason) in partial_failures.iter().filter(|(component, _, _)| {
+            !requires_repair || !matches!(component.as_str(), "proofreading" | "summary")
+        }) {
             card = card.child(
                 accessible_text(
                     SharedString::from(format!("box-partial-{id}-{component}")),
@@ -2518,19 +3076,52 @@ impl Desktop {
             card = card.child(block);
         }
         let (progress, history) = self.task_progress_sections(task, cx);
-        card = card.when_some(progress, |view, progress| view.child(progress));
+        card = card.when_some(
+            progress.filter(|_| partial_failures.is_empty()),
+            |view, progress| view.child(progress),
+        );
         let mut actions = h_flex().gap_2().flex_wrap();
         if !partial_failures.is_empty() {
-            for (index, (component, label, _)) in partial_failures.iter().enumerate() {
-                let component = component.clone();
-                let button = if index == 0 {
-                    primary_pill(SharedString::from(format!("box-retry-{id}-{component}")))
-                        .self_start()
-                } else {
-                    outline_pill(SharedString::from(format!("box-retry-{id}-{component}")))
-                };
+            if let Some(path) = &task.artifact {
+                let path = path.clone();
+                let title = task.plan.title.clone();
                 actions = actions.child(
-                    button
+                    primary_pill(SharedString::from(format!("box-read-{id}")))
+                        .icon(icons::book_open())
+                        .label("阅读笔记")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_course(
+                                Course::from_completed(&Completed {
+                                    out_dir: path.clone(),
+                                    title: title.clone(),
+                                    ..Default::default()
+                                }),
+                                cx,
+                            );
+                        })),
+                );
+            }
+            if partial_failures
+                .iter()
+                .any(|(component, _, _)| matches!(component.as_str(), "proofreading" | "summary"))
+            {
+                let repair_id = id.clone();
+                actions = actions.child(
+                    outline_pill(SharedString::from(format!("box-repair-ai-{id}")))
+                        .icon(icons::settings())
+                        .label("修复 AI 服务并补做")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.repair_task_service(repair_id.clone(), window, cx);
+                        })),
+                );
+            }
+            for (component, label, _) in &partial_failures {
+                if requires_repair && matches!(component.as_str(), "proofreading" | "summary") {
+                    continue;
+                }
+                let component = component.clone();
+                actions = actions.child(
+                    quiet(SharedString::from(format!("box-retry-{id}-{component}")))
                         .icon(icons::refresh())
                         .label(format!("仅补{label}"))
                         .on_click(cx.listener({
@@ -2546,22 +3137,16 @@ impl Desktop {
                         })),
                 );
             }
-            if let Some(path) = &task.artifact {
-                let path = path.clone();
-                actions = actions.child(
-                    outline_pill(SharedString::from(format!("box-read-{id}")))
-                        .icon(icons::book_open())
-                        .label("阅读笔记")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let done = Completed {
-                                out_dir: path.clone(),
-                                title: task_title(&path),
-                                ..Default::default()
-                            };
-                            this.open_course(Course::from_completed(&done), cx);
-                        })),
-                );
-            }
+            let details_id = id.clone();
+            actions = actions.child(
+                quiet(SharedString::from(format!("box-task-details-{id}")))
+                    .icon(icons::task())
+                    .label("查看任务详情")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_task(&details_id, cx);
+                        this.navigate(Page::Task, cx);
+                    })),
+            );
         } else if !uncertain {
             actions = actions.child(
                 primary_pill(SharedString::from(format!("box-resume-{id}")))
@@ -2623,10 +3208,14 @@ impl Desktop {
                         })),
                 );
         }
-        card = card
-            .child(actions)
-            .when_some(history, |view, history| view.child(history));
-        if let Some(logs) = self.task_log_view(task) {
+        card = card.child(actions).when_some(
+            history.filter(|_| partial_failures.is_empty()),
+            |view, history| view.child(history),
+        );
+        if let Some(logs) = self
+            .task_log_view(task)
+            .filter(|_| partial_failures.is_empty())
+        {
             card = card.child(logs);
         }
         card
@@ -2641,17 +3230,6 @@ fn task_badge_kind(state: TaskState) -> BadgeKind {
         TaskState::Uncertain | TaskState::Partial => BadgeKind::Warning,
         _ => BadgeKind::Neutral,
     }
-}
-
-fn task_title(path: &std::path::Path) -> String {
-    course2md::artifact::read_manifest(&path.join("manifest.json"))
-        .map(|m| m.title)
-        .unwrap_or_else(|_| {
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        })
 }
 
 impl ConversionOptions {
@@ -2721,9 +3299,7 @@ fn task_status_label(task: &TaskRecord) -> String {
             description.into()
         };
     }
-    if matches!(&task.plan.operation, course2md::execution::Operation::Reprocess { components, .. } if components.iter().all(|part| part == "exports"))
-        && task.state == TaskState::Complete
-    {
+    if task.exports_only() && task.state == TaskState::Complete {
         "文件已导出".into()
     } else {
         task.state.label().into()
@@ -2744,7 +3320,7 @@ fn request_scope(request: &workspace::BlockedRequest) -> String {
         } else {
             "外部处理"
         };
-        format!("{name}：此历史请求未保存具体内容范围，可在原始日志中查看请求记录。")
+        format!("{name}：此历史请求未保存具体内容范围，可在技术详情中查看请求记录。")
     }
 }
 
@@ -2769,6 +3345,83 @@ mod tests {
         task_stage_progress, update_draft_source_title, update_input_form, validate_plan_config,
         validate_plan_storage, worker_wait_state,
     };
+
+    #[test]
+    fn a_published_repair_replaces_the_stale_card_before_a_library_scan() {
+        use crate::{backend::Completed, notes::Course};
+        use course2md::artifact::{Manifest, Outcome, Outcomes};
+        use std::{
+            path::PathBuf,
+            time::{Duration, UNIX_EPOCH},
+        };
+
+        let mut outcomes = Outcomes::default();
+        outcomes.transcript = Outcome::succeeded();
+        outcomes.proofreading = Outcome::failed("服务拒绝凭据");
+        let old_manifest = Manifest {
+            schema: 1,
+            task_id: "old".into(),
+            course_id: "course".into(),
+            source_id: "same-source".into(),
+            version_id: "old".into(),
+            title: "原始课程名".into(),
+            created_at_ms: 1_000,
+            revision: 1,
+            document: "document.json".into(),
+            markdown: "course.md".into(),
+            frames: Vec::new(),
+            assets: Vec::new(),
+            outputs: Vec::new(),
+            outcomes,
+            partial: true,
+        };
+        let old = Course {
+            dir: "/library/course/versions/old".into(),
+            title: "用户命名".into(),
+            modified: UNIX_EPOCH + Duration::from_secs(1),
+            slides: 0,
+            segments: 1,
+            thumbnail: Some("/old-cover.jpg".into()),
+            manifest: Some(old_manifest.clone()),
+            warning: None,
+        };
+        let mut other_library = old.clone();
+        other_library.dir = "/other-library/course/versions/old".into();
+        let mut courses = vec![old.clone(), other_library.clone()];
+        let mut repaired = old_manifest;
+        repaired.task_id = "repair".into();
+        repaired.version_id = "repair".into();
+        repaired.revision = 2;
+        repaired.created_at_ms = 2_000;
+        repaired.partial = false;
+        repaired.outcomes.proofreading = Outcome::succeeded();
+        let done = Completed {
+            out_dir: "/library/course/versions/repair".into(),
+            title: repaired.title.clone(),
+            segments: 4,
+            ..Default::default()
+        };
+        super::update_published_course(
+            &mut courses,
+            &done,
+            &repaired,
+            Some(PathBuf::from("/new-cover.jpg")),
+        );
+        assert_eq!(courses.len(), 2);
+        let current = &courses[0];
+        assert_eq!(current.dir, done.out_dir);
+        assert_eq!(current.title, "用户命名");
+        assert_eq!(current.segments, 4);
+        assert_eq!(
+            current.thumbnail.as_deref(),
+            Some(std::path::Path::new("/new-cover.jpg"))
+        );
+        assert!(!current.description().contains("部分内容待补全"));
+        assert_eq!(current.manifest.as_ref().unwrap().version_id, "repair");
+        assert_eq!(courses[1].dir, other_library.dir);
+        assert!(courses[1].description().contains("部分内容待补全"));
+        assert!(old.manifest.as_ref().unwrap().partial);
+    }
     use crate::workspace::{Intent, TaskState};
 
     #[test]
@@ -2978,6 +3631,38 @@ mod tests {
                 .contains(&crate::workspace::Override::Formats)
         );
         assert_ne!(input.updated, 123);
+    }
+
+    #[test]
+    fn temporary_speech_service_keeps_the_explicit_local_engine_for_the_same_input() {
+        let mut draft = crate::workspace::Draft::new(true, "library".into(), Default::default());
+        draft.change_source("video".into());
+        let mut options = draft.options.clone();
+        options.provider = 3;
+        update_input_form(
+            &mut draft,
+            "video".into(),
+            "".into(),
+            None,
+            options.clone(),
+            None,
+            0.,
+        );
+        assert_eq!(draft.local_provider, Some(3));
+        options.provider = 5;
+        update_input_form(
+            &mut draft,
+            "video".into(),
+            "".into(),
+            None,
+            options,
+            None,
+            0.,
+        );
+        assert_eq!(draft.options.provider, 5);
+        assert_eq!(draft.local_provider, Some(3));
+        let next = crate::workspace::Draft::new(true, "library".into(), Default::default());
+        assert_eq!(next.local_provider, Some(0));
     }
 
     #[test]
@@ -3231,12 +3916,72 @@ mod tests {
         assert_eq!(failures[0].2.completed, Some(1));
         assert_eq!(failures[1].2.message.as_deref(), Some("HTML 写入失败"));
 
+        for (message, requires_repair) in [
+            (
+                "服务未接受此任务保存的凭据，请检查对应服务的 API Key。",
+                true,
+            ),
+            ("此任务使用的凭据没有访问该服务或模型的权限。", true),
+            (
+                "服务未找到此任务指定的接口或模型，请检查服务地址和模型。",
+                true,
+            ),
+            (
+                "服务拒绝了请求参数（HTTP 422），请检查此任务使用的模型与服务设置。",
+                true,
+            ),
+            ("服务请求次数达到限制，请稍后重试。", false),
+            ("服务未完成此请求（HTTP 500）。", false),
+            ("请求超时，请稍后重试。", false),
+        ] {
+            outcomes.proofreading.message = Some(message.into());
+            task.outcomes = Some(serde_json::to_value(&outcomes).unwrap());
+            assert_eq!(
+                super::task_requires_service_repair(&task),
+                requires_repair,
+                "{message}"
+            );
+        }
+        outcomes.proofreading.message = Some("服务拒绝凭据".into());
+        task.outcomes = Some(serde_json::to_value(&outcomes).unwrap());
+        task.blocked.push(crate::workspace::BlockedRequest {
+            reason: "uncertain".into(),
+            request_id: Some("pending".into()),
+            purpose: Some("summary".into()),
+            description: "摘要".into(),
+            message: "结果尚未确认".into(),
+        });
+        assert!(!super::task_requires_service_repair(&task));
+        task.blocked.clear();
+        task.handled_by = Some("recovery".into());
+        assert!(!super::task_requires_service_repair(&task));
+        task.handled_by = None;
+
         outcomes.proofreading = Outcome::succeeded();
         outcomes.exports.insert("html".into(), Outcome::succeeded());
         task.outcomes = Some(serde_json::to_value(outcomes).unwrap());
         assert!(super::task_component_failures(&task, &path).is_empty());
+        task.error = Some("服务拒绝凭据".into());
+        assert!(!super::task_requires_service_repair(&task));
         task.outcomes = None;
         assert!(super::task_component_failures(&task, &path).is_empty());
+
+        let mut completed = task.clone();
+        completed.id = "recovered".into();
+        completed.state = TaskState::Complete;
+        let mut history = task.clone();
+        history.id = "original".into();
+        history.state = TaskState::Paused;
+        history.handled_by = Some(completed.id.clone());
+        let mut running = task.clone();
+        running.id = "running".into();
+        running.state = TaskState::Running;
+        assert_eq!(super::task_group(&task), super::TaskGroup::Attention);
+        assert_eq!(super::task_group(&history), super::TaskGroup::History);
+        assert_eq!(
+            super::actionable_task_count(&[task, completed, history, running]),
+            2
+        );
     }
 }
 pub(crate) fn task_component_failures(

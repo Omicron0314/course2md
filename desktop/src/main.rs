@@ -165,6 +165,8 @@ struct Desktop {
     workspace_error: Option<String>,
     preference_defaults_pending: bool,
     active_task: Option<String>,
+    transient_task_result: Option<(String, Instant)>,
+    reader_opened_notice_at: Option<Instant>,
     draft_loading: bool,
     draft_deadline: Option<Instant>,
     quit_deadline: Option<Instant>,
@@ -244,6 +246,8 @@ struct Desktop {
     preview: Option<backend::Preview>,
     read_generation: u64,
     reading: bool,
+    opening_course: Option<PathBuf>,
+    reader_course_error: Option<(PathBuf, String)>,
     reader_failure_notice: Option<String>,
     reader_scroll: ScrollHandle,
     reader_saved_offset: f32,
@@ -444,6 +448,8 @@ impl Desktop {
             workspace_error,
             preference_defaults_pending: false,
             active_task: None,
+            transient_task_result: None,
+            reader_opened_notice_at: None,
             draft_loading: false,
             draft_deadline: None,
             quit_deadline: None,
@@ -523,6 +529,8 @@ impl Desktop {
             preview: None,
             read_generation: 0,
             reading: false,
+            opening_course: None,
+            reader_course_error: None,
             reader_failure_notice: None,
             reader_scroll: ScrollHandle::new(),
             reader_saved_offset: f32::NAN,
@@ -536,6 +544,7 @@ impl Desktop {
         // inherited options after an interrupted save before restoring input.
         this.refresh_preference_defaults(cx);
         this.restore_draft(window, cx);
+        this.prepare_workbench_input(window, cx);
         this.restore_storage_state(cx);
         cx.set_reduce_motion(this.desktop_settings.reduce_motion);
         this.refresh_account(cx);
@@ -631,6 +640,9 @@ impl Desktop {
     }
 
     fn import_video_from_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_workbench_input(window, cx) {
+            return;
+        }
         self.source_editor_open = true;
         self.navigate(Page::New, cx);
         if self.online {
@@ -639,12 +651,19 @@ impl Desktop {
     }
 
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
-        if page != Page::New {
+        self.transient_task_result = None;
+        if page != Page::New
+            || matches!(
+                self.following_conversion,
+                Some(import_ui::ConversionFollow::ReaderTask { .. })
+            )
+        {
             self.following_conversion = None;
         }
         self.save_reading_position(cx);
         self.read_generation = self.read_generation.wrapping_add(1);
         self.reading = false;
+        self.opening_course = None;
         if self.page == Page::New {
             self.save_current_draft(cx);
         }
@@ -798,6 +817,24 @@ impl Desktop {
         cx.notify();
     }
     fn poll(&mut self, cx: &mut Context<Self>) {
+        if self
+            .reader_opened_notice_at
+            .is_some_and(|shown| shown.elapsed() >= Duration::from_secs(5))
+        {
+            self.reader_opened_notice_at = None;
+            if self.message.as_deref() == Some("笔记已打开") {
+                self.message = None;
+                cx.notify();
+            }
+        }
+        if self
+            .transient_task_result
+            .as_ref()
+            .is_some_and(|(_, shown)| shown.elapsed() >= Duration::from_secs(8))
+        {
+            self.transient_task_result = None;
+            cx.notify();
+        }
         self.poll_storage(cx);
         self.save_reading_position(cx);
         if self
@@ -1093,8 +1130,19 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         self.save_reading_position(cx);
+        let reader_revision = self.read_generation;
+        let reader_origin = follow.as_ref().and_then(|follow| {
+            if !matches!(follow, import_ui::ConversionFollow::ReaderTask { .. }) {
+                return None;
+            }
+            let manifest = self.preview.as_ref()?.course.manifest.as_ref()?;
+            Some((manifest.course_id.clone(), manifest.version_id.clone()))
+        });
         cx.notify();
         self.reading = true;
+        let reading_path = course.dir.clone();
+        self.opening_course = Some(reading_path.clone());
+        self.reader_course_error = None;
         self.read_generation = self.read_generation.wrapping_add(1);
         let generation = self.read_generation;
         let origin = self.page;
@@ -1123,19 +1171,47 @@ impl Desktop {
                     return;
                 }
                 this.reading = false;
+                this.opening_course = None;
+                if this.reader_viewer_open() {
+                    import_ui::ConversionFollow::interrupt_for_reader_viewer(
+                        &mut this.following_conversion,
+                    );
+                }
                 if follow.as_ref().is_some_and(|follow| {
                     this.following_conversion.as_ref() != Some(follow)
-                        || !matches!(follow, import_ui::ConversionFollow::Task { source_revision, .. }
-                            if *source_revision == this.preview_generation)
+                        || !follow.context_is_current(
+                            this.page,
+                            this.preview_generation,
+                            reader_revision,
+                            this.preview.as_ref().map(|preview| preview.course.dir.as_path()),
+                        )
                 }) {
                     cx.notify();
                     return;
                 }
                 match result {
                     Ok(preview) => {
+                        // The old note remains scrollable during the read. Its
+                        // current anchor, after all ownership guards pass, is the
+                        // one that belongs in the repaired version.
+                        if reader_origin.is_some() {
+                            this.save_reading_position(cx);
+                        }
                         if let Some(workspace) = &mut this.workspace {
                             let artifact = preview.course.dir.clone();
                             if let Err(error) = workspace.transaction(|state| {
+                                // A repair publishes a new version of the same note.
+                                // Carry its existing anchors into both reading modes;
+                                // the reader resolves changed paragraphs by timestamp.
+                                if let (Some((course_id, previous)), Some(manifest)) =
+                                    (&reader_origin, &preview.course.manifest)
+                                {
+                                    carry_repaired_reading_positions(
+                                        &mut state.positions,
+                                        (course_id, previous),
+                                        (&manifest.course_id, &manifest.version_id),
+                                    );
+                                }
                                 for task in &mut state.tasks {
                                     if task.artifact.as_ref() == Some(&artifact) {
                                         task.unread = false;
@@ -1151,7 +1227,9 @@ impl Desktop {
                             &mut this.reader_failure_notice,
                             followed_notice.as_deref(),
                         );
-                        this.result_tab = 0;
+                        if reader_origin.is_none() {
+                            this.result_tab = 0;
+                        }
                         this.preview = Some(preview);
                         this.apply_course_title_aliases();
                         this.restore_reading_position(cx);
@@ -1159,7 +1237,8 @@ impl Desktop {
                         if follow.is_some() {
                             this.following_conversion = None;
                             if this.message.is_none() {
-                                this.message = Some("笔记已生成，已为你打开".into());
+                                this.message = Some("笔记已打开".into());
+                                this.reader_opened_notice_at = Some(Instant::now());
                             }
                         }
                     }
@@ -1167,21 +1246,42 @@ impl Desktop {
                         let io_kind = error.chain().find_map(|cause| {
                             cause.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
                         });
-                        this.message = Some(match io_kind {
+                        let message = match io_kind {
                             Some(std::io::ErrorKind::NotFound) =>
                                 "笔记文件暂时无法访问。请重新连接保存位置或恢复文件后再次阅读，也可刷新课程库。",
                             Some(std::io::ErrorKind::PermissionDenied) =>
                                 "暂时无法读取这份笔记。请检查保存位置的访问权限后再次阅读，也可刷新课程库。",
                             _ =>
                                 "这份笔记暂时无法读取。请检查保存位置中的文件，恢复可读版本后再次阅读，也可刷新课程库。",
-                        }.into());
-                        this.reader_failure_notice = this.message.clone();
+                        }.to_owned();
+                        this.reader_course_error = Some((reading_path, message.clone()));
+                        if origin != Page::Library {
+                            this.message = Some(message);
+                            this.reader_failure_notice = this.message.clone();
+                        }
                     }
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+}
+
+fn carry_repaired_reading_positions(
+    positions: &mut BTreeMap<String, workspace::ReadingPosition>,
+    previous: (&str, &str),
+    next: (&str, &str),
+) {
+    if previous.0 != next.0 || previous.1 == next.1 {
+        return;
+    }
+    for tab in 0..=1 {
+        let previous_key = format!("{}:{}:{tab}", previous.0, previous.1);
+        let next_key = format!("{}:{}:{tab}", next.0, next.1);
+        if let Some(position) = positions.get(&previous_key).cloned() {
+            positions.entry(next_key).or_insert(position);
+        }
     }
 }
 
@@ -1203,6 +1303,48 @@ fn settle_reader_notice(
 #[cfg(test)]
 mod reader_notice_tests {
     use super::settle_reader_notice;
+
+    #[test]
+    fn repair_position_handoff_uses_the_latest_old_position_and_keeps_existing_versions() {
+        use super::{BTreeMap, carry_repaired_reading_positions, workspace::ReadingPosition};
+        let start = ReadingPosition {
+            seconds: Some(12.),
+            offset: -120.,
+            ..Default::default()
+        };
+        let latest = ReadingPosition {
+            paragraph: Some("section-80".into()),
+            seconds: Some(80.),
+            offset: -840.,
+            fraction: Some(0.4),
+            ..Default::default()
+        };
+        let gallery = ReadingPosition {
+            seconds: Some(36.),
+            offset: -300.,
+            ..Default::default()
+        };
+        let mut positions = BTreeMap::from([
+            ("course:old:0".into(), start.clone()),
+            ("course:old:1".into(), gallery.clone()),
+        ]);
+        // The user keeps scrolling while the new version is read. Completion
+        // saves this latest old-note position before performing the handoff.
+        positions.insert("course:old:0".into(), latest.clone());
+        carry_repaired_reading_positions(&mut positions, ("course", "old"), ("course", "new"));
+        assert_eq!(positions["course:new:0"], latest);
+        assert_eq!(positions["course:new:1"], gallery);
+        assert_eq!(positions["course:old:0"], latest);
+        assert_eq!(positions["course:old:1"], gallery);
+
+        positions.insert("course:new:0".into(), start.clone());
+        carry_repaired_reading_positions(&mut positions, ("course", "old"), ("course", "new"));
+        assert_eq!(positions["course:new:0"], start);
+        let snapshot = positions.clone();
+        carry_repaired_reading_positions(&mut positions, ("course", "old"), ("different", "new"));
+        carry_repaired_reading_positions(&mut positions, ("course", "old"), ("course", "old"));
+        assert_eq!(positions, snapshot);
+    }
 
     #[test]
     fn successful_retry_clears_its_failed_read_notice() {

@@ -210,19 +210,75 @@ fn completed_input_task<'a>(
     tasks: &'a [workspace::TaskRecord],
     input: &str,
 ) -> Option<&'a workspace::TaskRecord> {
-    submitted_input_task(draft, tasks, input)
-        .filter(|task| task.state == workspace::TaskState::Complete && task.artifact.is_some())
+    submitted_input_task(draft, tasks, input).filter(|task| {
+        matches!(
+            task.state,
+            workspace::TaskState::Complete | workspace::TaskState::Partial
+        ) && task.artifact.is_some()
+    })
 }
 
-/// A live navigation intent is separate from the saved task. Leaving the
-/// workbench ends following without cancelling source preparation or work.
+/// A saved result is history when entering the workbench. A running or paused
+/// recovery, an uncertain request, and any changes after submission stay in place.
+fn retired_input_task<'a>(
+    draft: &workspace::Draft,
+    tasks: &'a [workspace::TaskRecord],
+    input: &str,
+) -> Option<&'a workspace::TaskRecord> {
+    let task = submitted_input_task(draft, tasks, input)?;
+    if !task.state.finished()
+        || task
+            .blocked
+            .iter()
+            .any(|request| request.reason == "uncertain")
+        || (task.state != workspace::TaskState::Cancelled && task.artifact.is_none())
+    {
+        return None;
+    }
+    let submitted = tasks
+        .iter()
+        .find(|task| Some(task.id.as_str()) == draft.submitted_task.as_deref())?;
+    (draft.title == submitted.plan.title
+        && draft.options == submitted.plan.options
+        && draft.library_id == submitted.plan.library_id
+        && draft.folder == submitted.plan.folder
+        && draft.subtitle == submitted.plan.subtitle
+        && draft
+            .asr_service
+            .as_ref()
+            .is_none_or(|id| Some(id) == submitted.plan.asr_service.as_ref())
+        && draft
+            .ai_service
+            .as_ref()
+            .is_none_or(|id| Some(id) == submitted.plan.ai_service.as_ref()))
+    .then_some(task)
+}
+
+/// A live navigation intent is separate from the saved task. Leaving its
+/// originating input or note ends following without cancelling the work.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ConversionFollow {
     Preparing(u64),
-    Task { id: String, source_revision: u64 },
+    Task {
+        id: String,
+        source_revision: u64,
+    },
+    ReaderTask {
+        id: String,
+        base_version: PathBuf,
+        reader_revision: u64,
+    },
 }
 
 impl ConversionFollow {
+    /// Opening a viewer owns the old version until the person closes it. Do not
+    /// restore this intent afterwards, even if an in-flight read is still pending.
+    pub(crate) fn interrupt_for_reader_viewer(follow: &mut Option<Self>) {
+        if matches!(follow, Some(Self::ReaderTask { .. })) {
+            *follow = None;
+        }
+    }
+
     pub(crate) fn submitted(self, revision: u64, id: String) -> Option<Self> {
         matches!(self, Self::Preparing(current) if current == revision).then_some(Self::Task {
             id,
@@ -233,6 +289,81 @@ impl ConversionFollow {
     pub(crate) fn follows(&self, id: &str, revision: u64) -> bool {
         matches!(self, Self::Task { id: followed, source_revision }
             if followed == id && *source_revision == revision)
+    }
+
+    pub(crate) fn reader_reprocess(
+        task: &workspace::TaskRecord,
+        version: &std::path::Path,
+        revision: u64,
+    ) -> Option<Self> {
+        let course2md::execution::Operation::Reprocess {
+            base_version_dir,
+            components,
+            ..
+        } = &task.plan.operation
+        else {
+            return None;
+        };
+        (base_version_dir == version && !components.is_empty() && !task.exports_only()).then(|| {
+            Self::ReaderTask {
+                id: task.id.clone(),
+                base_version: base_version_dir.clone(),
+                reader_revision: revision,
+            }
+        })
+    }
+
+    /// Check both before starting an automatic read and after its asynchronous
+    /// load. The latter also retains the caller's existing read-generation guard.
+    pub(crate) fn context_is_current(
+        &self,
+        page: Page,
+        source_revision: u64,
+        reader_revision: u64,
+        version: Option<&std::path::Path>,
+    ) -> bool {
+        match self {
+            Self::Preparing(_) => false,
+            Self::Task {
+                source_revision: expected,
+                ..
+            } => page == Page::New && *expected == source_revision,
+            Self::ReaderTask {
+                base_version,
+                reader_revision: expected,
+                ..
+            } => {
+                page == Page::Result
+                    && *expected == reader_revision
+                    && version == Some(base_version.as_path())
+            }
+        }
+    }
+
+    pub(crate) fn completed_reader_task(
+        &self,
+        task: &workspace::TaskRecord,
+        page: Page,
+        reader_revision: u64,
+        version: Option<&std::path::Path>,
+    ) -> bool {
+        let Self::ReaderTask {
+            id, base_version, ..
+        } = self
+        else {
+            return false;
+        };
+        task.id == *id
+            && self.context_is_current(page, 0, reader_revision, version)
+            && Self::reader_reprocess(task, base_version, reader_revision).as_ref() == Some(self)
+            && matches!(
+                task.state,
+                workspace::TaskState::Complete | workspace::TaskState::Partial
+            )
+            && task
+                .artifact
+                .as_ref()
+                .is_some_and(|path| path != base_version)
     }
 
     pub(crate) fn completed_task<'a>(
@@ -1168,13 +1299,8 @@ impl Desktop {
         let Some(source) = &self.source_preview else {
             return v_flex();
         };
-        let can_close_input = self.source_editor_open
-            && self.value(Field::Source, cx) == source.input
-            && self
-                .workspace
-                .as_ref()
-                .and_then(|workspace| workspace.state.draft())
-                .is_none_or(|input| input.submitted_task.is_none());
+        let can_close_input =
+            self.source_editor_open && self.value(Field::Source, cx) == source.input;
         let mut selected = h_flex().gap_4().items_start();
         if let Some(cover) = &source.cover {
             selected = selected.child(
@@ -1221,6 +1347,10 @@ impl Desktop {
                     h_flex()
                         .gap_2()
                         .flex_wrap()
+                        .when(
+                            !self.source_editor_open && self.can_start_input(cx),
+                            |row| row.child(self.box_bottom_row(cx)),
+                        )
                         .child(
                             quiet("change-source")
                                 .icon(if can_close_input {
@@ -1802,7 +1932,16 @@ impl Desktop {
                     .options([("local", "本机识别"), ("cloud", "识别服务")])
                     .selected(if cloud { "cloud" } else { "local" })
                     .on_change(cx.listener(|this, value: &SharedString, _, cx| {
-                        this.task_options.provider = if value.as_ref() == "cloud" { 5 } else { 0 };
+                        this.task_options.provider = if value.as_ref() == "cloud" {
+                            5
+                        } else {
+                            this.workspace
+                                .as_ref()
+                                .and_then(|workspace| workspace.state.draft())
+                                .and_then(|draft| draft.local_provider)
+                                .filter(|provider| *provider < 5)
+                                .unwrap_or(0)
+                        };
                         if this.save_current_draft(cx) {
                             this.advance_conversion_when_ready(cx);
                         }
@@ -2364,10 +2503,76 @@ impl Desktop {
         submitted_input_task(state.draft()?, &state.tasks, &self.value(Field::Source, cx))
     }
 
+    /// Called by explicit workbench entry and initial restoration, never render.
+    /// Terminal tasks remain in the task list and recent notes after their input
+    /// has become a fresh form; an in-flight or edited input is never replaced.
+    pub(super) fn prepare_workbench_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pending_conversion.is_some() || self.following_conversion.is_some() {
+            return true;
+        }
+        let input = self.value(Field::Source, cx);
+        let has_old_result = self.workspace.as_ref().is_some_and(|workspace| {
+            workspace.state.draft().is_some_and(|draft| {
+                retired_input_task(draft, &workspace.state.tasks, &input).is_some()
+            })
+        });
+        if !has_old_result {
+            return true;
+        }
+        if !self.save_current_draft(cx) {
+            return false;
+        }
+        let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
+        let Some(workspace) = &mut self.workspace else {
+            return true;
+        };
+        let Some(draft) = workspace.state.draft() else {
+            return true;
+        };
+        if retired_input_task(draft, &workspace.state.tasks, &input).is_none() {
+            return true;
+        }
+        let destination = (draft.library_id == workspace.state.default_library)
+            .then(|| {
+                draft
+                    .folder
+                    .map(|folder| (draft.library_id.clone(), folder))
+            })
+            .flatten();
+        match workspace.transaction(|state| {
+            state.reset_input(self.online, defaults, destination);
+            Ok(())
+        }) {
+            Ok(()) => {
+                self.completed_source = None;
+                self.invalidate_source();
+                self.restore_draft(window, cx);
+                self.source_editor_open = true;
+                self.generation_options_open = false;
+                true
+            }
+            Err(error) => {
+                self.workspace_error = Some(format!(
+                    "新的视频输入尚未建立：{error:#}。原输入和任务仍保留。"
+                ));
+                cx.notify();
+                false
+            }
+        }
+    }
+
     pub fn new_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let opening_result = self.reading && self.following_conversion.is_some();
         let linked_task = self.current_input_task(cx).cloned().filter(|task| {
-            (opening_result && task.state == workspace::TaskState::Complete)
+            (opening_result
+                && matches!(
+                    task.state,
+                    workspace::TaskState::Complete | workspace::TaskState::Partial
+                ))
                 || !task.state.finished()
                 || (task.state == workspace::TaskState::Partial
                     && task.artifact.as_ref().is_some_and(|path| {
@@ -2382,9 +2587,6 @@ impl Desktop {
             let (provider, model, root) = self.import_model_request();
             self.ensure_model_diagnostic(provider, Some(&model), &root, cx);
         }
-        let existing_note_decision = linked_task.is_none()
-            && self.matching_current_task().is_none()
-            && self.existing_source_note().is_some();
         let cancelled_notice = self
             .current_input_task(cx)
             .filter(|task| task.state == workspace::TaskState::Cancelled)
@@ -2394,21 +2596,13 @@ impl Desktop {
                     crate::task_ui::task_attention_summary(task),
                 )
             });
-        let mut input = v_flex()
+        let show_source_input = self.source_preview.is_none() || self.source_editor_open;
+        let input = v_flex()
             .w_full()
             .min_w_0()
             .gap_4()
             .child(self.source_kind_tabs(cx))
             .child(self.box_source_input(window, cx));
-        if let Some((id, message)) = cancelled_notice {
-            input = input.child(info_callout(
-                SharedString::from(format!("cancelled-input-task-{id}")),
-                message,
-            ));
-        }
-        if existing_note_decision {
-            input = input.child(self.conversion_recovery(cx));
-        }
         let mut view = v_flex()
             .pt(px(24.))
             .gap_6()
@@ -2419,10 +2613,30 @@ impl Desktop {
                     .text_size(TEXT_DISPLAY)
                     .font_weight(FontWeight::SEMIBOLD),
             )
-            .child(input);
+            .when(show_source_input, |view| view.child(input));
+        if let Some((id, message)) = cancelled_notice {
+            view = view.child(info_callout(
+                SharedString::from(format!("cancelled-input-task-{id}")),
+                message,
+            ));
+        }
         if let Some(task) = linked_task {
+            if show_source_input {
+                view = view.child(
+                    quiet("hide-source-editor")
+                        .self_start()
+                        .icon(icons::chevron_up())
+                        .label("收起输入")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.source_editor_open = false;
+                            cx.notify();
+                        })),
+                );
+            }
             let task_view = match task.state {
-                workspace::TaskState::Complete if opening_result => {
+                workspace::TaskState::Complete | workspace::TaskState::Partial
+                    if opening_result =>
+                {
                     self.box_task_opening_result(&task, cx)
                 }
                 workspace::TaskState::Queued
@@ -2438,9 +2652,20 @@ impl Desktop {
                     .border_1()
                     .border_color(color(HAIRLINE)),
             );
+            if !show_source_input {
+                view = view.child(
+                    quiet("convert-another-video")
+                        .self_start()
+                        .icon(icons::plus())
+                        .label("转换其他视频")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.import_video_from_action(window, cx);
+                        })),
+                );
+            }
         } else {
             let text_required = self.subtitle_attention_required();
-            if self.source_preview.is_some() && !existing_note_decision {
+            if self.source_preview.is_some() {
                 let mut source = v_flex()
                     .w_full()
                     .min_w_0()
@@ -2534,6 +2759,23 @@ impl Desktop {
             && submission_error.as_deref() == Some("正在检查生成笔记需要的组件，请稍候");
         let mut inset = v_flex().w_full().min_w_0().gap_3();
         let mut actions = h_flex().gap_2().flex_wrap();
+        if self.environment.as_ref().is_some_and(|environment| {
+            !environment.engine
+                || !environment.ffmpeg
+                || !environment.ffprobe
+                || (self.online && !environment.ytdlp)
+        }) {
+            actions = actions.child(
+                outline_pill("repair-conversion-components")
+                    .icon(icons::settings())
+                    .label("检查所需组件")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.settings_tab = 3;
+                        this.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
+                        this.open_settings(window, cx);
+                    })),
+            );
+        }
         if let Some(issue) = preferences_issue {
             actions = actions.child(
                 outline_pill("repair-generation-preferences")
@@ -2895,8 +3137,138 @@ mod tests {
         assert!(
             followed
                 .completed_task(true, 7, &draft, &tasks, &draft.input)
-                .is_none()
+                .is_some()
         );
+    }
+
+    #[test]
+    fn reader_repair_opens_the_new_version_only_while_the_original_note_is_still_open() {
+        let (_, mut tasks) = submitted_recovery_chain();
+        let original = std::path::Path::new("versions/original");
+        let follow = ConversionFollow::reader_reprocess(&tasks[1], original, 12).unwrap();
+        // Submitting a recovery is not enough: it must publish a readable result.
+        assert!(!follow.completed_reader_task(&tasks[1], super::Page::Result, 12, Some(original)));
+        tasks[1].artifact = Some("versions/recovery".into());
+        for state in [
+            workspace::TaskState::Complete,
+            workspace::TaskState::Partial,
+        ] {
+            tasks[1].state = state;
+            assert!(follow.completed_reader_task(
+                &tasks[1],
+                super::Page::Result,
+                12,
+                Some(original)
+            ));
+        }
+        for page in [
+            super::Page::New,
+            super::Page::Library,
+            super::Page::Task,
+            super::Page::Settings,
+        ] {
+            assert!(!follow.completed_reader_task(&tasks[1], page, 12, Some(original)));
+        }
+        // Leaving and returning to the same note has a new read generation.
+        assert!(!follow.completed_reader_task(&tasks[1], super::Page::Result, 13, Some(original)));
+        assert!(!follow.completed_reader_task(
+            &tasks[1],
+            super::Page::Result,
+            12,
+            Some(std::path::Path::new("versions/another-note")),
+        ));
+        assert!(!follow.completed_reader_task(&tasks[1], super::Page::Result, 12, None));
+        let mut unrelated = tasks[1].clone();
+        unrelated.id = "another-repair".into();
+        assert!(!follow.completed_reader_task(&unrelated, super::Page::Result, 12, Some(original)));
+        for state in [
+            workspace::TaskState::Running,
+            workspace::TaskState::Paused,
+            workspace::TaskState::Uncertain,
+        ] {
+            tasks[1].state = state;
+            assert!(!follow.completed_reader_task(
+                &tasks[1],
+                super::Page::Result,
+                12,
+                Some(original)
+            ));
+        }
+    }
+
+    #[test]
+    fn reader_repair_guard_excludes_exports_and_rechecks_the_note_when_loading_finishes() {
+        let (_, mut tasks) = submitted_recovery_chain();
+        let original = std::path::Path::new("versions/original");
+        let follow = ConversionFollow::reader_reprocess(&tasks[1], original, 12).unwrap();
+        assert!(follow.context_is_current(super::Page::Result, 99, 12, Some(original)));
+        assert!(!follow.context_is_current(super::Page::Result, 99, 13, Some(original)));
+        assert!(!follow.context_is_current(super::Page::Library, 99, 12, Some(original)));
+        assert!(!follow.context_is_current(
+            super::Page::Result,
+            99,
+            12,
+            Some(std::path::Path::new("versions/other")),
+        ));
+
+        let course2md::execution::Operation::Reprocess { components, .. } =
+            &mut tasks[1].plan.operation
+        else {
+            unreachable!();
+        };
+        *components = vec!["exports".into()];
+        tasks[1].state = workspace::TaskState::Complete;
+        tasks[1].artifact = Some(original.to_owned());
+        assert!(ConversionFollow::reader_reprocess(&tasks[1], original, 12).is_none());
+        assert!(!follow.completed_reader_task(&tasks[1], super::Page::Result, 12, Some(original)));
+        // Even a spurious new artifact cannot turn an export-only task into navigation.
+        tasks[1].artifact = Some("versions/recovery".into());
+        assert!(!follow.completed_reader_task(&tasks[1], super::Page::Result, 12, Some(original)));
+        tasks[1].plan.operation = Default::default();
+        assert!(ConversionFollow::reader_reprocess(&tasks[1], original, 12).is_none());
+    }
+
+    #[test]
+    fn opening_a_reader_viewer_ends_repair_following_even_if_it_closes_before_the_read_finishes() {
+        let (_, mut tasks) = submitted_recovery_chain();
+        let original = std::path::Path::new("versions/original");
+        let captured = ConversionFollow::reader_reprocess(&tasks[1], original, 12).unwrap();
+        tasks[1].state = workspace::TaskState::Complete;
+        tasks[1].artifact = Some("versions/recovery".into());
+        for read_started in [false, true] {
+            let mut active = Some(captured.clone());
+            if read_started {
+                assert!(active.as_ref().unwrap().completed_reader_task(
+                    &tasks[1],
+                    super::Page::Result,
+                    12,
+                    Some(original),
+                ));
+            }
+            ConversionFollow::interrupt_for_reader_viewer(&mut active);
+            assert!(active.is_none());
+            // Closing the viewer only restores its underlying note. The old
+            // asynchronous callback still has a ticket, but no longer owns intent.
+            assert_ne!(active.as_ref(), Some(&captured));
+            assert!(
+                !active
+                    .as_ref()
+                    .is_some_and(|follow| follow.completed_reader_task(
+                        &tasks[1],
+                        super::Page::Result,
+                        12,
+                        Some(original),
+                    ))
+            );
+        }
+        // A viewer must not cancel a distinct workbench conversion.
+        let mut input = Some(ConversionFollow::Task {
+            id: "conversion".into(),
+            source_revision: 7,
+        });
+        let expected = input.clone();
+        ConversionFollow::interrupt_for_reader_viewer(&mut input);
+        assert_eq!(input, expected);
     }
 
     #[test]
@@ -2953,7 +3325,7 @@ mod tests {
         }
         state.task_mut(&id).unwrap().state = workspace::TaskState::Partial;
         assert!(
-            completed_input_task(state.draft().unwrap(), &state.tasks, &source.input).is_none()
+            completed_input_task(state.draft().unwrap(), &state.tasks, &source.input).is_some()
         );
         state.task_mut(&id).unwrap().state = workspace::TaskState::Complete;
         state.prepare_next_import("https://www.bilibili.com/video/BVnext", Default::default());
@@ -3020,6 +3392,60 @@ mod tests {
         };
         original.handled_by = Some(recovery.id.clone());
         (draft, vec![original, recovery])
+    }
+
+    #[test]
+    fn workbench_entry_retires_only_unchanged_terminal_inputs() {
+        let (mut draft, mut tasks) = submitted_recovery_chain();
+        draft.title = tasks[0].plan.title.clone();
+        for state in [
+            workspace::TaskState::Complete,
+            workspace::TaskState::Partial,
+            workspace::TaskState::Cancelled,
+        ] {
+            tasks[1].state = state;
+            tasks[1].artifact = Some("versions/recovery".into());
+            assert_eq!(
+                super::retired_input_task(&draft, &tasks, &draft.input)
+                    .unwrap()
+                    .id,
+                "recovery"
+            );
+        }
+        for state in [
+            workspace::TaskState::Queued,
+            workspace::TaskState::Running,
+            workspace::TaskState::Pausing,
+            workspace::TaskState::Paused,
+            workspace::TaskState::NeedsAttention,
+            workspace::TaskState::Uncertain,
+        ] {
+            tasks[1].state = state;
+            assert!(super::retired_input_task(&draft, &tasks, &draft.input).is_none());
+        }
+        tasks[1].state = workspace::TaskState::Partial;
+        let unchanged = draft.clone();
+        draft.title = "尚未提交的新名称".into();
+        assert!(super::retired_input_task(&draft, &tasks, &draft.input).is_none());
+        draft = unchanged.clone();
+        draft.options.vision = !draft.options.vision;
+        assert!(super::retired_input_task(&draft, &tasks, &draft.input).is_none());
+        draft = unchanged.clone();
+        draft.folder = Some(42);
+        assert!(super::retired_input_task(&draft, &tasks, &draft.input).is_none());
+        draft = unchanged;
+        assert!(super::retired_input_task(&draft, &tasks, "新视频").is_none());
+        tasks[1].blocked.push(workspace::BlockedRequest {
+            reason: "uncertain".into(),
+            request_id: Some("pending-summary".into()),
+            purpose: Some("summary".into()),
+            description: "摘要".into(),
+            message: "结果未知".into(),
+        });
+        assert!(super::retired_input_task(&draft, &tasks, &draft.input).is_none());
+        tasks[1].blocked.clear();
+        tasks[1].artifact = None;
+        assert!(super::retired_input_task(&draft, &tasks, &draft.input).is_none());
     }
 
     #[test]

@@ -379,6 +379,7 @@ impl Desktop {
         let key = request.key();
         let entry = self.settings_ui.model_diagnostics.entries.get(&key);
         let device_issue = self.model_device_issue(provider);
+        let mut cache_details = None;
         let mut view = v_flex()
             .w_full()
             .min_w_0()
@@ -397,8 +398,8 @@ impl Desktop {
                 settings_value(
                     SharedString::from(format!("model-name-{key}")),
                     match request.model.as_str() {
-                        "qwen3-1.7b" => "Qwen3-ASR 1.7B · qwen3-1.7b".to_owned(),
-                        "qwen3-0.6b" => "Qwen3-ASR 0.6B · qwen3-0.6b".to_owned(),
+                        "qwen3-1.7b" => "Qwen3-ASR 1.7B".to_owned(),
+                        "qwen3-0.6b" => "Qwen3-ASR 0.6B".to_owned(),
                         _ => request.model.clone(),
                     },
                 ),
@@ -454,33 +455,37 @@ impl Desktop {
             ));
         }
         if let Some(status) = status {
-            let description = match status.state {
-                CacheState::Missing => "尚未下载，首次识别时自动准备。",
-                CacheState::Partial => "尚未下载完整，继续准备会复用已有文件。",
-                CacheState::Cached => "已下载，尚未验证加载。",
-                CacheState::Loaded => "已验证加载；缓存从上次检查后未改变。",
-                CacheState::Unsupported => {
-                    "这种识别方式不支持当前模型。原选择保留，请明确选择支持的模型。"
+            let (kind, label, description) = match status.state {
+                CacheState::Missing => (BadgeKind::Neutral, "待下载", "首次识别时自动准备。"),
+                CacheState::Partial => (
+                    BadgeKind::Warning,
+                    "待准备",
+                    "尚未下载完整，继续准备会复用已有文件。",
+                ),
+                CacheState::Cached => (BadgeKind::Neutral, "已下载", "尚未验证加载。"),
+                CacheState::Loaded => {
+                    (BadgeKind::Success, "已验证可加载", "验证后模型文件未改变。")
                 }
+                CacheState::Unsupported => (
+                    BadgeKind::Warning,
+                    "不支持",
+                    "这种识别方式不支持当前模型。原选择保留，请明确选择支持的模型。",
+                ),
             };
             view = view.child(settings_detail_row(
                 SharedString::from(format!("model-state-label-{key}")),
                 "模型状态",
-                settings_value(
-                    SharedString::from(format!("model-state-{key}")),
-                    description,
-                ),
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(badge(kind).child(label))
+                    .child(settings_value(
+                        SharedString::from(format!("model-state-{key}")),
+                        description,
+                    )),
             ));
-            if status.bytes > 0 {
-                view = view.child(settings_detail_row(
-                    SharedString::from(format!("model-cached-size-label-{key}")),
-                    "缓存占用",
-                    settings_value(
-                        SharedString::from(format!("model-cached-size-{key}")),
-                        bytes(status.bytes),
-                    ),
-                ));
-            }
             let detail_key = key.clone();
             let cache_open = self
                 .settings_ui
@@ -494,18 +499,21 @@ impl Desktop {
                     .w_full()
                     .min_w_0()
                     .gap_2()
-                    .child(settings_value(
-                        SharedString::from(format!("model-cache-path-{key}-{index}")),
-                        part.path.display().to_string(),
-                    ))
+                    .child(
+                        settings_value(
+                            SharedString::from(format!("model-cache-path-{key}-{index}")),
+                            part.path.display().to_string(),
+                        )
+                        .text_size(TEXT_AUX)
+                        .text_color(color(MUTED)),
+                    )
                     .when(
                         entry.is_some_and(|entry| entry.cache_directories.contains(&path)),
                         |view| {
                             view.child(
-                                control(SharedString::from(format!(
+                                quiet(SharedString::from(format!(
                                     "open-model-cache-{key}-{index}"
                                 )))
-                                .ghost()
                                 .icon(icons::folder_open())
                                 .label("打开缓存位置")
                                 .accessibility_label(format!(
@@ -513,7 +521,7 @@ impl Desktop {
                                     part.name,
                                     part.path.display()
                                 ))
-                                .self_start()
+                                .self_end()
                                 .on_click(move |_, _, cx| cx.open_with_system(&path)),
                             )
                         },
@@ -524,44 +532,81 @@ impl Desktop {
                         format!("缺少或尚未验证：{}", part.missing.join("、")),
                     ));
                 }
-                cache = cache.child(settings_detail_row(
-                    SharedString::from(format!("model-cache-part-label-{key}-{index}")),
-                    part.name.clone(),
-                    part_details,
-                ));
+                cache = cache.child(
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .p_4()
+                        .bg(color(SURFACE))
+                        .border_1()
+                        .border_color(color(CARD_LINE))
+                        .rounded(RADIUS_CARD)
+                        .child(
+                            semantic_label(
+                                SharedString::from(format!("model-cache-part-label-{key}-{index}")),
+                                part.name.clone(),
+                                icons::storage(),
+                            )
+                            .w_full()
+                            .min_w_0(),
+                        )
+                        .child(part_details),
+                );
             }
-            view = view
-                .child(
-                    quiet(SharedString::from(format!("model-cache-details-{key}")))
-                        .icon(icons::folder_open())
-                        .label(if cache_open {
-                            "收起缓存详情"
-                        } else {
-                            "查看缓存详情"
-                        })
-                        .self_start()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this
-                                .settings_ui
-                                .model_diagnostics
-                                .cache_details
-                                .remove(&detail_key)
-                            {
-                                this.settings_ui
-                                    .model_diagnostics
-                                    .cache_details
-                                    .insert(detail_key.clone());
-                            }
-                            cx.notify();
-                        })),
-                )
-                .child(crate::motion::disclosure(
-                    SharedString::from(format!("model-cache-content-{key}")),
-                    cache_open,
-                    cache,
-                    window,
-                    cx,
-                ));
+            cache_details = Some(
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_3()
+                            .flex_wrap()
+                            .child(
+                                quiet(SharedString::from(format!("model-cache-details-{key}")))
+                                    .icon(icons::folder_open())
+                                    .label(if cache_open {
+                                        "收起缓存详情"
+                                    } else {
+                                        "查看缓存详情"
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this
+                                            .settings_ui
+                                            .model_diagnostics
+                                            .cache_details
+                                            .remove(&detail_key)
+                                        {
+                                            this.settings_ui
+                                                .model_diagnostics
+                                                .cache_details
+                                                .insert(detail_key.clone());
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(status.bytes > 0, |row| {
+                                row.child(
+                                    settings_value(
+                                        SharedString::from(format!("model-cached-size-{key}")),
+                                        format!("缓存占用 {}", bytes(status.bytes)),
+                                    )
+                                    .text_size(TEXT_AUX)
+                                    .text_color(color(MUTED)),
+                                )
+                            }),
+                    )
+                    .child(crate::motion::disclosure(
+                        SharedString::from(format!("model-cache-content-{key}")),
+                        cache_open,
+                        cache,
+                        window,
+                        cx,
+                    )),
+            );
             if let Some(error) = &status.last_error {
                 view = view.child(settings_detail_row(
                     SharedString::from(format!("model-last-error-label-{key}")),
@@ -655,6 +700,7 @@ impl Desktop {
                     })),
             );
         } else if prepare_allowed {
+            let loaded = status.is_some_and(|status| status.state == CacheState::Loaded);
             let label = match status.map(|status| &status.state) {
                 Some(CacheState::Missing) => "下载并准备模型",
                 Some(CacheState::Loaded) => "重新验证加载",
@@ -668,8 +714,13 @@ impl Desktop {
             };
             actions = actions.child(
                 control(SharedString::from(format!("prepare-model-{key}")))
-                    .icon(icons::download())
-                    .primary()
+                    .icon(if loaded {
+                        icons::refresh()
+                    } else {
+                        icons::download()
+                    })
+                    .when(loaded, |button| button.ghost())
+                    .when(!loaded, |button| button.primary())
                     .label(label)
                     .accessibility_label(format!(
                         "{label}：{} · {}",
@@ -681,7 +732,7 @@ impl Desktop {
                         this.begin_model_preparation(request.clone(), cx)
                     })),
             );
-            if self.job.is_some() {
+            if self.job.is_some() && !loaded {
                 view = view.child(
                     settings_value(
                         SharedString::from(format!("model-waits-for-job-{key}")),
@@ -690,16 +741,19 @@ impl Desktop {
                     .text_sm(),
                 );
             }
-            view = view.child(
-                settings_value(
-                    SharedString::from(format!("model-network-scope-{key}")),
-                    "准备时可能下载模型，课程内容不会上传。",
-                )
-                .text_sm()
-                .text_color(color(MUTED)),
-            );
+            if !loaded {
+                view = view.child(
+                    settings_value(
+                        SharedString::from(format!("model-network-scope-{key}")),
+                        "准备时可能下载模型，课程内容不会上传。",
+                    )
+                    .text_sm()
+                    .text_color(color(MUTED)),
+                );
+            }
         }
         view.child(actions)
+            .when_some(cache_details, |view, details| view.child(details))
     }
     pub(super) fn model_diagnostics_panel(
         &self,
@@ -707,7 +761,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Div {
         let request = self.default_model_request();
-        let mut current = settings_detail_group("model-diagnostic-default", "当前模型");
+        let mut current = settings_detail_group("model-diagnostic-default", "默认识别模型");
         if request.provider == AsrProvider::Api {
             current = current.child(settings_detail_row(
                 "default-asr-provider-label",
@@ -748,113 +802,6 @@ impl Desktop {
                     .text_color(color(if *error { DANGER } else { INK })),
             );
         }
-        if let Some(environment) = &self.environment {
-            let mut hardware = settings_detail_group("model-hardware-heading", "设备与运行时");
-            for (id, label, value) in [
-                ("cpu-device", "CPU 架构", std::env::consts::ARCH),
-                (
-                    "apple-device",
-                    "Apple 平台",
-                    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                        "原生运行于 Apple 芯片"
-                    } else {
-                        "当前平台不适用"
-                    },
-                ),
-                (
-                    "gpu-device",
-                    "GPU",
-                    environment.gpu.as_deref().unwrap_or(if environment.llama {
-                        "识别运行时未报告可用设备"
-                    } else {
-                        "缺少 llama-server，尚无法检查"
-                    }),
-                ),
-                (
-                    "npu-device",
-                    "Intel NPU",
-                    if environment.npu_device {
-                        "已检测到设备"
-                    } else {
-                        "未检测到设备"
-                    },
-                ),
-                (
-                    "npu-runtime",
-                    "NPU 启动器",
-                    if environment.npu_runtime {
-                        "已找到；首次准备时验证 OpenVINO 及设备编译"
-                    } else {
-                        "未找到 uv 或 Python"
-                    },
-                ),
-                (
-                    "apple-runtime",
-                    "Apple 识别程序",
-                    if environment.apple {
-                        "已检测到原生运行时与 Metal 资源"
-                    } else {
-                        "未检测到完整运行时与 Metal 资源"
-                    },
-                ),
-            ] {
-                hardware = hardware.child(settings_detail_row(
-                    SharedString::from(format!("{id}-label")),
-                    label,
-                    settings_value(id, value.to_owned()),
-                ));
-            }
-            let alternatives = [
-                (AsrProvider::Coreml, environment.apple),
-                (
-                    AsrProvider::Gpu,
-                    environment.gpu.is_some() && environment.llama,
-                ),
-                (AsrProvider::Cpu, environment.llama),
-                (AsrProvider::Npu, environment.npu),
-            ];
-            let available = alternatives
-                .into_iter()
-                .filter(|(_, available)| *available)
-                .map(|(provider, _)| provider_name(provider))
-                .collect::<Vec<_>>();
-            if !available.is_empty() {
-                hardware = hardware.child(settings_detail_row(
-                    "available-local-model-providers-label",
-                    "可用识别方式",
-                    settings_value("available-local-model-providers", available.join("、")),
-                ));
-            }
-            if self.model_device_issue(request.provider).is_some() {
-                hardware =
-                    hardware.child(
-                        h_flex().gap_2().flex_wrap().children(
-                            alternatives
-                                .into_iter()
-                                .filter(|(provider, available)| {
-                                    *available && *provider != request.provider
-                                })
-                                .map(|(provider, _)| {
-                                    control(SharedString::from(format!(
-                                        "choose-available-model-{}",
-                                        provider.as_str()
-                                    )))
-                                    .icon(icons::microphone())
-                                    .label(format!("默认改用 {}", provider_name(provider)))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let mut value = this.generation_edit_base();
-                                        value.options.provider = Some(provider);
-                                        value.options.asr_model = Some("qwen3-1.7b".into());
-                                        if this.commit_generation(value, cx) {
-                                            this.refresh_model_diagnostics(cx);
-                                        }
-                                    }))
-                                }),
-                        ),
-                    );
-            }
-            view = view.child(hardware);
-        }
         if self.settings_ui.model_diagnostics.preparing.is_some()
             && !self.logs.is_empty()
             && self.kind == Kind::Models
@@ -888,6 +835,124 @@ impl Desktop {
             }
         }
         view
+    }
+    pub(super) fn model_hardware_details(&self, cx: &mut Context<Self>) -> Div {
+        let request = self.default_model_request();
+        let Some(environment) = &self.environment else {
+            return v_flex();
+        };
+        let mut hardware = settings_detail_group("model-hardware-heading", "设备与运行时");
+        for (id, label, value) in [
+            ("cpu-device", "CPU 架构", std::env::consts::ARCH),
+            (
+                "apple-device",
+                "Apple 平台",
+                if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                    "原生运行于 Apple 芯片"
+                } else {
+                    "当前平台不适用"
+                },
+            ),
+            (
+                "gpu-device",
+                "GPU",
+                environment.gpu.as_deref().unwrap_or(if environment.llama {
+                    "识别运行时未报告可用设备"
+                } else {
+                    "缺少 llama-server，尚无法检查"
+                }),
+            ),
+            (
+                "npu-device",
+                "Intel NPU",
+                if environment.npu_device {
+                    "已检测到设备"
+                } else {
+                    "未检测到设备"
+                },
+            ),
+            (
+                "npu-runtime",
+                "NPU 启动器",
+                if environment.npu_runtime {
+                    "已找到；首次准备时验证 OpenVINO 及设备编译"
+                } else {
+                    "未找到 uv 或 Python"
+                },
+            ),
+            (
+                "apple-runtime",
+                "Apple 识别程序",
+                if environment.apple {
+                    "已检测到原生运行时与 Metal 资源"
+                } else {
+                    "未检测到完整运行时与 Metal 资源"
+                },
+            ),
+        ]
+        .into_iter()
+        .filter(|(id, _, _)| match *id {
+            "apple-device" | "apple-runtime" => cfg!(target_os = "macos"),
+            "npu-device" | "npu-runtime" => {
+                !cfg!(target_os = "macos") || request.provider == AsrProvider::Npu
+            }
+            _ => true,
+        }) {
+            hardware = hardware.child(settings_detail_row(
+                SharedString::from(format!("{id}-label")),
+                label,
+                settings_value(id, value.to_owned()),
+            ));
+        }
+        let alternatives = [
+            (AsrProvider::Coreml, environment.apple),
+            (
+                AsrProvider::Gpu,
+                environment.gpu.is_some() && environment.llama,
+            ),
+            (AsrProvider::Cpu, environment.llama),
+            (AsrProvider::Npu, environment.npu),
+        ];
+        let available = alternatives
+            .into_iter()
+            .filter(|(_, available)| *available)
+            .map(|(provider, _)| provider_name(provider))
+            .collect::<Vec<_>>();
+        if !available.is_empty() {
+            hardware = hardware.child(settings_detail_row(
+                "available-local-model-providers-label",
+                "可用识别方式",
+                settings_value("available-local-model-providers", available.join("、")),
+            ));
+        }
+        if self.model_device_issue(request.provider).is_some() {
+            hardware = hardware.child(
+                h_flex().gap_2().flex_wrap().children(
+                    alternatives
+                        .into_iter()
+                        .filter(|(provider, available)| *available && *provider != request.provider)
+                        .map(|(provider, _)| {
+                            control(SharedString::from(format!(
+                                "choose-available-model-{}",
+                                provider.as_str()
+                            )))
+                            .icon(icons::microphone())
+                            .label(format!("默认改用 {}", provider_name(provider)))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    let mut value = this.generation_edit_base();
+                                    value.select_provider(Some(provider));
+                                    value.options.asr_model = Some("qwen3-1.7b".into());
+                                    if this.commit_generation(value, cx) {
+                                        this.refresh_model_diagnostics(cx);
+                                    }
+                                },
+                            ))
+                        }),
+                ),
+            );
+        }
+        hardware
     }
     pub(super) fn default_model_readiness_panel(
         &self,
@@ -931,7 +996,7 @@ impl Desktop {
         {
             return (
                 false,
-                "模型缓存检查未完成，可在技术详情中查看原因并重新检查。".into(),
+                "模型检查未完成，可在模型管理中查看原因并重试。".into(),
             );
         }
         match entry

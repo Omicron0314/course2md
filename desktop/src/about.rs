@@ -14,14 +14,19 @@ impl Desktop {
         v_flex()
             .w_full()
             .min_w_0()
-            .gap_6()
+            .gap_4()
             .text_color(color(INK))
             .child(
                 h_flex()
                     .w_full()
                     .min_w_0()
-                    .items_start()
+                    .items_center()
                     .gap_4()
+                    .p_4()
+                    .bg(color(SURFACE))
+                    .border_1()
+                    .border_color(color(CARD_LINE))
+                    .rounded(RADIUS_CARD)
                     .child(img("images/course2md.png").size(rems(64. / 14.)).flex_shrink_0())
                     .child(
                         v_flex()
@@ -45,13 +50,6 @@ impl Desktop {
                                             .text_size(TEXT_AUX)
                                             .text_color(color(MUTED)),
                                     ),
-                            )
-                            .child(
-                                accessible_text("about-description", "把课程整理成笔记。")
-                                    .min_w_0()
-                                    .whitespace_normal()
-                                    .text_size(TEXT_BODY)
-                                    .text_color(color(MUTED)),
                             )
                             .child(
                                 h_flex()
@@ -84,7 +82,6 @@ impl Desktop {
                         h_flex()
                             .w_full()
                             .min_w_0()
-                            .pl(rems(28. / 14.))
                             .gap_2()
                             .flex_wrap()
                             .child(

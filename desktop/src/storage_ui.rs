@@ -1382,32 +1382,12 @@ impl Desktop {
                     .text_color(color(DANGER)),
             );
         }
-        if let Some(workspace) = &self.workspace {
-            for (index, location) in workspace.state.libraries.iter().enumerate() {
-                let Some(check) = self.cached_location_check(location) else {
-                    continue;
-                };
-                if check.needs_reassociation {
-                    has_content = true;
-                    let id = location.id.clone();
-                    view = view.child(v_flex().gap_2()
-                        .child(accessible_text(("storage-association-needed", index), format!("「{}」的关联记录缺失。重新关联后可继续使用这个位置，已有文件会保留。", location.name)))
-                        .child(accessible_text(("storage-association-path", index), location.root.display().to_string()).text_sm().text_color(color(MUTED)))
-                        .child(control(("reassociate-storage-location", index)).icon(icons::storage()).label("重新关联此保存位置").self_start().disabled(self.storage_ui.busy)
-                            .on_click(cx.listener(move |this, _, window, cx| this.begin_library_reassociation(id.clone(), window, cx)))));
-                } else if let Some(error) = &check.problem {
-                    has_content = true;
-                    view = view.child(
-                        accessible_text(
-                            ("storage-association-error", index),
-                            format!("「{}」暂时无法确认：{error:#}", location.name),
-                        )
-                        .role(Role::Alert)
-                        .text_sm()
-                        .text_color(color(DANGER)),
-                    );
-                }
-            }
+        if !self.storage_ui.pending.is_empty() {
+            view = view.child(semantic_label(
+                "storage-pending-heading",
+                "未完成迁移",
+                icons::storage(),
+            ));
         }
         for (index, (path, journal)) in self.storage_ui.pending.iter().enumerate() {
             has_content = true;
@@ -1418,6 +1398,13 @@ impl Desktop {
             view = view.child(
                 v_flex()
                     .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .p_4()
+                    .bg(color(SURFACE))
+                    .border_1()
+                    .border_color(color(CARD_LINE))
+                    .rounded(RADIUS_CARD)
                     .child(accessible_text(
                         ("storage-pending-description", index),
                         format!(
@@ -1476,6 +1463,13 @@ impl Desktop {
             );
         }
         if let Some(workspace) = &self.workspace {
+            if !workspace.state.storage_backups.is_empty() {
+                view = view.child(semantic_label(
+                    "storage-backups-heading",
+                    "旧位置备份",
+                    icons::folder_open(),
+                ));
+            }
             for (index, backup) in workspace.state.storage_backups.iter().enumerate() {
                 has_content = true;
                 let id = backup.id.clone();
@@ -1483,6 +1477,13 @@ impl Desktop {
                 view = view.child(
                     v_flex()
                         .gap_2()
+                        .w_full()
+                        .min_w_0()
+                        .p_4()
+                        .bg(color(SURFACE))
+                        .border_1()
+                        .border_color(color(CARD_LINE))
+                        .rounded(RADIUS_CARD)
                         .child(accessible_text(
                             ("storage-backup-description", index),
                             format!("旧位置备份：{}", backup.path.display()),
@@ -1490,6 +1491,7 @@ impl Desktop {
                         .child(
                             h_flex()
                                 .gap_2()
+                                .flex_wrap()
                                 .child(
                                     control(("open-library-backup", index))
                                         .icon(icons::folder_open())

@@ -158,6 +158,7 @@ pub(crate) struct State {
     notice: Option<(String, bool)>,
     finish_failed: bool,
     model_details_open: bool,
+    model_choices_open: bool,
     engine_details_open: bool,
     model_preparation: Option<ModelPreparation>,
     model_status_request: Option<ModelRequest>,
@@ -181,6 +182,7 @@ impl State {
             notice: None,
             finish_failed: false,
             model_details_open: false,
+            model_choices_open: false,
             engine_details_open: false,
             model_preparation: None,
             model_status_request: None,
@@ -291,7 +293,7 @@ fn local_model_choices(provider: AsrProvider, current: &str) -> Vec<(String, Str
     let mut choices = vec![(
         "qwen3-1.7b".to_owned(),
         "Qwen3 1.7B".to_owned(),
-        "推荐 · 优先识别质量，资源占用较高".to_owned(),
+        "默认 · 下载与内存占用较高".to_owned(),
     )];
     if matches!(provider, AsrProvider::Coreml | AsrProvider::Npu) {
         choices.extend([
@@ -303,7 +305,7 @@ fn local_model_choices(provider: AsrProvider, current: &str) -> Vec<(String, Str
             (
                 "whisper".into(),
                 "Whisper".into(),
-                "兼容 Whisper 模型".into(),
+                "已有 Whisper 模型时可选".into(),
             ),
         ]);
     }
@@ -347,7 +349,7 @@ fn engine_preferences(
     model: &str,
 ) -> GenerationPreferences {
     let mut next = current.clone();
-    next.options.provider = provider;
+    next.select_provider(provider);
     if provider != Some(AsrProvider::Api) {
         next.options.asr_model = Some(model.to_owned());
         next.local_model_draft = None;
@@ -427,6 +429,27 @@ fn help(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Stateful<Di
     settings_value(id, value).text_color(color(MUTED))
 }
 
+fn model_preparation_phase(stage: &str, message: &str) -> String {
+    let lower = message.trim().to_ascii_lowercase();
+    if lower.contains("silero") {
+        "下载语音检测文件".into()
+    } else if lower.contains("compil") {
+        "编译识别模型".into()
+    } else if lower
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .any(|word| matches!(word, "loading" | "load"))
+        || message.contains("加载")
+    {
+        "加载识别模型".into()
+    } else if lower.contains("qwen") && lower.contains('/') {
+        "下载 Qwen3 模型文件".into()
+    } else if lower.contains("whisper") && lower.contains('/') {
+        "下载 Whisper 模型文件".into()
+    } else {
+        activity::title(stage)
+    }
+}
+
 impl Desktop {
     pub(crate) fn start_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.setup_model_job_running() {
@@ -446,9 +469,11 @@ impl Desktop {
         self.onboarding.session += 1;
         let generation = self.preferences.generation();
         self.onboarding.provider = generation.options.provider;
-        if generation.options.provider != Some(AsrProvider::Api) {
-            self.onboarding.local_provider = generation.options.provider;
-        }
+        self.onboarding.local_provider = if generation.options.provider == Some(AsrProvider::Api) {
+            generation.last_local_provider
+        } else {
+            generation.options.provider
+        };
         self.onboarding.model = generation
             .options
             .asr_model
@@ -463,6 +488,7 @@ impl Desktop {
             self.onboarding.ai_proofread = true;
         }
         self.onboarding.model_details_open = false;
+        self.onboarding.model_choices_open = false;
         self.onboarding.engine_details_open = self
             .onboarding
             .provider
@@ -798,7 +824,7 @@ impl Desktop {
         };
         let mut next = self.preferences.generation().clone();
         match purpose {
-            ServicePurpose::Speech => next.options.provider = Some(AsrProvider::Api),
+            ServicePurpose::Speech => next.select_provider(Some(AsrProvider::Api)),
             ServicePurpose::Ai => {
                 next.ai_proofread = self.onboarding.ai_proofread;
                 next.ai_summary = self.onboarding.ai_summary;
@@ -966,7 +992,7 @@ impl Desktop {
             Step::Engine => (
                 1,
                 "默认识别方式",
-                "用于后续转换；有字幕时优先使用字幕。",
+                "有字幕时优先使用字幕；以下方式用于没有字幕的视频。",
                 icons::microphone(),
             ),
             Step::Ai => (
@@ -1007,7 +1033,7 @@ impl Desktop {
         let available_height =
             (f32::from(window.viewport_size().height) - (40. * scale + 16.) - 48.).max(160.);
         let compact = available_height < 540. * scale;
-        let steps = ["识别方式", "AI 服务", "Bilibili", "识别模型"];
+        let steps = ["识别方式", "AI 服务", "Bilibili", "模型准备"];
         let heading = v_flex()
             .w_full()
             .min_w_0()
@@ -1176,7 +1202,7 @@ impl Desktop {
             .into_any_element()
     }
 
-    fn setup_engine_content(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn setup_engine_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let selected = self.onboarding.provider;
         let scale = f32::from(window.rem_size()) / 14.;
         let width =
@@ -1235,7 +1261,6 @@ impl Desktop {
             return body.child(self.setup_service_content(ServicePurpose::Speech, window, cx));
         }
         let engines = [
-            (None, "自动选择", "使用本机适合的引擎", icons::auto_fix()),
             (
                 Some(AsrProvider::Coreml),
                 "Apple 原生",
@@ -1275,7 +1300,7 @@ impl Desktop {
                     }
             });
             let status = match ready {
-                Some(true) => "可用",
+                Some(true) => "运行环境已就绪",
                 Some(false) if capability == AsrProvider::Npu => "未检测到 Intel NPU",
                 Some(false) if capability == AsrProvider::Coreml => "需要 Apple 芯片与运行环境",
                 Some(false) if capability == AsrProvider::Gpu => "未检测到 GPU 运行环境",
@@ -1333,9 +1358,9 @@ impl Desktop {
                                 format!(
                                     "{} · {}",
                                     if selected.is_none() {
-                                        "自动选择"
+                                        "自动选择，目前使用"
                                     } else {
-                                        "当前引擎"
+                                        "固定引擎"
                                     },
                                     provider_label(Some(selected.unwrap_or(recommended)))
                                 ),
@@ -1361,13 +1386,65 @@ impl Desktop {
                 .child(motion::disclosure(
                     "setup-engines",
                     self.onboarding.engine_details_open,
-                    v_flex().child(choices),
+                    v_flex()
+                        .gap_3()
+                        .child(
+                            described_choice(
+                                "setup-engine-auto",
+                                "自动选择引擎",
+                                "根据本机运行环境选择；无需固定硬件方式",
+                                icons::auto_fix(),
+                                selected.is_none(),
+                                window,
+                                cx,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_setup_provider(None, cx);
+                            })),
+                        )
+                        .child(field_label("setup-fixed-engine-label", "固定引擎"))
+                        .child(choices),
                     window,
                     cx,
                 )),
         );
         let provider = selected.unwrap_or(recommended);
         let models = local_model_choices(provider, &self.onboarding.model);
+        let current_model = models
+            .iter()
+            .find(|(id, _, _)| id == &self.onboarding.model)
+            .map(|(_, label, _)| label.clone())
+            .unwrap_or_else(|| self.onboarding.model.clone());
+        let model_profile = models
+            .iter()
+            .find(|(id, _, _)| id == &self.onboarding.model)
+            .map(|(_, _, description)| description.clone())
+            .unwrap_or_else(|| "使用已保存的模型配置".into());
+        let request = self.setup_model_request();
+        self.ensure_model_diagnostic(request.provider, Some(&request.model), &request.root, cx);
+        let snapshot =
+            self.setup_model_snapshot(request.provider, Some(&request.model), &request.root);
+        let model_status = if snapshot.checking {
+            "正在检查本机模型文件".to_owned()
+        } else if snapshot.device_issue.is_some() {
+            "当前运行环境需要准备，可更换引擎或稍后处理".to_owned()
+        } else {
+            match snapshot
+                .result
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .map(|status| &status.state)
+            {
+                Some(CacheState::Loaded) => "已验证加载，可以识别".into(),
+                Some(CacheState::Cached) => "模型已下载，首次识别时验证加载".into(),
+                Some(CacheState::Partial) => {
+                    "模型尚未完整；在模型准备步骤或首次识别时继续下载".into()
+                }
+                Some(CacheState::Missing) => "模型尚未下载；在模型准备步骤或首次识别时下载".into(),
+                Some(CacheState::Unsupported) => "此模型不适用于当前引擎，请更换模型".into(),
+                None => "模型检查未完成，可在模型准备步骤重试".into(),
+            }
+        };
         let mut model_grid = div()
             .grid()
             .grid_cols(columns.min(models.len() as u16))
@@ -1398,12 +1475,51 @@ impl Desktop {
                 .w_full()
                 .min_w_0()
                 .gap_3()
-                .child(semantic_label(
-                    "setup-model-label",
-                    "识别模型",
-                    icons::microphone(),
-                ))
-                .child(model_grid),
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_3()
+                        .items_center()
+                        .flex_wrap()
+                        .child(semantic_label(
+                            "setup-model-label",
+                            "识别模型",
+                            icons::microphone(),
+                        ))
+                        .child(
+                            settings_value("setup-current-model", current_model)
+                                .flex_1()
+                                .min_w_0(),
+                        )
+                        .child(
+                            quiet("setup-change-model")
+                                .icon(if self.onboarding.model_choices_open {
+                                    icons::chevron_up()
+                                } else {
+                                    icons::tune()
+                                })
+                                .label(if self.onboarding.model_choices_open {
+                                    "收起模型"
+                                } else {
+                                    "更换模型"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.onboarding.model_choices_open =
+                                        !this.onboarding.model_choices_open;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(help("setup-current-model-profile", model_profile).text_size(TEXT_AUX))
+                .child(help("setup-current-model-readiness", model_status).text_size(TEXT_AUX))
+                .child(motion::disclosure(
+                    "setup-model-choices",
+                    self.onboarding.model_choices_open,
+                    model_grid,
+                    window,
+                    cx,
+                )),
         );
         body
     }
@@ -1689,7 +1805,15 @@ impl Desktop {
                         )),
                 );
             }
-            body = body.child(self.setup_reveal("setup-ai-uses-reveal", uses));
+            body = body
+                .child(self.setup_reveal("setup-ai-uses-reveal", uses))
+                .child(
+                    help(
+                        "setup-ai-use-scope",
+                        "保存后用于后续转换；开启的校对或摘要会把转录文字发送到所选 AI 服务。",
+                    )
+                    .text_size(TEXT_AUX),
+                );
         }
         if let Some(cancel) = &service.running {
             let stopping = cancel.load(Ordering::Acquire);
@@ -1764,7 +1888,7 @@ impl Desktop {
                                 settings_value(
                                     format!("setup-test-message-{}-{index}", purpose as usize),
                                     if passed {
-                                        format!("{}可用", kind.label())
+                                        format!("{}测试通过", kind.label())
                                     } else {
                                         evidence.message.clone()
                                     },
@@ -1915,7 +2039,7 @@ impl Desktop {
             )
         } else {
             match status.map(|status| &status.state) {
-                Some(CacheState::Loaded) => ("模型已验证加载", "可以开始使用。"),
+                Some(CacheState::Loaded) => ("模型已验证加载，可以识别", ""),
                 Some(CacheState::Cached) => (
                     "模型文件已下载",
                     "尚未验证加载，可以先检查文件或在首次识别时加载。",
@@ -2044,6 +2168,8 @@ impl Desktop {
             if allowed {
                 let button = if needs_download {
                     primary_pill("setup-prepare-model")
+                } else if status.is_some_and(|status| status.state == CacheState::Loaded) {
+                    quiet("setup-prepare-model")
                 } else {
                     outline_pill("setup-prepare-model")
                 };
@@ -2051,7 +2177,13 @@ impl Desktop {
                 actions = actions.child(
                     button
                         .self_start()
-                        .icon(icons::download())
+                        .icon(
+                            if status.is_some_and(|status| status.state == CacheState::Loaded) {
+                                icons::refresh()
+                            } else {
+                                icons::download()
+                            },
+                        )
                         .label(if cancelled {
                             "继续准备"
                         } else {
@@ -2183,23 +2315,7 @@ impl Desktop {
             .enumerate()
         {
             has_phase = true;
-            let message = progress.message.trim();
-            let lower = message.to_ascii_lowercase();
-            let phase = if lower.contains("silero") {
-                "下载语音检测文件".to_owned()
-            } else if lower.contains("qwen") && lower.contains('/') {
-                "下载 Qwen3 模型文件".to_owned()
-            } else if lower.contains("whisper") && lower.contains('/') {
-                "下载 Whisper 模型文件".to_owned()
-            } else if lower.contains("compil") {
-                "编译识别模型".to_owned()
-            } else if lower.contains("load") || message.contains("加载") {
-                "加载识别模型".to_owned()
-            } else if message.is_empty() {
-                activity::title(stage)
-            } else {
-                message.to_owned()
-            };
+            let phase = model_preparation_phase(stage, &progress.message);
             view = view
                 .child(semantic_label(
                     ("setup-model-phase", index),
@@ -2342,16 +2458,11 @@ impl Desktop {
         if step == Step::Engine && !model_review {
             row = row.child(
                 quiet("setup-later")
-                    .label(if step == Step::Model {
-                        "返回引擎选择"
-                    } else {
-                        "稍后设置"
-                    })
-                    .disabled(step == Step::Model && model_running)
+                    .icon(icons::arrow_forward())
+                    .label("直接开始使用")
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if step == Step::Model {
-                            this.setup_step(Step::Engine, cx);
-                        } else {
+                        this.save_setup_engine(window, cx);
+                        if this.onboarding.step == Step::Ai {
                             this.finish_onboarding(window, cx);
                         }
                     })),
@@ -2428,7 +2539,7 @@ impl Desktop {
 
     pub(crate) fn onboarding_background_notice(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         self.retain_setup_model_result();
@@ -2440,25 +2551,41 @@ impl Desktop {
         let result_error = preparation.result.as_ref().is_some_and(|(_, error)| *error);
         let label = if running {
             if self.cancelling {
-                "正在暂停模型准备"
+                "正在暂停".to_owned()
             } else {
-                "模型正在后台准备"
+                self.progress
+                    .iter()
+                    .find(|(stage, progress)| {
+                        (stage.starts_with("model") || stage.contains("download"))
+                            && progress.has_samples()
+                            && !progress.done
+                    })
+                    .map(|(stage, progress)| {
+                        let phase = model_preparation_phase(stage, &progress.message);
+                        progress
+                            .fraction()
+                            .map(|fraction| {
+                                format!("{phase} · {:.0}%", fraction.clamp(0., 1.) * 100.)
+                            })
+                            .unwrap_or(phase)
+                    })
+                    .unwrap_or_else(|| "正在准备".into())
             }
         } else if preparation.cancelled {
-            "模型准备已暂停，下载文件已保留"
+            "准备已暂停，文件已保留".into()
         } else if result_error {
-            "模型准备未完成，已下载文件保留"
+            "准备未完成，文件已保留".into()
         } else if preparation.result.is_some() {
-            "模型准备已结束，可以查看检查结果"
+            "准备已结束".into()
         } else {
-            "模型准备已结束，请查看结果"
+            "准备已结束，请查看结果".into()
         };
         Some(
             v_flex()
                 .w_full()
                 .min_w_0()
                 .px_6()
-                .py_3()
+                .py_2()
                 .gap_2()
                 .bg(color(INSET))
                 .child(
@@ -2521,10 +2648,7 @@ impl Desktop {
                                     })),
                             )
                         }),
-                )
-                .when(running, |view| {
-                    view.child(self.setup_model_progress(window, cx))
-                }),
+                ),
         )
     }
 }
@@ -2542,6 +2666,25 @@ mod tests {
     };
     use crate::service_test::TestKind;
     use course2md::config::AsrProvider;
+
+    #[test]
+    fn model_progress_distinguishes_download_from_loading() {
+        assert_eq!(
+            super::model_preparation_phase(
+                "model/apple",
+                "Downloading vendor/Qwen3-ASR/model.safetensors"
+            ),
+            "下载 Qwen3 模型文件"
+        );
+        assert_eq!(
+            super::model_preparation_phase("model/apple", "Loading vendor/Qwen3-ASR"),
+            "加载识别模型"
+        );
+        assert_eq!(
+            super::model_preparation_phase("model/apple", "Compiling model"),
+            "编译识别模型"
+        );
+    }
 
     #[test]
     fn online_route_round_trip_preserves_explicit_local_engine_and_alias() {
@@ -2730,11 +2873,13 @@ mod tests {
         let next = engine_preferences(&current, Some(AsrProvider::Gpu), "qwen3-1.7b");
         let mut expected = current.clone();
         expected.options.provider = Some(AsrProvider::Gpu);
+        expected.last_local_provider = Some(AsrProvider::Gpu);
         expected.options.asr_model = Some("qwen3-1.7b".into());
         assert_eq!(next, expected);
-        let cloud = engine_preferences(&current, Some(AsrProvider::Api), "ignored");
-        assert_eq!(cloud.options.asr_model, current.options.asr_model);
-        assert_eq!(cloud.options.model_dir, current.options.model_dir);
+        let cloud = engine_preferences(&next, Some(AsrProvider::Api), "ignored");
+        assert_eq!(cloud.last_local_provider, Some(AsrProvider::Gpu));
+        assert_eq!(cloud.options.asr_model, next.options.asr_model);
+        assert_eq!(cloud.options.model_dir, next.options.model_dir);
     }
 
     #[test]
