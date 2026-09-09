@@ -1157,7 +1157,19 @@ impl Desktop {
                             }
                         }
                     }
-                    Err(error) => this.message = Some(format!("读取笔记失败：{error:#}")),
+                    Err(error) => {
+                        let io_kind = error.chain().find_map(|cause| {
+                            cause.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
+                        });
+                        this.message = Some(match io_kind {
+                            Some(std::io::ErrorKind::NotFound) =>
+                                "笔记文件暂时无法访问。请重新连接保存位置或恢复文件后再次阅读，也可刷新课程库。",
+                            Some(std::io::ErrorKind::PermissionDenied) =>
+                                "暂时无法读取这份笔记。请检查保存位置的访问权限后再次阅读，也可刷新课程库。",
+                            _ =>
+                                "这份笔记暂时无法读取。请检查保存位置中的文件，恢复可读版本后再次阅读，也可刷新课程库。",
+                        }.into());
+                    }
                 }
                 cx.notify();
             });

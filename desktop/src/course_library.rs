@@ -16,6 +16,79 @@ struct LibraryLayout {
     stacked: bool,
 }
 
+#[derive(IntoElement)]
+struct LibraryDiagnostics {
+    id: SharedString,
+    messages: Vec<String>,
+}
+
+impl RenderOnce for LibraryDiagnostics {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(
+            SharedString::from(format!("library-diagnostics-state:{}", self.id)),
+            cx,
+            |_, _| false,
+        );
+        let open = *state.read(cx);
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .child(
+                quiet(SharedString::from(format!(
+                    "library-diagnostics-toggle:{}",
+                    self.id
+                )))
+                .self_start()
+                .icon(if open {
+                    IconName::ChevronUp
+                } else {
+                    IconName::Info
+                })
+                .label(if open { "收起诊断" } else { "查看诊断" })
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |open, cx| {
+                        *open = !*open;
+                        cx.notify();
+                    });
+                }),
+            )
+            .child(disclosure(
+                SharedString::from(format!("library-diagnostics-content:{}", self.id)),
+                open,
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .p_3()
+                    .bg(color(INSET))
+                    .rounded(RADIUS_SMALL)
+                    .children(
+                        self.messages
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, message)| {
+                                accessible_text(
+                                    SharedString::from(format!(
+                                        "library-diagnostic:{}:{index}",
+                                        self.id
+                                    )),
+                                    message,
+                                )
+                                .w_full()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .text_size(TEXT_AUX)
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(color(GRAY))
+                            }),
+                    ),
+                window,
+                cx,
+            ))
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct CourseLocation {
     pub id: String,
@@ -378,10 +451,18 @@ impl Desktop {
                 let restore = location.root.clone();
                 let rebuild = location.root.clone();
                 let folder = location.root.clone();
+                let prefix = format!("{}的文件夹记录暂时无法读取：", location.name);
+                let diagnostics: Vec<_> = self
+                    .library_issues
+                    .iter()
+                    .filter(|issue| issue.starts_with(&prefix))
+                    .cloned()
+                    .collect();
                 let mut row = h_flex().gap_2().flex_wrap();
                 if recovery.has_backup {
                     row = row.child(
                         control(("restore-classification", index))
+                            .primary()
                             .icon(icons::history())
                             .label("恢复最近分类备份")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -392,6 +473,7 @@ impl Desktop {
                 row = row
                     .child(
                         control(("rebuild-classification", index))
+                            .when(!recovery.has_backup, |button| button.primary())
                             .icon(icons::refresh())
                             .label("保留损坏记录并重建分类")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -405,13 +487,38 @@ impl Desktop {
                             .label("打开保存位置")
                             .on_click(move |_, _, cx| cx.open_with_system(&folder)),
                     );
-                view = view.child(v_flex().gap_3().p_4().bg(color(WARNING_BG)).rounded(RADIUS_CARD)
-                    .child(badge(BadgeKind::Warning).child("分类需要恢复"))
-                    .child(accessible_text(("classification-recovery", index), format!("{} 的分类记录无法读取。现有笔记文件会保留；重建分类后可重新整理到文件夹。", location.name)))
-                    .child(row));
+                view = view.child(
+                    v_flex()
+                        .gap_3()
+                        .p_4()
+                        .bg(color(WARNING_BG))
+                        .rounded(RADIUS_CARD)
+                        .child(badge(BadgeKind::Warning).child("分类需要恢复"))
+                        .child(accessible_text(
+                            ("classification-recovery", index),
+                            format!(
+                                "{} 的分类记录无法读取。已读取的笔记仍可阅读，文件夹分类暂不可用。",
+                                location.name
+                            ),
+                        ))
+                        .child(row)
+                        .when(!diagnostics.is_empty(), |view| {
+                            view.child(LibraryDiagnostics {
+                                id: SharedString::from(format!("classification:{}", location.id)),
+                                messages: diagnostics,
+                            })
+                        }),
+                );
             }
             if let Some(recovery) = self.library_view_cache.title_recovery.get(&location.root) {
                 has_notice = true;
+                let prefix = format!("{}的显示名称尚未读取：", location.root.display());
+                let diagnostics: Vec<_> = self
+                    .library_issues
+                    .iter()
+                    .filter(|issue| issue.starts_with(&prefix))
+                    .cloned()
+                    .collect();
                 let mut row = h_flex().gap_2().flex_wrap();
                 for reset in [false, true] {
                     if !reset && !recovery.has_backup {
@@ -468,7 +575,13 @@ impl Desktop {
                                 location.name
                             ),
                         ))
-                        .child(row),
+                        .child(row)
+                        .when(!diagnostics.is_empty(), |view| {
+                            view.child(LibraryDiagnostics {
+                                id: SharedString::from(format!("names:{}", location.id)),
+                                messages: diagnostics,
+                            })
+                        }),
                 );
             }
         }
@@ -594,8 +707,37 @@ impl Desktop {
                     .text_color(color(MUTED)),
             );
         }
-        if !self.library_issues.is_empty()
-            && coverage != crate::storage::LibraryCoverage::Unavailable
+        // Recovery cards own their matching diagnostics. Keep unrelated read
+        // failures visible without repeating the same classification warning.
+        let remaining_issues: Vec<_> = self
+            .library_issues
+            .iter()
+            .filter(|issue| {
+                !self.workspace.as_ref().is_some_and(|workspace| {
+                    workspace.state.libraries.iter().any(|location| {
+                        !all_access.unavailable.contains(&location.root)
+                            && ((self
+                                .library_view_cache
+                                .recovery
+                                .contains_key(&location.root)
+                                && issue.starts_with(&format!(
+                                    "{}的文件夹记录暂时无法读取：",
+                                    location.name
+                                )))
+                                || (self
+                                    .library_view_cache
+                                    .title_recovery
+                                    .contains_key(&location.root)
+                                    && issue.starts_with(&format!(
+                                        "{}的显示名称尚未读取：",
+                                        location.root.display()
+                                    ))))
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        if !remaining_issues.is_empty() && coverage != crate::storage::LibraryCoverage::Unavailable
         {
             view = view.child(
                 v_flex()
@@ -605,18 +747,23 @@ impl Desktop {
                     .border_1()
                     .border_color(color(WARNING_BG))
                     .rounded(RADIUS_CARD)
+                    .child(badge(BadgeKind::Warning).child("部分内容暂未读取"))
                     .child(accessible_text(
                         "library-issues-title",
-                        "有笔记或分类记录暂时无法读取。列表和搜索结果仅包含已读取的笔记。",
+                        "已读取的笔记仍可阅读。请检查保存位置后重新检查；当前列表和搜索仅包含已读取的内容。",
                     ))
-                    .children(
-                        self.library_issues
-                            .iter()
-                            .enumerate()
-                            .map(|(index, issue)| {
-                                accessible_text(("library-issue", index), issue.clone()).text_sm()
-                            }),
-                    ),
+                    .child(
+                        control("retry-unread-library-content")
+                            .self_start()
+                            .icon(icons::refresh())
+                            .label("重新检查")
+                            .loading(self.loading)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
+                    )
+                    .child(LibraryDiagnostics {
+                        id: "unread-content".into(),
+                        messages: remaining_issues,
+                    }),
             );
         }
         let materials = self
