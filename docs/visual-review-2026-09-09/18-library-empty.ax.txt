@@ -1,0 +1,21 @@
+Window: "course2md", App: course2md Design Preview.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: off
+			4 tab (settable, boolean) 我的笔记, Value: on
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 Heading 我的笔记
+		8 text 还没有笔记
+		9 text 导入视频，生成的内容会保存在这里
+		10 button 导入视频
+	11 close button
+	12 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	13 minimize button
+14 menu bar
+	15 course2md Visual normal
+	16 文件
+	17 查找
+
+The focused UI element is 4 tab (settable, boolean) 我的笔记, Value: on

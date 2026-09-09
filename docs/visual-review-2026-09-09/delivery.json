@@ -1,0 +1,93 @@
+{
+  "date": "2026-09-09",
+  "code_revision": "3654cafff794ff9f829c1baf296031a78e2bd413",
+  "installation": {
+    "app": "/Users/aac6fef/Applications/course2md Design Preview.app",
+    "code_revision": "3654cafff794ff9f829c1baf296031a78e2bd413",
+    "bundle_version": "20260909.4",
+    "desktop_sha256": "082237108d36692a7fe3336d54b5d82a2cb16aff21d9826b47665ef51f0ae2de",
+    "engine_sha256": "4601c7d5e04eb897217b6c7ee92b9ef0b98cd485186cda2724ab32b7b915058c",
+    "engine_unchanged": true,
+    "release_profile": "cargo build --locked --release --bin course2md-desktop",
+    "performance_feature": false,
+    "signature_verified": true,
+    "backup": "/Users/aac6fef/Library/Application Support/course2md-design-preview/backups/2026-09-09-visual-review",
+    "environment_fixture_keys_absent": true
+  },
+  "preserved_user_data": {
+    "generation_settings": true,
+    "services_settings": true,
+    "workspace_inputs": true,
+    "workspace_tasks": true
+  },
+  "left_open": "Settings → restart onboarding → default recognition route; existing defaults retained",
+  "tests": {
+    "desktop": {
+      "command": "cargo test --locked --bin course2md-desktop",
+      "working_directory": "desktop",
+      "passed": 186,
+      "failed": 0,
+      "ignored": 3,
+      "ignored_tests": [
+        "source::tests::bilibili_example_preview",
+        "source::tests::local_preview_reads_video_and_rejects_non_video_files",
+        "source::tests::online_previews_resolve_real_titles_and_decodable_covers"
+      ],
+      "evidence": "desktop-tests.log"
+    },
+    "task_protocol": {
+      "command": "cargo test --locked --test task_execution",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "evidence": "task-execution-tests.log"
+    },
+    "skill_validation": "quick_validate.py passed"
+  },
+  "native_review": {
+    "debug_windows": [
+      "1140x820",
+      "860x620",
+      "1800x1040"
+    ],
+    "representative_font_scales": [
+      1,
+      1.25,
+      1.5,
+      2
+    ],
+    "palettes": [
+      "Paper",
+      "Nord Snow",
+      "Tokyo Day",
+      "Catppuccin Latte",
+      "Ink",
+      "Nord",
+      "Tokyo Night",
+      "Catppuccin Frappé",
+      "Catppuccin Macchiato",
+      "Catppuccin Mocha"
+    ],
+    "installed_release_window": "1140x820, font scale 1",
+    "installed_build_evidence": "native117-installed-about.jpg",
+    "installed_guide_evidence": "native119-installed-onboarding-active.jpg",
+    "recovery_evidence": [
+      "native109-proofread-blocked-before-update.jpg",
+      "native111-proofread-and-summary-recovered.jpg",
+      "native112-recovered-note.jpg"
+    ],
+    "image_viewer_evidence": [
+      "native113-image-viewer-short-final.jpg",
+      "native114-image-viewer-long-final.jpg",
+      "native115-image-transcript-scrolled.jpg"
+    ],
+    "independent_review": "independent-review.md",
+    "coverage_note": "Representative actual pages and states; not every combination of page, palette, font scale and state. Bilibili anonymous QR generation/wait/cancel only; no account confirmation. AI/speech tests used a local controlled service."
+  },
+  "performance_evidence": [
+    "normal-performance-summary.json",
+    "narrow-performance-summary.json"
+  ],
+  "capture_count": 118,
+  "published_release_tags_or_assets_changed": false
+}

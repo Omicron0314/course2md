@@ -1,0 +1,40 @@
+Window: "course2md", App: course2md Design Preview.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: off
+			4 tab (settable, boolean) 我的笔记, Value: off
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: on
+		7 Heading 设置
+		8 tab group 设置分类
+			9 tab (settable, boolean) 外观, Value: off
+			10 tab (settable, boolean) 生成笔记, Value: off
+			11 tab (settable, boolean) 服务与账号, Value: on
+			12 tab (settable, boolean) 存储, Value: off
+			13 tab (settable, boolean) 应用, Value: off
+		14 container 服务与账号
+			15 text 连接你使用的语音或 AI 服务。
+			16 Heading 来源账号
+			17 text Bilibili 账号
+			18 text 公开内容可以先尝试读取；遇到账号权限限制时，登录后继续。
+			19 button 登录 Bilibili
+			20 button 重新检查
+			21 Heading 语音服务
+			22 button 添加语音服务
+			23 Heading AI 服务
+			24 text 127.0.0.1
+			25 text 测试通过 · 2026-09-09
+			26 button 测试服务
+			27 button 编辑
+			28 text fixture-model · 127.0.0.1 · 默认服务
+			29 text 上次AI 校对测试：AI 校对用途测试通过
+			30 button 停止使用此服务
+			31 button 添加 AI 服务
+	32 close button
+	33 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	34 minimize button
+35 menu bar
+	36 course2md Visual normal
+	37 文件
+	38 查找

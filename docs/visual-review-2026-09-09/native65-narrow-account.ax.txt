@@ -1,0 +1,16 @@
+Window: "course2md", App: course2md Visual narrow.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 Heading 连接 Bilibili
+		3 text 可跳过，之后在设置中登录。
+		4 button 登录 Bilibili
+		5 button 重新检查
+		6 button 上一步
+		7 button 跳过登录
+	8 close button
+	9 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	10 minimize button
+11 menu bar
+	12 course2md Visual narrow
+	13 文件
+	14 查找

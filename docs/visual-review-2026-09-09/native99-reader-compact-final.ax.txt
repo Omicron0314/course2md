@@ -1,0 +1,32 @@
+Window: "course2md", App: course2md Visual narrow.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 导入, Value: off
+			4 tab (settable, boolean) 笔记, Value: on
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 button 返回工作台
+		8 Heading 验收课程 · BV1UXNARROW
+		9 tab group 阅读视图
+			10 tab (settable, boolean) 笔记, Value: on
+			11 tab (settable, boolean) 截图, Value: off
+		12 button 在笔记中查找，Command F
+		13 button 目录：关
+		14 button 复制笔记
+		15 button 导出
+		16 button 生成信息
+		17 container 验收课程 · BV1UXNARROW
+			18 Heading 00:00
+			19 button 在原视频打开 00:00
+			20 button 放大验收课程 · BV1UXNARROW，00:00 的截图
+			21 text 视频截图 · 00:00
+			22 button 放大截图
+			23 container 人工字幕：分散投资可以减少个别资产带来的影响。
+	24 close button
+	25 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	26 minimize button
+27 menu bar
+	28 course2md Visual narrow
+	29 文件
+	30 查找

@@ -1,0 +1,24 @@
+Window: "course2md", App: course2md Visual narrow.
+0 standard window course2md, Secondary Actions: Raise
+	1 container
+		2 dialog 查看验收课程 · BV1UXNARROW，00:00 的截图
+			3 Heading 验收课程 · BV1UXNARROW，00:00 的截图
+			4 button 上一张
+			5 text 1 / 1
+			6 button 下一张
+			7 button 缩小
+			8 text 35%
+			9 button 放大
+			10 button 适合窗口
+			11 image 验收课程 · BV1UXNARROW，00:00 的截图
+			12 container 同期转录：人工字幕：分散投资可以减少个别资产带来的影响。
+		13 button 在笔记中查看
+		14 button 从此处观看
+		15 button 关闭截图
+	16 close button
+	17 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	18 minimize button
+19 menu bar
+	20 course2md Visual narrow
+	21 文件
+	22 查找

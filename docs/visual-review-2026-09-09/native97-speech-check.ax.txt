@@ -1,0 +1,35 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 Heading 默认识别方式
+		3 text 用于后续转换；有字幕时优先使用字幕。
+		4 toggle button (settable, boolean) 本机识别, Value: off
+		5 toggle button (settable, boolean) 在线语音服务, Value: on
+		6 text 接口类型
+		7 语音接口类型
+			8 radio button (selected, settable, boolean) 语音转录
+			9 radio button (selectable, settable, boolean) 音频聊天, Secondary Actions: Pick
+		10 text 服务地址
+		11 text field (settable) 服务地址, Value: http://127.0.0.1:18581/v1
+		12 text 认证方式
+		13 服务认证
+			14 radio button (selectable, settable, boolean) API Key, Secondary Actions: Pick
+			15 radio button (selected, settable, boolean) 无需认证
+		16 text 模型
+		17 text field (settable) 模型 ID, Value: fixture-transcribe
+		18 button 选择模型
+		19 button 刷新模型
+		20 text 3 个可选模型
+		21 text 语音识别用途测试通过
+		22 button 重新检查
+		23 button 检查详情
+		24 text 检查仅发送内置示例，服务商可能计费
+		25 button 稍后设置
+		26 button 保存并继续
+	27 close button
+	28 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	29 minimize button
+30 menu bar
+	31 course2md Visual normal
+	32 文件
+	33 查找

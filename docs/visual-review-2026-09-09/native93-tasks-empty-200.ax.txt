@@ -1,0 +1,18 @@
+Window: "course2md", App: course2md Visual narrow.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 导入, Value: off
+			4 tab (settable, boolean) 笔记, Value: off
+			5 tab (settable, boolean) 任务, Value: on
+			6 tab (settable, boolean) 设置, Value: off
+		7 Heading 还没有生成任务
+		8 text 开始生成后，可以在这里查看处理进度和生成结果
+		9 button 导入视频
+	10 close button
+	11 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	12 minimize button
+13 menu bar
+	14 course2md Visual narrow
+	15 文件
+	16 查找

@@ -1,0 +1,80 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: off
+			4 tab (settable, boolean) 我的笔记, Value: off
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: on
+		7 Heading 设置
+		8 tab group 设置分类
+			9 tab (settable, boolean) 外观, Value: off
+			10 tab (settable, boolean) 生成笔记, Value: off
+			11 tab (settable, boolean) 服务与账号, Value: off
+			12 tab (settable, boolean) 存储, Value: off
+			13 tab (settable, boolean) 应用, Value: on
+		14 container 应用
+			15 Heading 关于
+			16 Heading course2md 2.0.0-alpha.1
+			17 text 构建 da081a609b33
+			18 text 把课程整理成笔记。
+			19 button 项目主页
+			20 button 发送反馈
+			21 Heading 开源许可
+			22 button course2md · MIT
+			23 button Material Icons · Apache 2.0
+			24 text 用户引导
+			25 text 选择默认引擎、配置 AI 服务和准备模型
+			26 button 重新开始用户引导
+			27 Heading 运行检查
+			28 text 视频处理与导出
+			29 text 读取在线视频
+			30 text 本机语音识别
+			31 button 重新检查
+			32 button 收起诊断详情
+			33 Heading 所需程序
+			34 text 转换程序
+			35 text 已安装
+			36 text ffmpeg
+			37 text 已安装
+			38 text ffprobe
+			39 text 已安装
+			40 text yt-dlp
+			41 text 已安装
+			42 text llama-server
+			43 text 已安装
+			44 Heading 当前模型
+			45 text 识别方式
+			46 text Apple 原生
+			47 text 模型
+			48 text Qwen3-ASR 1.7B · qwen3-1.7b
+			49 text 模型状态
+			50 text 尚未下载完整，继续准备会复用已有文件。
+			51 text 缓存占用
+			52 text 641874 字节
+			53 button 查看缓存详情
+			54 text 准备时可能下载模型，课程内容不会上传。
+			55 button 重新检查模型
+			56 button 继续准备模型：Apple 原生 · qwen3-1.7b
+			57 Heading 设备与运行时
+			58 text CPU 架构
+			59 text aarch64
+			60 text Apple 平台
+			61 text 原生运行于 Apple 芯片
+			62 text GPU
+			63 text Apple M3 Max
+			64 text Intel NPU
+			65 text 未检测到设备
+			66 text NPU 启动器
+			67 text 已找到；首次准备时验证 OpenVINO 及设备编译
+			68 text Apple 识别程序
+			69 text 已检测到原生运行时与 Metal 资源
+			70 text 可用识别方式
+			71 text Apple 原生、GPU、CPU
+	72 close button
+	73 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	74 minimize button
+75 menu bar
+	76 course2md Visual normal
+	77 文件
+	78 查找

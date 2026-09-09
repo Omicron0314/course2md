@@ -1,0 +1,21 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: on
+			4 tab (settable, boolean) 我的笔记, Value: off
+			5 tab (settable, boolean) 任务 · 1, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 text 笔记已生成
+		8 text 验收课程 · BV1UXVISUAL09
+		9 text 已保存到课程库
+		10 button 阅读笔记
+		11 button 转换下一个视频
+		12 button 调整并重新生成
+	13 close button
+	14 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	15 minimize button
+16 menu bar
+	17 course2md Visual normal
+	18 文件
+	19 查找

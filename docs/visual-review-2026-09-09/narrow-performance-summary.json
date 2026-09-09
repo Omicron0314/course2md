@@ -1,0 +1,52 @@
+{
+  "pid": 29091,
+  "unix_ms": 1788931014931,
+  "elapsed_ms": 139667,
+  "window_active_at_sample": true,
+  "motion_trace_enabled": true,
+  "motion_events_dropped": 0,
+  "draw": {
+    "count": 101,
+    "p50_ms": 2.115583,
+    "p95_ms": 9.994239,
+    "p99_ms": 20.267007,
+    "max_ms": 28.639231,
+    "over_16_7_ms": 2,
+    "over_100_ms": 0
+  },
+  "dirty_to_present": {
+    "count": 99,
+    "p50_ms": 3.393535,
+    "p95_ms": 32.948223,
+    "p99_ms": 72.613887,
+    "max_ms": 72.613887,
+    "over_16_7_ms": 25,
+    "over_100_ms": 0
+  },
+  "animation_interval": {
+    "count": 44,
+    "p50_ms": 16.588799,
+    "p95_ms": 17.891327,
+    "p99_ms": 18.317311,
+    "max_ms": 18.317311,
+    "over_16_7_ms": 21,
+    "over_100_ms": 0
+  },
+  "input_to_present": {
+    "count": 11,
+    "p50_ms": 16.121855,
+    "p95_ms": 44.007423,
+    "p99_ms": 44.007423,
+    "max_ms": 44.007423,
+    "over_16_7_ms": 5,
+    "over_100_ms": 0
+  },
+  "mid_draw_events_dropped": 0,
+  "samples": 139,
+  "motion_events": 109,
+  "intermediate_selection_values": 80,
+  "native_window": "1140x820",
+  "font_scale": 2,
+  "build_profile": "release --features performance",
+  "note": "Release ignores the debug-only validation-window setting; this run used the ordinary initial window size."
+}

@@ -1,0 +1,32 @@
+Window: "course2md", App: course2md Design Preview.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 Heading 连接 AI 服务
+		3 text 用于校对文字和生成摘要，也可以稍后配置。
+		4 text 服务地址
+		5 text field (settable) 服务地址, Placeholder: https://api.example.com/v1
+		6 text 认证方式
+		7 服务认证
+			8 radio button (selected, settable, boolean) API Key
+			9 radio button (selectable, settable, boolean) 无需认证, Secondary Actions: Pick
+		10 text API Key
+		11 text field API Key
+		12 button 显示
+		13 text 模型
+		14 text field (settable) 模型 ID, Placeholder: 服务商提供的模型 ID
+		15 button 获取模型
+		16 text 自动校对文字
+		17 switch (settable, boolean) on
+		18 text 生成课程摘要
+		19 switch (settable, boolean) off
+		20 text 检查仅发送内置示例，服务商可能计费
+		21 button 上一步
+		22 button 稍后配置 AI
+		23 button 检查配置
+	24 close button
+	25 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	26 minimize button
+27 menu bar
+	28 course2md Visual normal
+	29 文件
+	30 查找

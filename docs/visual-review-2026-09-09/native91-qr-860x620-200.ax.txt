@@ -1,0 +1,15 @@
+Window: "course2md", App: course2md Visual narrow.
+0 standard window course2md, Secondary Actions: Raise
+	1 container
+		2 text 登录 Bilibili
+		3 text 请使用哔哩哔哩 App 扫码
+		4 text 二维码约 173 秒后过期
+		5 button 取消
+		6 button Close
+	7 close button
+	8 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	9 minimize button
+10 menu bar
+	11 course2md Visual narrow
+	12 文件
+	13 查找

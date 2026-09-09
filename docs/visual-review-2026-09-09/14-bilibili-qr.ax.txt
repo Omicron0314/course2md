@@ -1,0 +1,14 @@
+Window: "course2md", App: course2md Design Preview.
+0 standard window course2md, Secondary Actions: Raise
+	1 container
+		2 text 请使用哔哩哔哩 App 扫码
+		3 text 二维码约 179 秒后过期
+		4 button 取消
+		5 button Close
+	6 close button
+	7 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	8 minimize button
+9 menu bar
+	10 course2md Visual normal
+	11 文件
+	12 查找

@@ -1,0 +1,37 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: off
+			4 tab (settable, boolean) 我的笔记, Value: on
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 button 返回工作台
+		8 Heading 验收课程 · BV1UXVISUAL10
+		9 text 合成测试讲师 · 00:18 · Bilibili
+		10 button 打开原视频：https://www.bilibili.com/video/BV1UXVISUAL10
+		11 button 版本 2
+		12 button 生成信息
+		13 tab group 阅读视图
+			14 tab (settable, boolean) 笔记, Value: on
+			15 tab (settable, boolean) 截图, Value: off
+		16 button 在笔记中查找，Command F
+		17 button 目录：关
+		18 button 复制笔记
+		19 button 导出
+		20 button 在文件夹中显示这份笔记
+		21 container 验收课程 · BV1UXVISUAL10
+			22 text 摘要
+			23 Heading 分散投资
+			24 button 在原视频打开 00:00
+			25 button 放大验收课程 · BV1UXVISUAL10，00:00 的截图
+			26 text 视频截图 · 00:00
+			27 button 放大截图
+			28 container 人工字幕：分散投资可以减少个别资产带来的影响。
+	29 close button
+	30 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	31 minimize button
+32 menu bar
+	33 course2md Visual normal
+	34 文件
+	35 查找

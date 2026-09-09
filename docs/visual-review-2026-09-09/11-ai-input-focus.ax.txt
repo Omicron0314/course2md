@@ -1,0 +1,33 @@
+Window: "course2md", App: course2md Design Preview.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 Heading 连接 AI 服务
+		3 text 用于校对文字和生成摘要，也可以稍后配置。
+		4 text 服务地址
+		5 text field (settable) 服务地址, Value: http://127.0.0.1:18581/v1
+		6 text 认证方式
+		7 服务认证
+			8 radio button (selectable, settable, boolean) API Key, Secondary Actions: Pick
+			9 radio button (selected, settable, boolean) 无需认证
+		10 text 模型
+		11 text field (settable) 模型 ID, Value: fixture-model
+		12 button 选择模型
+		13 button 刷新模型
+		14 text 3 个可选模型
+		15 text 自动校对文字
+		16 switch (settable, boolean) on
+		17 text 生成课程摘要
+		18 switch (settable, boolean) off
+		19 text 检查仅发送内置示例，服务商可能计费
+		20 button 上一步
+		21 button 稍后配置 AI
+		22 button 检查配置
+	23 close button
+	24 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	25 minimize button
+26 menu bar
+	27 course2md Visual normal
+	28 文件
+	29 查找
+
+The focused UI element is 11 text field (settable) 模型 ID, Value: fixture-model

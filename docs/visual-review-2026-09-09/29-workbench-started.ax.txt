@@ -1,0 +1,24 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: on
+			4 tab (settable, boolean) 我的笔记, Value: off
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 text 把视频整理成笔记
+		8 视频来源
+			9 radio button (selected, settable, boolean) 视频链接
+			10 radio button (selectable, settable, boolean) 本地文件, Secondary Actions: Pick
+		11 text 视频链接
+		12 text field (settable) 视频链接, Value: https://www.bilibili.com/video/BV1UXVISUAL09
+		13 text 本次任务
+		14 button 暂停生成
+		15 button 取消任务
+	16 close button
+	17 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	18 minimize button
+19 menu bar
+	20 course2md Visual normal
+	21 文件
+	22 查找

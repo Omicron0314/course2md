@@ -1,0 +1,23 @@
+Window: "course2md", App: course2md Visual narrow.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 Heading 默认识别方式
+		3 toggle button (settable, boolean) 本机识别, Value: on
+		4 toggle button (settable, boolean) 在线语音服务, Value: off
+		5 text 自动选择 · Apple 原生
+		6 button 更换引擎
+		7 text 识别模型
+		8 toggle button (settable, boolean) Qwen3 1.7B, Value: on
+		9 toggle button (settable, boolean) Qwen3 0.6B, Value: off
+		10 toggle button (settable, boolean) Whisper, Value: off
+		11 button 稍后设置
+		12 button 保存并继续
+	13 close button
+	14 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	15 minimize button
+16 menu bar
+	17 course2md Visual narrow
+	18 文件
+	19 查找
+
+The focused UI element is 8 toggle button (settable, boolean) Qwen3 1.7B, Value: on

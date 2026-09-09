@@ -1,0 +1,43 @@
+Window: "course2md", App: course2md Visual narrow.
+0 standard window course2md, Secondary Actions: Raise
+	1 container
+		2 unknown
+			3 tab group 主导航
+				4 tab (settable, boolean) 导入, Value: off
+				5 tab (settable, boolean) 笔记, Value: on
+				6 tab (settable, boolean) 任务, Value: off
+				7 tab (settable, boolean) 设置, Value: off
+			8 button 返回工作台
+			9 Heading 验收课程 · BV1UXNARROW
+			10 tab group 阅读视图
+				11 tab (settable, boolean) 笔记, Value: on
+				12 tab (settable, boolean) 截图, Value: off
+			13 button 在笔记中查找，Command F
+			14 button 目录：关
+			15 button 复制笔记
+			16 button 导出
+			17 button 收起生成信息
+			18 text 合成测试讲师 · 00:18 · Bilibili
+			19 button 打开原视频：https://www.bilibili.com/video/BV1UXNARROW
+			20 button 在文件夹中显示这份笔记
+			21 text 版本 1 · 2026-09-09 生成
+			22 text 文字：已完成
+			23 text 截图：已完成
+			24 text AI 校对：未使用
+			25 text 摘要：未使用
+			26 text 来源身份：online:bilibili:11:BV1UXNARROW
+			27 text 提交时选择的字幕：简体中文
+			28 container 验收课程 · BV1UXNARROW
+				29 Heading 00:00
+				30 button 在原视频打开 00:00
+				31 button 放大验收课程 · BV1UXNARROW，00:00 的截图
+				32 text 视频截图 · 00:00
+				33 button 放大截图
+				34 container 人工字幕：分散投资可以减少个别资产带来的影响。
+	35 close button
+	36 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	37 minimize button
+38 menu bar
+	39 course2md Visual narrow
+	40 文件
+	41 查找

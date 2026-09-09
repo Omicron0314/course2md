@@ -1,0 +1,22 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 Heading 准备识别模型
+		3 text 模型保存在本机。下载期间也可以使用已有字幕。
+		4 text Qwen3 0.6B
+		5 text Apple 原生
+		6 text 正在准备模型
+		7 text 下载、文件检查和加载验证会按实际进度更新。
+		8 text 准备 Apple 识别模型 · 27% · 已用 2 秒
+		9 button 暂停准备
+		10 button 模型详情
+		11 button 上一步
+		12 button 继续使用
+		13 text 模型会继续在后台准备
+	14 close button
+	15 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	16 minimize button
+17 menu bar
+	18 course2md Visual normal
+	19 文件
+	20 查找

@@ -1,0 +1,42 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: on
+			4 tab (settable, boolean) 我的笔记, Value: off
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 text 把视频整理成笔记
+		8 视频来源
+			9 radio button (selected, settable, boolean) 视频链接
+			10 radio button (selectable, settable, boolean) 本地文件, Secondary Actions: Pick
+		11 text 视频链接
+		12 text field (settable) 视频链接, Value: https://www.bilibili.com/video/BV1UXVISUAL10
+		13 text 本次任务
+		14 container 生成整篇摘要（00:00–00:17）：未收到服务的确定结果。服务可能已处理这部分，再次提交可能产生额外费用 / Service result is uncertain; resending may incur additional charges
+		15 text 读取字幕：已完成
+		16 text 下载视频：已完成
+		17 text 扫描画面：已完成
+		18 text 生成截图：已完成
+		19 text AI 校对：已完成
+		20 text 生成摘要：尚未完成，进度已保留
+		21 text 生成笔记：已完成
+		22 button 继续任务
+		23 button 调整后重试
+		24 button 取消任务
+		25 button 技术详情
+		26 text 最近笔记
+		27 button 查看全部
+		28 button 阅读 验收课程 · BV1UXVISUAL10
+		29 button 阅读笔记
+		30 button 阅读 验收课程 · BV1UXVISUAL09
+		31 button 阅读笔记
+	32 close button
+	33 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	34 minimize button
+35 menu bar
+	36 course2md Visual normal
+	37 文件
+	38 查找
+
+The focused UI element is 12 text field (settable) 视频链接, Value: https://www.bilibili.com/video/BV1UXVISUAL10

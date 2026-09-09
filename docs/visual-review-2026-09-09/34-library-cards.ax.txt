@@ -1,0 +1,30 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: off
+			4 tab (settable, boolean) 我的笔记, Value: on
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 Heading 我的笔记
+		8 button 刷新课程库
+		9 text field (settable) 搜索笔记标题
+		10 button 文件夹筛选：全部笔记
+		11 button 按文件夹分组：关
+		12 显示方式
+			13 radio button (selectable, settable, boolean) 列表, Secondary Actions: Pick
+			14 radio button (selected, settable, boolean) 卡片, Value: on
+		15 button 阅读 验收课程 · BV1UXVISUAL09
+		16 button 阅读 验收课程 · BV1UXVISUAL09
+		17 button 保存到文件夹：未分类
+		18 button 《验收课程 · BV1UXVISUAL09》的笔记操作
+		19 button 阅读笔记
+	20 close button
+	21 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	22 minimize button
+23 menu bar
+	24 course2md Visual normal
+	25 文件
+	26 查找
+
+The focused UI element is 14 radio button (selected, settable, boolean) 卡片, Value: on

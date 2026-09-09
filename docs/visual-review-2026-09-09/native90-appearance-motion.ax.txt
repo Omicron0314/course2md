@@ -1,0 +1,48 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: off
+			4 tab (settable, boolean) 我的笔记, Value: off
+			5 tab (settable, boolean) 任务 · 1, Value: off
+			6 tab (settable, boolean) 设置, Value: on
+		7 text 《验收课程 · BV1UXVISUAL10》：笔记已生成
+		8 button 查看生成结果
+		9 button 关闭这条任务提示
+		10 Heading 设置
+		11 tab group 设置分类
+			12 tab (settable, boolean) 外观, Value: on
+			13 tab (settable, boolean) 生成笔记, Value: off
+			14 tab (settable, boolean) 服务与账号, Value: off
+			15 tab (settable, boolean) 存储, Value: off
+			16 tab (settable, boolean) 应用, Value: off
+		17 container 外观
+			18 text 外观模式
+			19 外观模式
+				20 radio button (selectable, settable, boolean) 跟随系统, Secondary Actions: Pick
+				21 radio button (selected, settable, boolean) 浅色, Value: on
+				22 radio button (selectable, settable, boolean) 深色, Secondary Actions: Pick
+			23 Heading 主题配色
+			24 text 浅色主题
+			25 button 浅色主题：Tokyo Day，选择主题
+			26 text 深色主题
+			27 button 深色主题：Catppuccin Mocha，选择主题
+			28 Heading 界面偏好
+			29 text 界面文字大小
+			30 应用文字大小
+				31 radio button (selected, settable, boolean) 100%
+				32 radio button (selectable, settable, boolean) 125%, Secondary Actions: Pick
+				33 radio button (selectable, settable, boolean) 150%, Secondary Actions: Pick
+				34 radio button (selectable, settable, boolean) 200%, Secondary Actions: Pick
+			35 text 减少动态效果
+			36 text 关闭过渡与循环动画。
+			37 switch (settable, boolean) 减少动态效果, Value: off
+	38 close button
+	39 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	40 minimize button
+41 menu bar
+	42 course2md Visual normal
+	43 文件
+	44 查找
+
+The focused UI element is 21 radio button (selected, settable, boolean) 浅色, Value: on

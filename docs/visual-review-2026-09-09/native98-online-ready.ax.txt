@@ -1,0 +1,17 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 Heading 准备就绪
+		3 text 转换时将使用已保存的语音服务。
+		4 text 语音服务不需要本机模型
+		5 text 识别时使用 127.0.0.1 · fixture-transcribe。
+		6 text 你可以随时在设置中更换引擎、服务或重新开始用户引导。
+		7 button 上一步
+		8 button 开始使用
+	9 close button
+	10 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	11 minimize button
+12 menu bar
+	13 course2md Visual normal
+	14 文件
+	15 查找

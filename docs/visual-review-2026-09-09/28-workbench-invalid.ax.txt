@@ -1,0 +1,28 @@
+Window: "course2md", App: course2md Visual normal.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 tab group 主导航
+			3 tab (settable, boolean) 工作台, Value: on
+			4 tab (settable, boolean) 我的笔记, Value: off
+			5 tab (settable, boolean) 任务, Value: off
+			6 tab (settable, boolean) 设置, Value: off
+		7 text 把视频整理成笔记
+		8 视频来源
+			9 radio button (selected, settable, boolean) 视频链接
+			10 radio button (selectable, settable, boolean) 本地文件, Secondary Actions: Pick
+		11 text 视频链接
+		12 text field (settable) 视频链接, Value: not-a-video
+		13 button 开始转换
+		14 text 请输入完整的视频链接，以 https:// 或 http:// 开头
+		15 text 优先使用字幕，字幕不可用时自动识别视频声音
+		16 text 文字会发送到「127.0.0.1」进行校对
+		17 button 高级选项
+	18 close button
+	19 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	20 minimize button
+21 menu bar
+	22 course2md Visual normal
+	23 文件
+	24 查找
+
+The focused UI element is 12 text field (settable) 视频链接, Value: not-a-video
