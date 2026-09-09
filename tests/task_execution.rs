@@ -785,7 +785,7 @@ fn only_explicit_response_format_rejection_allows_one_compatible_summary_request
 }
 
 #[test]
-fn real_http_uncertainty_requires_exact_authorization_and_reprocessing_never_repeats_asr() {
+fn proofreading_resend_continues_unsent_summary_without_repeating_source_work() {
     use std::sync::atomic::Ordering;
     if course2md::runtime::which("ffmpeg").is_none()
         || course2md::runtime::which("ffprobe").is_none()
@@ -813,6 +813,7 @@ fn real_http_uncertainty_requires_exact_authorization_and_reprocessing_never_rep
         },
     ]);
     original.config.llm.enabled = true;
+    original.config.llm.summarize = true;
     original.config.llm.base_url = mock.url.clone();
     original.config.llm.model = "test-model".into();
     original.config.llm.api_key = "private-task-key".into();
@@ -828,14 +829,22 @@ fn real_http_uncertainty_requires_exact_authorization_and_reprocessing_never_rep
             .any(|event| event["type"] == "blocked" && event["reason"] == "uncertain")
     );
     assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
-    let receipt = course2md::dispatch::receipts(&original.work_dir)
-        .unwrap()
-        .remove(0);
+    let mut receipts = course2md::dispatch::receipts(&original.work_dir).unwrap();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "blocked summary must not create an attempt"
+    );
+    let receipt = receipts.remove(0);
     assert_eq!(receipt.state, course2md::dispatch::State::Uncertain);
+    assert_eq!(receipt.purpose, "proofreading");
     assert!(receipt.description.contains("00:00–00:07"));
     assert!(!String::from_utf8_lossy(&first.stdout).contains("private-task-key"));
     let base = original.course_dir.join("versions/version-one");
+    let manifest = artifact::read_manifest(&base.join("manifest.json")).unwrap();
+    assert_eq!(manifest.outcomes.summary.status, artifact::Status::Failed);
     let untouched = std::fs::read(base.join("document.json")).unwrap();
+    std::fs::remove_file(&source).unwrap();
     let mut retry = original.clone();
     retry.task_id = "retry-polish".into();
     retry.version_id = "retry-polish".into();
@@ -843,7 +852,7 @@ fn real_http_uncertainty_requires_exact_authorization_and_reprocessing_never_rep
     retry.control_path = Some(retry.work_dir.join("control.json"));
     retry.operation = course2md::execution::Operation::Reprocess {
         base_version_dir: base.clone(),
-        components: vec!["proofreading".into()],
+        components: vec!["proofreading".into(), "summary".into()],
         prior_work_dir: Some(original.work_dir.clone()),
     };
     std::fs::create_dir_all(&retry.work_dir).unwrap();
@@ -856,7 +865,7 @@ fn real_http_uncertainty_requires_exact_authorization_and_reprocessing_never_rep
     let second = run(root.path(), &retry);
     let observed = events(&second);
     assert!(second.status.success(), "{observed:#?}");
-    assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
     assert!(
         !observed
             .iter()
@@ -869,36 +878,22 @@ fn real_http_uncertainty_requires_exact_authorization_and_reprocessing_never_rep
         updated.outcomes.proofreading.status,
         artifact::Status::Succeeded
     );
+    assert_eq!(updated.outcomes.summary.status, artifact::Status::Succeeded);
+    let receipts = course2md::dispatch::receipts(&retry.work_dir).unwrap();
+    assert_eq!(receipts.len(), 2);
+    for (purpose, attempt) in [("proofreading", 2), ("summary", 1)] {
+        let receipt = receipts.iter().find(|r| r.purpose == purpose).unwrap();
+        assert_eq!(receipt.state, course2md::dispatch::State::Completed);
+        assert_eq!(receipt.attempt, attempt);
+    }
     assert_eq!(
         std::fs::read(base.join("document.json")).unwrap(),
         untouched
     );
-    // Summary is independent of proofreading and does not need the original media anymore.
-    std::fs::remove_file(&source).unwrap();
-    let mut summary = retry.clone();
-    summary.task_id = "summary-only".into();
-    summary.version_id = "summary-only".into();
-    summary.work_dir = root.path().join("summary-work");
-    summary.control_path = None;
-    summary.config.llm.enabled = false;
-    summary.operation = course2md::execution::Operation::Reprocess {
-        base_version_dir: retry.course_dir.join("versions/retry-polish"),
-        components: vec!["summary".into()],
-        prior_work_dir: None,
-    };
-    let third = run(root.path(), &summary);
+    // Reopening the completed recovery cannot spend either authorization again.
+    let third = run(root.path(), &retry);
     assert!(third.status.success(), "{:?}", events(&third));
     assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
-    let manifest = artifact::read_manifest(
-        &summary
-            .course_dir
-            .join("versions/summary-only/manifest.json"),
-    )
-    .unwrap();
-    assert_eq!(
-        manifest.outcomes.summary.status,
-        artifact::Status::Succeeded
-    );
 }
 
 #[test]

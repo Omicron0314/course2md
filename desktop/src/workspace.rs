@@ -798,6 +798,25 @@ impl State {
                 !unknown.is_empty() && unknown == resend.iter().collect(),
                 "待确认请求已变化，请查看最新范围后再选择是否重新发送"
             );
+            // The user is continuing the original task, including a requested
+            // summary that the uncertain proofreading prevented from starting.
+            // Any summary receipt means it has its own attempt to recover; do
+            // not infer permission to repeat it from a proofreading decision.
+            if components.iter().any(|part| part == "proofreading")
+                && !components.iter().any(|part| part == "summary")
+                && original.plan.config.llm.summarize
+                && value.get("summary").is_some_and(failed_outcome)
+                && original.blocked.iter().any(|request| {
+                    request.reason == "uncertain"
+                        && request.purpose.as_deref() == Some("proofreading")
+                })
+                && !course2md::dispatch::receipts(&original.work_dir)?
+                    .iter()
+                    .any(|receipt| receipt.purpose == "summary")
+            {
+                components.push("summary".into());
+                components.sort();
+            }
         } else {
             ensure!(
                 !original.blocked.iter().any(|r| r.reason == "uncertain"),
@@ -2379,6 +2398,19 @@ mod tests {
     }
 
     fn publish_note(state: &State, task_id: &str, partial: bool) -> PathBuf {
+        let mut outcomes = course2md::artifact::Outcomes::default();
+        outcomes.transcript = course2md::artifact::Outcome::succeeded();
+        if partial {
+            outcomes.proofreading = course2md::artifact::Outcome::failed("校对未完成");
+        }
+        publish_note_with_outcomes(state, task_id, outcomes)
+    }
+
+    fn publish_note_with_outcomes(
+        state: &State,
+        task_id: &str,
+        outcomes: course2md::artifact::Outcomes,
+    ) -> PathBuf {
         use course2md::{artifact, timeline};
         let task = state.task(task_id).unwrap();
         let course_id = format!(
@@ -2396,11 +2428,6 @@ mod tests {
                 .root
                 .join(course_id),
         };
-        let mut outcomes = artifact::Outcomes::default();
-        outcomes.transcript = artifact::Outcome::succeeded();
-        if partial {
-            outcomes.proofreading = artifact::Outcome::failed("校对未完成");
-        }
         let meta = course2md::fetch::VideoMeta {
             title: task.plan.title.clone(),
             uploader: String::new(),
@@ -2457,6 +2484,169 @@ mod tests {
         )
         .unwrap();
         id
+    }
+
+    fn uncertain_proofreading_note(
+        ws: &mut Workspace,
+        summarize: bool,
+        summary: course2md::artifact::Outcome,
+    ) -> (String, String) {
+        let mut snapshot = plan(&ws.state.default_library);
+        snapshot.config.llm.enabled = true;
+        snapshot.config.llm.summarize = summarize;
+        snapshot.options.llm = true;
+        snapshot.options.summarize = summarize;
+        let id = ws.state.enqueue(snapshot, None).unwrap().0;
+        let mut outcomes = course2md::artifact::Outcomes::default();
+        outcomes.transcript = course2md::artifact::Outcome::succeeded();
+        outcomes.proofreading = course2md::artifact::Outcome::failed("校对请求结果尚不确定");
+        outcomes.summary = summary;
+        let version = publish_note_with_outcomes(&ws.state, &id, outcomes);
+        let task = ws.state.task_mut(&id).unwrap();
+        task.state = TaskState::Uncertain;
+        task.artifact = Some(version);
+        let request = write_unknown(task, 1);
+        (id, request)
+    }
+
+    #[test]
+    fn proofreading_resend_continues_an_authorized_summary_that_was_never_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let (id, request) = uncertain_proofreading_note(
+            &mut ws,
+            true,
+            course2md::artifact::Outcome::failed("前一步请求结果尚不确定；没有继续发送"),
+        );
+        let original = ws.state.task(&id).unwrap().clone();
+        let manifest_path = original.artifact.as_ref().unwrap().join("manifest.json");
+        let manifest = std::fs::read(&manifest_path).unwrap();
+        ws.state
+            .draft_mut()
+            .unwrap()
+            .change_source("next-video.mp4".into());
+        let draft = ws.state.draft().unwrap().clone();
+        let next = ws
+            .state
+            .reprocess(&id, vec!["proofreading".into()], vec![request.clone()])
+            .unwrap();
+        let child = ws.state.task(&next).unwrap();
+        let course2md::execution::Operation::Reprocess {
+            components,
+            base_version_dir,
+            prior_work_dir,
+        } = &child.plan.operation
+        else {
+            panic!("expected component recovery");
+        };
+        assert_eq!(components, &["proofreading", "summary"]);
+        assert_eq!(Some(base_version_dir), original.artifact.as_ref());
+        assert_eq!(prior_work_dir.as_ref(), Some(&original.work_dir));
+        assert!(child.plan.config.llm.enabled && child.plan.config.llm.summarize);
+        assert!(child.plan.options.llm && child.plan.options.summarize);
+        assert_eq!(child.resend, vec![request.clone()]);
+        assert!(ws.state.task(&id).unwrap().plan == original.plan);
+        assert!(ws.state.draft().unwrap() == &draft);
+        assert_eq!(std::fs::read(manifest_path).unwrap(), manifest);
+        assert_eq!(
+            ws.state
+                .reprocess(&id, vec!["proofreading".into()], vec![request])
+                .unwrap(),
+            next
+        );
+        assert_eq!(ws.state.tasks.len(), 2);
+    }
+
+    #[test]
+    fn proofreading_resend_does_not_invent_or_repeat_a_summary() {
+        use course2md::artifact::Outcome;
+        for (requested, summary) in [
+            (false, Outcome::failed("未要求生成摘要")),
+            (true, Outcome::not_requested()),
+            (true, Outcome::succeeded()),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut ws = test_workspace(dir.path());
+            let (id, request) = uncertain_proofreading_note(&mut ws, requested, summary);
+            let next = ws
+                .state
+                .reprocess(&id, vec!["proofreading".into()], vec![request])
+                .unwrap();
+            let child = ws.state.task(&next).unwrap();
+            let course2md::execution::Operation::Reprocess { components, .. } =
+                &child.plan.operation
+            else {
+                panic!("expected component recovery");
+            };
+            assert_eq!(components, &["proofreading"]);
+            assert!(!child.plan.config.llm.summarize && !child.plan.options.summarize);
+        }
+    }
+
+    #[test]
+    fn an_existing_summary_attempt_needs_its_own_recovery_decision() {
+        use course2md::dispatch::{Receipt, State as ReceiptState};
+        for receipt_state in [
+            ReceiptState::Completed,
+            ReceiptState::NotSent,
+            ReceiptState::Rejected,
+            ReceiptState::Failed,
+            ReceiptState::Sending,
+            ReceiptState::Uncertain,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut ws = test_workspace(dir.path());
+            let (id, request) = uncertain_proofreading_note(
+                &mut ws,
+                true,
+                course2md::artifact::Outcome::failed("摘要未完成"),
+            );
+            let task = ws.state.task(&id).unwrap();
+            let receipt = Receipt {
+                schema: 1,
+                stable_id: "summary-request".into(),
+                request_id: "summary-request.1".into(),
+                purpose: "summary".into(),
+                description: "生成摘要".into(),
+                service_version: "version-a".into(),
+                attempt: 1,
+                state: receipt_state.clone(),
+                http_status: None,
+                response: None,
+                message: None,
+                unsupported_response_format: false,
+                retry_authorized: None,
+            };
+            std::fs::write(
+                task.work_dir.join("requests/summary-request.json"),
+                serde_json::to_vec(&receipt).unwrap(),
+            )
+            .unwrap();
+            let recovery = ws
+                .state
+                .reprocess(&id, vec!["proofreading".into()], vec![request]);
+            if matches!(
+                receipt_state,
+                ReceiptState::Sending | ReceiptState::Uncertain
+            ) {
+                assert!(
+                    recovery.is_err(),
+                    "{receipt_state:?} needs exact authorization"
+                );
+                assert_eq!(ws.state.tasks.len(), 1);
+                assert!(ws.state.task(&id).unwrap().handled_by.is_none());
+            } else {
+                let next = recovery.unwrap();
+                let child = ws.state.task(&next).unwrap();
+                let course2md::execution::Operation::Reprocess { components, .. } =
+                    &child.plan.operation
+                else {
+                    panic!("expected component recovery");
+                };
+                assert_eq!(components, &["proofreading"], "{receipt_state:?}");
+                assert!(!child.plan.config.llm.summarize && !child.plan.options.summarize);
+            }
+        }
     }
 
     #[test]
