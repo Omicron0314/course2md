@@ -1,0 +1,170 @@
+{
+  "93-final-service-footer-and-copy.png": {
+    "bytes": 89783,
+    "sha256": "bae2158101a063540248a77eab53b1e99965af47c03dabada0602a5891dcbc01"
+  },
+  "native-responsive-review.md": {
+    "bytes": 5918,
+    "sha256": "7c7349d90cbac757a66fdf08195477fea051a920fd0825ac7356b352c89d36cd"
+  },
+  "92-installed-final-guide.png": {
+    "bytes": 44566,
+    "sha256": "002ea91610ad0559b65e22d1138960203abde72b9aef88070e5499c48da3637a"
+  },
+  "74-guide-save-failure.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "installation.json": {
+    "bytes": 1037,
+    "sha256": "e7c1c9cea044f1cb93d7ea2cf1c52168846ec09f80453dfda7f4e96d7606bbfc"
+  },
+  "79-service-result-actions-visible.png": {
+    "bytes": 67101,
+    "sha256": "989866179de2c64af2afc3c97a8b1b4a69b2d13b0cb0b4e5a6c3ffd20fc76f90"
+  },
+  "native-flow-review.md": {
+    "bytes": 18308,
+    "sha256": "b40c6dce308db52965436be5eb531cd3ae24d14d702988b6aeff48e86ee9ea12"
+  },
+  "77-guide-save-failure-temporary-exit.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "30-reader-position-before-settings.png": {
+    "bytes": 58131,
+    "sha256": "531fe7b482f993d66ac406cde9f24ac830a0f12229de36c33d394fc4f602a3d3"
+  },
+  "86-local-file-selected-final.ax.txt": {
+    "bytes": 1575,
+    "sha256": "5ecd618eb959951f0157ec55784dc7658a713dfceea33e48fad761af4768f2e2"
+  },
+  "72-real-asr-completed.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "85-collection-choice-final.png": {
+    "bytes": 92653,
+    "sha256": "20d7573560e74a7b5f4b023ff12c2e3e281b99f9db71dcebf80afa5af249efa0"
+  },
+  "74-guide-save-failure.png": {
+    "bytes": 51718,
+    "sha256": "8acec269d1117b716832c53d27bb94ffe140389d5ea328e3ba50c9293db8f849"
+  },
+  "70-model-load-verified.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "73-fresh-no-config-guide.ax.txt": {
+    "bytes": 854,
+    "sha256": "7bbb766eef529ed0833d1a54a1af8c803a36b1be783d9667bedd027ae64e138b"
+  },
+  "80-repaired-intent-resumes.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "30-reader-position-before-settings.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "77-guide-save-failure-temporary-exit.png": {
+    "bytes": 45860,
+    "sha256": "c6450e9cd46047eb0e626e306072665f9a0fefcc7d9ff10fa313839dde6a7273"
+  },
+  "model-cache-reuse.json": {
+    "bytes": 285,
+    "sha256": "98c240fd5a5a7cc9ad6d8ca5eef3871958e3e258e007ec1110f8acdcf57365b0"
+  },
+  "31-reader-position-after-settings.png": {
+    "bytes": 58179,
+    "sha256": "cb040969b0ef41d80cc071bd919adefdd759c5938ffa9158f948a6e035fb249c"
+  },
+  "91-installed-final-build.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "93-final-service-footer-and-copy.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "70-model-load-verified.png": {
+    "bytes": 42957,
+    "sha256": "a6f1b0e127e1e81f6b588a73c85d6a4d742b89fcc3856c572ec3fe645b37420e"
+  },
+  "75-missing-ai-primary-repair.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "73-fresh-no-config-guide.png": {
+    "bytes": 47934,
+    "sha256": "8e1b2c8628ebe32819a2671edd30772ab6f73574f5e1b03680c37fb6a1c3e1a1"
+  },
+  "31-reader-position-after-settings.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "72-real-asr-completed.png": {
+    "bytes": 42985,
+    "sha256": "e45744ff5511b4e2159e1ae4f56d5253d3e7678d08b762bdb44841dc4222b993"
+  },
+  "80-repaired-intent-resumes.png": {
+    "bytes": 52125,
+    "sha256": "2f50a8b8b3173c4ec85659122d73ff018091b4dc159993c8683eec9dacf424ca"
+  },
+  "82-compact-guide-200-first-screen.png": {
+    "bytes": 48873,
+    "sha256": "2a93687484de357df0b43a2cd40ce8c94e101f4ed59f7ea62b1471d596ffb851"
+  },
+  "82-compact-guide-200-first-screen.ax.txt": {
+    "bytes": 706,
+    "sha256": "26fc085b2cb25b6b5a2d61f0c0745d08624743a4872f66b7731dc2864dd8db7a"
+  },
+  "75-missing-ai-primary-repair.png": {
+    "bytes": 52603,
+    "sha256": "5b6c01860c0dcdb19fc79747b1cefbb27c2fe10b3e4777c2974dd90527c415e9"
+  },
+  "79-service-result-actions-visible.ax.txt": {
+    "bytes": 171,
+    "sha256": "3fdf218a55627cb00fc605212514dc02e2f98f870c7411221c920477eb6d6026"
+  },
+  "92-installed-final-guide.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "91-installed-final-build.png": {
+    "bytes": 54531,
+    "sha256": "901a12cdad0aa10da35decbd2dd8bf1bd28c57087b5616573e7927413245fd53"
+  },
+  "checks.txt": {
+    "bytes": 16154,
+    "sha256": "99769bf82e2a0751fdcea8efcf94797bc0452b72296edcb3309713a3443fec2a"
+  },
+  "83-explicit-subtitles-failure.ax.txt": {
+    "bytes": 75,
+    "sha256": "8ff332774cf5a1d0cb39eb5f8f73b8c78456538c739fccd327ac7d95b5b04917"
+  },
+  "85-collection-choice-final.ax.txt": {
+    "bytes": 199,
+    "sha256": "99e8c00763bf51ab470cc3876b9e393de1a6dd1a9712186588efb895c60f04d7"
+  },
+  "84-relocate-auto-return.png": {
+    "bytes": 57822,
+    "sha256": "0288ee0b6ba568f628c34190b4076455004ace381e942d3846e1d55b7bafdb6f"
+  },
+  "84-relocate-auto-return.ax.txt": {
+    "bytes": 1524,
+    "sha256": "9a246232d94be5b1840f108bf628605e55e5ec50e81a0fbe73d5900697608114"
+  },
+  "remaining-page-review.md": {
+    "bytes": 11132,
+    "sha256": "1bb4ee714db020a3a3265f9cd1161aa5923dc002fef83f2d44bd3d47d73933fe"
+  },
+  "83-explicit-subtitles-failure.png": {
+    "bytes": 68713,
+    "sha256": "cc79bfefb0e671b5b8b701b79b6fe49a3572bd034707c3cdf162c6ceada9711a"
+  },
+  "86-local-file-selected-final.png": {
+    "bytes": 73329,
+    "sha256": "4201fdfdba0e791eaa73135e3a9d668cb4695c2555035f886a988c7b85f7710a"
+  }
+}

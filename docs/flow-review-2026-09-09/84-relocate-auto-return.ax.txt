@@ -1,0 +1,29 @@
+The following is a diff from the previous accessibility tree for Window: "course2md" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.
+Removed element IDs: 0-88
++93 standard window course2md, Secondary Actions: Raise
++	94 unknown
++		95 tab group 主导航
++			96 tab (settable, boolean) 工作台, Value: off
++			97 tab (settable, boolean) 我的笔记, Value: off
++			98 tab (settable, boolean) 任务, Value: off
++			99 tab (settable, boolean) 设置, Value: on
++		100 Heading 设置
++		101 tab group 设置分类
++			102 tab (settable, boolean) 外观, Value: off
++			103 tab (settable, boolean) 生成笔记, Value: off
++			104 tab (settable, boolean) 服务与账号, Value: off
++			105 tab (settable, boolean) 存储, Value: on
++			106 tab (settable, boolean) 应用, Value: off
++		107 container 存储
++			108 text 在这些位置保存笔记。更改默认位置只影响后续生成的笔记。
++			109 button 刷新
++			110 text 已找到课程库：/private/tmp/course2md-flow-2026-09-09/relocated-library-wide-final。已有文件保留在所选位置。
++			111 text 课程库
++			112 button 移动课程库…
++			113 text /private/tmp/course2md-flow-2026-09-09/relocated-library-wide-final
++			114 button 打开位置
++			115 button 添加课程库位置
++			116 button 查看存储详情
++	117 close button
++	118 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
++	119 minimize button

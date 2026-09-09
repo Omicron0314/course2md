@@ -1,0 +1,22 @@
+Window: "course2md", App: course2md Flow savefail.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 text 使用引导 · 1 / 3
+		3 Heading 设置默认识别方式
+		4 text 后续生成笔记会使用这些默认选项。有字幕时优先使用字幕。
+		5 text 识别方式
+		6 button 自动选择（推荐）
+		7 text 本机会选择 Apple 原生。运行环境可用。
+		8 text 识别模型
+		9 button Qwen3 1.7B
+		10 text 模型在最后一步准备，也可以稍后下载。
+		11 button 稍后设置
+		12 button 保存并继续
+		13 text 以后可在设置中重新开始引导；已保存的配置会保留。
+	14 close button
+	15 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	16 minimize button
+17 menu bar
+	18 course2md Flow savefail
+	19 文件
+	20 查找

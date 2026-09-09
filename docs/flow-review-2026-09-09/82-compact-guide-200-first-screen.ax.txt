@@ -1,0 +1,20 @@
+Window: "course2md", App: course2md Flow narrow.
+0 standard window course2md, Secondary Actions: Raise
+	1 unknown
+		2 Heading 设置默认识别方式
+		3 text 识别方式
+		4 button 自动选择（推荐）
+		5 text 本机会选择 Apple 原生。运行环境可用。
+		6 text 识别模型
+		7 button Qwen3 1.7B
+		8 text 模型在最后一步准备，也可以稍后下载。
+		9 button 稍后设置
+		10 button 保存并继续
+		11 text 使用引导 · 1 / 3 · 可在设置中重新开始
+	12 close button
+	13 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	14 minimize button
+15 menu bar
+	16 course2md Flow narrow
+	17 文件
+	18 查找

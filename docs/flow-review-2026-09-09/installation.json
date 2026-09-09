@@ -1,0 +1,14 @@
+{
+  "backup": "/Users/aac6fef/Library/Application Support/course2md-design-preview/backups/2026-09-09-flow-5cc9c4f",
+  "commit": "c5a00ae62cd8e53b2d22bcf4b5a2e8c1f1bdeeb4",
+  "build_profile": "release",
+  "old_gui_sha256": "2d770394f5585c50d8b6495d047092f135f64b32f74d557313d0c6fbb06cb845",
+  "build_gui_sha256": "4f07bab40847041d08c15aab1068bbea05d182af4c512ad52d2a8ab244707de7",
+  "installed_gui_sha256": "5cb8dca82d64698a37deabc499b36a0cd3651be508cb90c56659a13b394dc6cc",
+  "signing_verification": "Unsigned copies are identical after normalizing the __LINKEDIT segment virtual size; signing changed this size. LC_UUID also matches.",
+  "normalized_payload_sha256": "f8e90b5870cd5a732c639c3847d9c3c9d058f4c85ce71db8b5687faf4b76be2d",
+  "worker_sha256_before": "4601c7d5e04eb897217b6c7ee92b9ef0b98cd485186cda2724ab32b7b915058c",
+  "worker_sha256_after": "4601c7d5e04eb897217b6c7ee92b9ef0b98cd485186cda2724ab32b7b915058c",
+  "user_input_options_library_registry_and_tasks_preserved": true,
+  "application_preferences_unchanged": true
+}
