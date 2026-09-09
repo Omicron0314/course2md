@@ -247,7 +247,7 @@ impl Desktop {
                     && *input == self.value(Field::Source, cx)
                     && matches!(self.page, Page::New)
                     && self.online
-                    && self.preview_error.is_some()
+                    && (self.preview_error.is_some() || self.subtitle_attention_required())
             })
     }
 
@@ -280,7 +280,7 @@ impl Desktop {
         }
         self.account.retry_source = if matches!(self.page, Page::New)
             && self.online
-            && self.preview_error.is_some()
+            && (self.preview_error.is_some() || self.subtitle_attention_required())
             && course2md::auth::is_bilibili_url(&self.value(Field::Source, cx))
         {
             Some((self.preview_generation, self.value(Field::Source, cx)))
@@ -565,33 +565,31 @@ impl Desktop {
                                 .on_click(cx.listener(|this, _, _, cx| this.start_account_qr(cx))),
                         )
                     })
-                    .when(retry_source, |view| {
-                        view.child(
-                            control("account-qr-source-retry")
-                                .primary()
-                                .icon(icons::refresh())
-                                .label("重新读取课程")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let retry = this.can_retry_account_source(cx);
-                                    this.close_account_dialog(cx);
-                                    window.close_dialog(cx);
-                                    if retry {
-                                        this.inspect_source(cx);
-                                    }
-                                })),
-                        )
-                    })
                     .child(
                         control("account-qr-close")
+                            .when(success, |button| button.primary())
                             .icon(if success {
                                 icons::check_circle()
                             } else {
                                 icons::close()
                             })
-                            .label(if success { "完成" } else { "取消" })
+                            .label(if retry_source {
+                                "继续转换"
+                            } else if success {
+                                "完成"
+                            } else {
+                                "取消"
+                            })
                             .on_click(cx.listener(|this, _, window, cx| {
+                                let retry =
+                                    matches!(this.account.dialog, Some(QrDialogState::Success(_)))
+                                        && this.can_retry_account_source(cx);
                                 this.close_account_dialog(cx);
                                 window.close_dialog(cx);
+                                if retry {
+                                    this.inspect_source(window, cx);
+                                    this.start_conversion(window, cx);
+                                }
                             })),
                     ),
             )

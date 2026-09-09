@@ -172,6 +172,12 @@ impl Desktop {
                 }
             }
         }
+        if self.preference_defaults_pending {
+            self.refresh_preference_defaults(cx);
+        }
+        if self.workspace_error.is_none() {
+            self.advance_conversion_when_ready(cx);
+        }
         cx.notify();
     }
 
@@ -229,6 +235,17 @@ impl Desktop {
             return true;
         }
         let input = self.value(Field::Source, cx);
+        // A source edit must establish the next form's defaults before autosave
+        // can detach the submitted task. Failed preparation cannot fall through
+        // to saving the previous video's title and overrides against a new URL.
+        if self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.draft())
+            .is_some_and(|draft| draft.submitted_task.is_some() && draft.input != input)
+        {
+            return false;
+        }
         let title = self.value(Field::Title, cx);
         let source = self.source_preview.clone();
         let options = self.task_options.clone();
@@ -296,7 +313,6 @@ impl Desktop {
         self.scrolls[Page::New as usize].set_offset(point(px(0.), px(draft.scroll)));
         self.draft_loading = false;
         self.draft_deadline = None;
-        self.source_deadline = None;
         cx.notify();
     }
 
@@ -331,6 +347,10 @@ impl Desktop {
 
     fn build_plan(&self, validation: PlanValidation) -> Result<TaskPlan> {
         self.ordinary_preferences_ready_for_submit()?;
+        ensure!(
+            !self.preference_defaults_pending,
+            "默认设置已保存，当前视频的选项尚未同步。请重试保存输入记录。"
+        );
         let workspace = self.workspace.as_ref().context("输入与任务记录尚未恢复")?;
         let draft = workspace.state.draft().context("当前输入尚未准备好")?;
         ensure!(
@@ -416,7 +436,9 @@ impl Desktop {
                     || (draft.options.source_mode == 0
                         && matches!(
                             source.subtitles,
-                            SubtitleEvidence::NoneFound | SubtitleEvidence::Unsupported { .. }
+                            SubtitleEvidence::NoneFound
+                                | SubtitleEvidence::Unsupported { .. }
+                                | SubtitleEvidence::Failed { .. }
                         )),
                 "字幕还未确认。请读取字幕，或明确选择识别视频声音。"
             );
@@ -515,6 +537,16 @@ impl Desktop {
         })
     }
 
+    pub(super) fn clear_queued_message(&mut self) {
+        if self
+            .message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("已加入任务"))
+        {
+            self.message = None;
+        }
+    }
+
     pub fn enqueue_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.save_current_draft(cx) {
             return;
@@ -567,16 +599,20 @@ impl Desktop {
         });
         match result {
             Ok((id, created)) => {
+                self.pending_conversion = None;
                 self.source_validation = None;
-                self.message = Some(if created {
-                    "已加入任务。你可以继续准备下一篇笔记。".into()
-                } else {
+                self.message = (!created).then(|| {
                     "已有相同处理任务。该任务采用原来的名称和保存位置；当前输入与选项仍保留。"
                         .into()
                 });
+                if created {
+                    self.import_result_editing = None;
+                    self.generation_options_open = false;
+                    self.source_editor_open = false;
+                    self.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
+                }
                 self.select_task(&id, cx);
-                // M4b: 提交后留在工作台，进度在盒内任务卡呈现。
-                self.page = Page::New;
+                // Preparation may finish after navigation; keep the user's current page.
                 self.start_next_task(cx);
             }
             Err(error) => {
@@ -748,6 +784,7 @@ impl Desktop {
         });
         match result {
             Ok(job) => {
+                self.clear_queued_message();
                 self.job = Some(job);
                 self.active_task = Some(task.id.clone());
                 self.kind = Kind::Convert;
@@ -1015,6 +1052,7 @@ impl Desktop {
         cancelled: bool,
         cx: &mut Context<Self>,
     ) {
+        self.clear_queued_message();
         let done = self.pending_done.take();
         let manifest = done.as_ref().and_then(|d| {
             course2md::artifact::read_manifest(&d.out_dir.join("manifest.json")).ok()
@@ -1067,6 +1105,13 @@ impl Desktop {
         });
         match result {
             Ok(task) => {
+                if self.page == Page::New
+                    && self
+                        .completed_import_task(cx)
+                        .is_some_and(|task| task.id == id)
+                {
+                    self.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
+                }
                 if let Some(done) = &done {
                     self.completed = Some(done.clone());
                     if let Some(root) = self
@@ -1240,7 +1285,7 @@ impl Desktop {
                         .child(
                             accessible_text(
                                 SharedString::from(format!("task-created-{id}")),
-                                crate::reader_navigation::timestamp_utc(task.created * 1000),
+                                crate::reader_navigation::timestamp_local(task.created * 1000),
                             )
                             .text_sm()
                             .text_color(color(MUTED)),
@@ -1712,7 +1757,7 @@ impl Desktop {
         );
         let mut meta = format!(
             "{} 开始",
-            crate::reader_navigation::timestamp_utc(task.created * 1000)
+            crate::reader_navigation::timestamp_local(task.created * 1000)
         );
         if (task.plan.options.llm || task.plan.options.summarize)
             && let Some(version) = task
@@ -1721,18 +1766,34 @@ impl Desktop {
                 .as_ref()
                 .and_then(|id| self.preferences.version(id))
         {
+            let host = version.config.host();
+            let destination = if version.config.name == host {
+                format!("「{host}」")
+            } else {
+                format!("「{}」（{host}）", version.config.name)
+            };
             meta.push_str(&format!(
-                " · {}发送到「{}」（{}）",
+                " · {}发送到{destination}",
                 if task.plan.options.vision {
                     "文字与截图"
                 } else {
                     "文字"
                 },
-                version.config.name,
-                version.config.host()
             ));
         }
         card = card.child(div().text_sm().text_color(color(GRAY)).child(meta));
+        if task.plan.options.source_mode == 0
+            && task.plan.source.selected_subtitle.is_none()
+            && matches!(
+                task.plan.source.subtitles,
+                course2md::subtitle::SubtitleEvidence::Failed { .. }
+            )
+        {
+            card = card.child(crate::import_ui::plan_row(
+                "字幕暂时不可用，已按默认设置识别视频声音",
+                false,
+            ));
+        }
         let mut work = v_flex().gap_3();
         if active {
             if self.progress.is_empty() {

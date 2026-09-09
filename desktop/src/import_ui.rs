@@ -1,6 +1,7 @@
 //! A continuous source → content → destination → generation form.
 use super::*;
 use crate::{motion, preferences::ServicePurpose, theme::*};
+use anyhow::Context as _;
 use course2md::subtitle::{SubtitleEvidence, SubtitleReadError, SubtitleTrack};
 use gpui_component::{
     button::*,
@@ -36,6 +37,15 @@ fn text_id(kind: &str, value: &str) -> SharedString {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hash);
     format!("import-{kind}-{:x}", hash.finish()).into()
+}
+
+fn service_destination(config: &crate::preferences::ServiceConfiguration) -> String {
+    let host = config.host();
+    if config.name == host {
+        format!("「{host}」")
+    } else {
+        format!("「{}」（{host}）", config.name)
+    }
 }
 /// Platform marks are brand assets; they do not belong inside the editable field.
 fn platform_mark(name: &'static str, icon: Icon) -> Div {
@@ -101,8 +111,43 @@ fn uses_speech(source: &source::Source, source_mode: usize) -> bool {
             && source.subtitle_read_error.is_none()
             && matches!(
                 source.subtitles,
-                SubtitleEvidence::NoneFound | SubtitleEvidence::Unsupported { .. }
+                SubtitleEvidence::NoneFound
+                    | SubtitleEvidence::Unsupported { .. }
+                    | SubtitleEvidence::Failed { .. }
             ))
+}
+
+fn automatic_subtitle_fallback(
+    source: &mut source::Source,
+    source_mode: usize,
+    error: Option<&str>,
+) -> bool {
+    if source_mode != 0
+        || source.selected_subtitle.is_some()
+        || matches!(
+            source.subtitle_read_error,
+            Some(SubtitleReadError::Cancelled)
+        )
+    {
+        return false;
+    }
+    let failure = error.map(str::to_owned).or_else(|| {
+        source
+            .subtitle_read_error
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| match &source.subtitles {
+                SubtitleEvidence::Failed { message } => Some(message.clone()),
+                _ => None,
+            })
+    });
+    let Some(message) = failure else {
+        return false;
+    };
+    source.subtitles = SubtitleEvidence::Failed { message };
+    source.subtitle_request = None;
+    source.subtitle_read_error = None;
+    true
 }
 
 fn subtitle_needs_confirmation(source: &source::Source, source_mode: usize) -> bool {
@@ -110,6 +155,20 @@ fn subtitle_needs_confirmation(source: &source::Source, source_mode: usize) -> b
         && (source.selected_subtitle.is_none()
             || source.subtitle_request.is_some()
             || source.subtitle_read_error.is_some())
+}
+
+fn completed_input_task<'a>(
+    draft: &workspace::Draft,
+    tasks: &'a [workspace::TaskRecord],
+    input: &str,
+) -> Option<&'a workspace::TaskRecord> {
+    if draft.input != input {
+        return None;
+    }
+    let id = draft.submitted_task.as_deref()?;
+    tasks.iter().find(|task| {
+        task.id == id && task.state == workspace::TaskState::Complete && task.artifact.is_some()
+    })
 }
 
 struct PlanDialog {
@@ -155,6 +214,95 @@ impl Render for PlanDialog {
 }
 
 impl Desktop {
+    /// A start command owns preparation and submission for this source revision.
+    pub fn start_conversion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_queued_message();
+        let input = self.value(Field::Source, cx);
+        if input != self.last_source_input {
+            if !self.prepare_next_import(&input, window, cx) {
+                return;
+            }
+            self.import_result_editing = None;
+            self.last_source_input = input.clone();
+            self.invalidate_source();
+        }
+        if input.is_empty() {
+            self.source_validation = Some(if self.online {
+                "先粘贴视频链接".into()
+            } else {
+                "先选择一个视频".into()
+            });
+            if self.online {
+                self.inputs[&Field::Source].update(cx, |input, cx| input.focus(window, cx));
+            }
+            cx.notify();
+            return;
+        }
+        if self.source_preview.is_none() && self.preview_cancel.is_none() {
+            self.inspect_source(window, cx);
+        }
+        self.pending_conversion = Some(self.preview_generation);
+        self.advance_conversion(window, cx);
+    }
+
+    pub fn advance_conversion_when_ready(&mut self, cx: &mut Context<Self>) {
+        if self.pending_conversion.is_none() {
+            return;
+        }
+        let Some(handle) = cx.windows().first().copied() else {
+            return;
+        };
+        let desktop = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = cx.update_window(handle, |_, window, cx| {
+                let _ = desktop.update(cx, |desktop, cx| desktop.advance_conversion(window, cx));
+            });
+        });
+    }
+
+    pub fn advance_conversion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(generation) = self.pending_conversion else {
+            return;
+        };
+        if generation != self.preview_generation {
+            self.pending_conversion = None;
+            return;
+        }
+        if self.preview_cancel.is_some() || self.subtitle_loading {
+            return;
+        }
+        let Some(source) = &mut self.source_preview else {
+            // A collection or source error needs an explicit source decision.
+            self.pending_conversion = None;
+            cx.notify();
+            return;
+        };
+        if automatic_subtitle_fallback(
+            source,
+            self.task_options.source_mode,
+            self.subtitle_error.as_deref(),
+        ) {
+            self.subtitle_error = None;
+            if !self.save_current_draft(cx) {
+                self.pending_conversion = None;
+                return;
+            }
+        }
+        if self.subtitle_attention_required() || self.environment.is_none() {
+            // Explicit subtitle mode keeps its choice/retry controls visible.
+            // Resolving that choice continues the already requested conversion.
+            cx.notify();
+            return;
+        }
+        if self.existing_source_note().is_some() {
+            // Keep the existing-note/new-version decision and its cost boundary.
+            self.pending_conversion = None;
+            cx.notify();
+            return;
+        }
+        self.enqueue_current(window, cx);
+    }
+
     fn subtitle_issue(
         &self,
         kind: &str,
@@ -162,7 +310,14 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let (summary, details) = message.split_once('\n').unwrap_or((message, ""));
+        let summary = if source::is_login_failure(message) {
+            "字幕需要登录后才能读取；可以登录，或改用语音识别"
+        } else if message.contains("WARNING:") || message.contains("ERROR:") {
+            "暂时无法读取字幕；可以重试，或改用语音识别"
+        } else {
+            message.lines().next().unwrap_or(message)
+        };
+        let details = (summary != message).then_some(message).unwrap_or("");
         let id = text_id(kind, message);
         let expanded = self.expanded_subtitle_issue.as_ref() == Some(&id);
         v_flex()
@@ -289,7 +444,9 @@ impl Desktop {
                         }
                         this.save_current_draft(cx);
                     }
-                    Err(SubtitleReadError::Cancelled) => {}
+                    Err(SubtitleReadError::Cancelled) => {
+                        this.pending_conversion = None;
+                    }
                     Err(error) => {
                         this.subtitle_error = Some(error.to_string());
                         if let Some(source) = &mut this.source_preview {
@@ -298,6 +455,7 @@ impl Desktop {
                         this.save_current_draft(cx);
                     }
                 }
+                this.advance_conversion_when_ready(cx);
                 cx.notify();
             });
         })
@@ -463,6 +621,7 @@ impl Desktop {
                         this.save_current_draft(cx);
                     }
                 }
+                this.advance_conversion_when_ready(cx);
                 cx.notify();
             });
         })
@@ -483,6 +642,7 @@ impl Desktop {
             source.subtitle_read_error = None;
         }
         self.save_current_draft(cx);
+        self.advance_conversion_when_ready(cx);
         cx.notify();
     }
 
@@ -506,12 +666,13 @@ impl Desktop {
             source.subtitle_read_error = None;
         }
         self.save_current_draft(cx);
+        self.advance_conversion_when_ready(cx);
         cx.notify();
     }
 
     fn select_source_input(&mut self, input: String, window: &mut Window, cx: &mut Context<Self>) {
         self.inputs[&Field::Source].update(cx, |state, cx| state.set_value(input, window, cx));
-        self.inspect_source(cx);
+        self.start_conversion(window, cx);
     }
 
     fn drop_source_files(
@@ -524,7 +685,11 @@ impl Desktop {
             self.switch_source_kind(false, window, cx);
         }
         match files {
-            [path] => self.select_source_input(path.display().to_string(), window, cx),
+            [path] => {
+                self.inputs[&Field::Source].update(cx, |state, cx| {
+                    state.set_value(path.display().to_string(), window, cx)
+                });
+            }
             [] => {}
             _ => {
                 self.invalidate_source();
@@ -641,9 +806,16 @@ impl Desktop {
             );
         } else if self.source_input_visible() {
             let input = self.value(Field::Source, cx);
+            let selected = !input.is_empty();
             let filename = PathBuf::from(&input)
                 .file_name()
-                .map(|name| name.to_string_lossy().into_owned());
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.is_empty());
+            let title = if selected {
+                filename.unwrap_or_else(|| input.clone())
+            } else {
+                "拖入本地视频".into()
+            };
             view = view.child(
                 v_flex()
                     .id("video-drop-zone")
@@ -655,15 +827,21 @@ impl Desktop {
                     .border_1()
                     .border_color(color(CONTROL))
                     .child(
-                        icons::file_upload()
-                            .size(px(32.))
-                            .text_color(color(ACCENT_STRONG)),
+                        (if selected {
+                            icons::movie()
+                        } else {
+                            icons::file_upload()
+                        })
+                        .size(px(32.))
+                        .text_color(color(ACCENT_STRONG)),
                     )
                     .child(
-                        accessible_text("import-drop-instruction", "拖入视频，开始整理笔记")
+                        accessible_text("import-drop-instruction", title)
                             .w_full()
                             .min_w_0()
                             .whitespace_normal()
+                            .text_size(if selected { TEXT_TITLE } else { TEXT_BODY })
+                            .font_weight(FontWeight::MEDIUM)
                             .text_center(),
                     )
                     .child(
@@ -680,10 +858,9 @@ impl Desktop {
                         })
                         .on_click(cx.listener(|this, _, window, cx| this.pick(false, window, cx))),
                     )
-                    .when_some(
-                        filename.filter(|name| !name.is_empty()),
-                        |view, filename| view.child(help(filename).w_full().text_center()),
-                    )
+                    .when(selected, |view| {
+                        view.child(help("也可以拖入另一个视频").w_full().text_center())
+                    })
                     .on_drop(
                         cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
                             this.drop_source_files(paths.paths(), window, cx)
@@ -740,6 +917,13 @@ impl Desktop {
                             .children(self.source_candidates.iter().enumerate().map(
                                 |(index, candidate)| {
                                     let input = candidate.input.clone();
+                                    let untitled = candidate.title.trim().is_empty()
+                                        || candidate.title.trim() == candidate.input.trim();
+                                    let title = if untitled {
+                                        format!("视频 {}", index + 1)
+                                    } else {
+                                        candidate.title.clone()
+                                    };
                                     quiet(("source-candidate", index))
                                         .w_full()
                                         .h_auto()
@@ -748,15 +932,34 @@ impl Desktop {
                                         .justify_start()
                                         .icon(icons::movie())
                                         .tooltip(candidate.input.clone())
-                                        .accessibility_label(format!("读取 {}", candidate.title))
+                                        .accessibility_label(format!("选择 {title}"))
                                         .child(
-                                            div()
+                                            v_flex()
                                                 .flex_1()
                                                 .min_w_0()
-                                                .whitespace_normal()
-                                                .text_ellipsis()
-                                                .line_clamp(2)
-                                                .child(candidate.title.clone()),
+                                                .items_start()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .min_w_0()
+                                                        .whitespace_normal()
+                                                        .text_ellipsis()
+                                                        .line_clamp(2)
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .child(title),
+                                                )
+                                                .when(untitled, |view| {
+                                                    view.child(
+                                                        div()
+                                                            .w_full()
+                                                            .min_w_0()
+                                                            .text_size(TEXT_AUX)
+                                                            .text_color(color(MUTED))
+                                                            .text_ellipsis()
+                                                            .child(candidate.input.clone()),
+                                                    )
+                                                }),
                                         )
                                         .child(icons::arrow_forward().size(px(18.)).flex_shrink_0())
                                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -768,7 +971,14 @@ impl Desktop {
                 cx,
             ));
         }
-        if let Some(error) = &self.preview_error {
+        if let Some(error) = &self.preview_error
+            && !self.source_candidates.is_empty()
+        {
+            view = view.child(help(error.clone()));
+        }
+        if let Some(error) = &self.preview_error
+            && self.source_candidates.is_empty()
+        {
             let details = motion::disclosure(
                 "source-error-disclosure",
                 self.show_preview_details,
@@ -794,9 +1004,15 @@ impl Desktop {
                                     .flex_shrink_0(),
                             )
                             .child(
-                                issue(error.lines().next().unwrap_or(error).to_owned())
-                                    .flex_1()
-                                    .min_w_0(),
+                                issue(if source::is_login_failure(error) {
+                                    "视频需要登录后读取，请登录后重试转换".to_owned()
+                                } else if error.contains("WARNING:") || error.contains("ERROR:") {
+                                    "暂时无法读取这个视频，请检查链接或稍后重试".to_owned()
+                                } else {
+                                    error.lines().next().unwrap_or(error).to_owned()
+                                })
+                                .flex_1()
+                                .min_w_0(),
                             ),
                     )
                     .child(
@@ -806,10 +1022,10 @@ impl Desktop {
                             .child(
                                 outline_pill("retry-source")
                                     .icon(icons::refresh())
-                                    .label("重新读取")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.inspect_source(cx)),
-                                    ),
+                                    .label("重试转换")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.start_conversion(window, cx)
+                                    })),
                             )
                             .when(
                                 self.online
@@ -958,9 +1174,9 @@ impl Desktop {
                                 quiet("reread-source")
                                     .icon(icons::refresh())
                                     .label("重新读取")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.inspect_source(cx)),
-                                    ),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.inspect_source(window, cx)
+                                    })),
                             )
                         }),
                 )
@@ -1063,6 +1279,7 @@ impl Desktop {
                     .self_start()
                     .label("取消读取字幕")
                     .on_click(cx.listener(|this, _, _, cx| {
+                        this.pending_conversion = None;
                         if let Some(cancel) = this.subtitle_cancel.take() {
                             cancel.store(true, Ordering::Relaxed);
                         }
@@ -1252,12 +1469,38 @@ impl Desktop {
     }
 
     fn import_content_options(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let speech = self.import_uses_speech();
+        let speech = if self.source_preview.is_some() {
+            self.import_uses_speech()
+        } else {
+            self.task_options.source_mode != 1
+        };
         let speech_options = self.import_speech_options(window, cx);
         let mut view = v_flex()
             .w_full()
             .min_w_0()
             .gap_3()
+            .child(
+                accessible_text("conversion-text-mode-label", "文字来源")
+                    .font_weight(FontWeight::MEDIUM),
+            )
+            .child(
+                SingleChoiceGroup::new("conversion-text-mode", "文字来源方式")
+                    .options([("0", "自动选择"), ("1", "仅字幕"), ("2", "语音识别")])
+                    .selected(self.task_options.source_mode.to_string())
+                    .on_change(cx.listener(|this, value: &SharedString, _, cx| {
+                        let Ok(mode) = value.parse::<usize>() else {
+                            return;
+                        };
+                        if mode == 2 {
+                            this.use_speech(cx);
+                        } else {
+                            this.task_options.source_mode = mode;
+                            this.save_current_draft(cx);
+                            this.advance_conversion_when_ready(cx);
+                            cx.notify();
+                        }
+                    })),
+            )
             .child(motion::disclosure(
                 "speech-options",
                 speech,
@@ -1279,7 +1522,9 @@ impl Desktop {
                             .checked(self.task_options.vision)
                             .on_click(cx.listener(|this, value, _, cx| {
                                 this.task_options.vision = *value;
-                                this.save_current_draft(cx);
+                                if this.save_current_draft(cx) {
+                                    this.advance_conversion_when_ready(cx);
+                                }
                                 cx.notify();
                             })),
                     ),
@@ -1321,7 +1566,9 @@ impl Desktop {
                                         .checked(self.task_options.llm)
                                         .on_click(cx.listener(|this, value, _, cx| {
                                             this.task_options.llm = *value;
-                                            this.save_current_draft(cx);
+                                            if this.save_current_draft(cx) {
+                                                this.advance_conversion_when_ready(cx);
+                                            }
                                             cx.notify();
                                         })),
                                 ),
@@ -1346,7 +1593,9 @@ impl Desktop {
                                         .checked(self.task_options.summarize)
                                         .on_click(cx.listener(|this, value, _, cx| {
                                             this.task_options.summarize = *value;
-                                            this.save_current_draft(cx);
+                                            if this.save_current_draft(cx) {
+                                                this.advance_conversion_when_ready(cx);
+                                            }
                                             cx.notify();
                                         })),
                                 ),
@@ -1363,9 +1612,8 @@ impl Desktop {
                 Some(service) => {
                     if self.task_options.llm {
                         ai_options = ai_options.child(help(format!(
-                            "校对文字将发送到「{}」（{}）。",
-                            service.config.name,
-                            service.config.host()
+                            "校对文字将发送到{}。",
+                            service_destination(&service.config)
                         )));
                     }
                 }
@@ -1381,20 +1629,7 @@ impl Desktop {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(color(WARNING)),
                             )
-                            .child(help("选择用于校对和摘要的服务"))
-                            .child(
-                                outline_pill("configure-ai-service")
-                                    .icon(IconName::Settings)
-                                    .self_start()
-                                    .label("设置 AI 服务")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_task_service_editor(
-                                            ServicePurpose::Ai,
-                                            window,
-                                            cx,
-                                        )
-                                    })),
-                            ),
+                            .child(help("选择用于校对和摘要的服务")),
                     );
                 }
             }
@@ -1437,11 +1672,28 @@ impl Desktop {
     }
 
     fn reset_task_ai_overrides(&mut self, cx: &mut Context<Self>) {
+        if !self.save_current_draft(cx) {
+            return;
+        }
         let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
+        let Some(workspace) = &mut self.workspace else {
+            return;
+        };
+        if let Err(error) = workspace.transaction(|state| {
+            state
+                .draft_mut()
+                .context("当前视频输入暂时不可用")?
+                .reset_ai_overrides(&defaults);
+            Ok(())
+        }) {
+            self.workspace_error = Some(format!("本次选项尚未恢复默认：{error:#}"));
+            cx.notify();
+            return;
+        }
         self.task_options.llm = defaults.llm;
         self.task_options.summarize = defaults.summarize;
         self.task_options.vision = defaults.vision;
-        self.save_current_draft(cx);
+        self.advance_conversion_when_ready(cx);
         cx.notify();
     }
 
@@ -1458,7 +1710,9 @@ impl Desktop {
                     .selected(if cloud { "cloud" } else { "local" })
                     .on_change(cx.listener(|this, value: &SharedString, _, cx| {
                         this.task_options.provider = if value.as_ref() == "cloud" { 5 } else { 0 };
-                        this.save_current_draft(cx);
+                        if this.save_current_draft(cx) {
+                            this.advance_conversion_when_ready(cx);
+                        }
                         cx.notify();
                     })),
             );
@@ -1542,7 +1796,9 @@ impl Desktop {
                     .on_change(cx.listener(|this, value: &SharedString, _, cx| {
                         if let Ok(index) = value.parse::<usize>() {
                             this.task_options.provider = index;
-                            this.save_current_draft(cx);
+                            if this.save_current_draft(cx) {
+                                this.advance_conversion_when_ready(cx);
+                            }
                             cx.notify();
                         }
                     })),
@@ -1563,6 +1819,34 @@ impl Desktop {
         self.source_preview
             .as_ref()
             .is_some_and(|source| uses_speech(source, self.task_options.source_mode))
+    }
+
+    fn missing_import_service(&self) -> Option<ServicePurpose> {
+        let separate_subtitle = self.task_options.source_mode != 2
+            && self
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.state.draft())
+                .is_some_and(|draft| draft.subtitle.is_some());
+        [
+            (
+                ServicePurpose::Speech,
+                self.task_options.provider == 5 && self.import_uses_speech() && !separate_subtitle,
+            ),
+            (
+                ServicePurpose::Ai,
+                self.task_options.llm || self.task_options.summarize,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(purpose, required)| {
+            (required
+                && self.selected_task_service(purpose).is_none_or(|version| {
+                    self.preferences
+                        .service_stopped_in_snapshot(&version.service_id)
+                }))
+            .then_some(purpose)
+        })
     }
 
     fn import_model_request(&self) -> (course2md::config::AsrProvider, String, PathBuf) {
@@ -1674,7 +1958,10 @@ impl Desktop {
                                                 }
                                                 Ok(())
                                             }) {
-                                                Ok(()) => this.target_folder = None,
+                                                Ok(()) => {
+                                                    this.target_folder = None;
+                                                    this.advance_conversion_when_ready(cx);
+                                                }
                                                 Err(error) => {
                                                     this.workspace_error =
                                                         Some(format!("保存位置尚未更新：{error:#}"))
@@ -1916,9 +2203,8 @@ impl Desktop {
         } else if self.task_options.provider == 5 {
             if let Some(service) = self.selected_task_service(ServicePurpose::Speech) {
                 lines.push(format!(
-                    "音频发送到「{}」识别（{}）",
-                    service.config.name,
-                    service.config.host()
+                    "音频发送到{}识别",
+                    service_destination(&service.config)
                 ));
             } else {
                 lines.push("语音识别服务尚未选择".into());
@@ -1939,9 +2225,8 @@ impl Desktop {
                     _ => "生成摘要",
                 };
                 lines.push(format!(
-                    "{content}发送到「{}」{action}（{}）",
-                    service.config.name,
-                    service.config.host()
+                    "{content}发送到{}{action}",
+                    service_destination(&service.config)
                 ));
             } else {
                 lines.push("AI 服务尚未选择".into());
@@ -2109,31 +2394,211 @@ impl Desktop {
         });
     }
 
-    /// The read action belongs to the source input, before any generation options.
+    /// The single start command owns source preparation and conversion.
     fn box_bottom_row(&self, cx: &mut Context<Self>) -> Div {
         h_flex().items_center().gap_3().when(
             (self.online || !self.value(Field::Source, cx).is_empty())
-                && self.preview_error.is_none(),
+                && self.preview_error.is_none()
+                && self.source_preview.is_none(),
             |row| {
                 row.child(
-                    primary_pill("read-source")
+                    primary_pill("start-conversion")
                         .icon(icons::arrow_forward())
-                        .label("读取视频")
-                        .disabled(self.preview_cancel.is_some())
+                        .label("开始转换")
+                        .disabled(self.pending_conversion.is_some())
                         .on_click(cx.listener(|this, _, window, cx| {
                             if this.value(Field::Source, cx).is_empty() {
                                 this.inputs[&Field::Source]
                                     .update(cx, |state, cx| state.focus(window, cx));
                             }
-                            this.inspect_source(cx);
+                            this.start_conversion(window, cx);
                         })),
                 )
             },
         )
     }
 
+    fn generation_options_toggle(&self, cx: &mut Context<Self>) -> Div {
+        h_flex().child(
+            quiet("generation-options")
+                .icon(if self.generation_options_open {
+                    icons::chevron_up()
+                } else {
+                    icons::tune()
+                })
+                .label(if self.generation_options_open {
+                    "收起高级选项"
+                } else {
+                    "高级选项"
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.generation_options_open = !this.generation_options_open;
+                    cx.notify();
+                })),
+        )
+    }
+
+    fn conversion_defaults_summary(&self) -> Div {
+        let mut summary = v_flex()
+            .gap_2()
+            .child(help(match self.task_options.source_mode {
+                1 => "使用视频字幕生成笔记",
+                2 => "识别视频声音生成笔记",
+                _ => "优先使用字幕，字幕不可用时自动识别视频声音",
+            }));
+        if self.task_options.provider == 5
+            && self.task_options.source_mode != 1
+            && let Some(service) = self.selected_task_service(ServicePurpose::Speech)
+        {
+            summary = summary.child(help(format!(
+                "需要识别声音时，音频会发送到「{}」",
+                service.config.name
+            )));
+        }
+        if (self.task_options.llm || self.task_options.summarize)
+            && let Some(service) = self.selected_task_service(ServicePurpose::Ai)
+        {
+            summary = summary.child(help(format!(
+                "{}会发送到「{}」{}",
+                if self.task_options.llm && self.task_options.vision {
+                    "文字与截图"
+                } else {
+                    "文字"
+                },
+                service.config.name,
+                if self.task_options.llm {
+                    "进行校对"
+                } else {
+                    "生成摘要"
+                }
+            )));
+        }
+        summary
+    }
+
+    fn submitted_import_result(&self, cx: &App) -> Option<&workspace::TaskRecord> {
+        let state = &self.workspace.as_ref()?.state;
+        completed_input_task(state.draft()?, &state.tasks, &self.value(Field::Source, cx))
+    }
+
+    /// The result shown in place of the form, also used to suppress its duplicate notice.
+    pub(crate) fn completed_import_task(&self, cx: &App) -> Option<&workspace::TaskRecord> {
+        let task = self.submitted_import_result(cx)?;
+        if self.import_result_editing.as_deref() == Some(task.id.as_str()) {
+            return None;
+        }
+        Some(task)
+    }
+
+    fn begin_next_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_next_import("", window, cx) {
+            return;
+        }
+        self.import_result_editing = None;
+        self.last_source_input.clear();
+        self.inputs[&Field::Source].update(cx, |input, cx| input.set_value("", window, cx));
+        self.invalidate_source();
+        self.source_editor_open = true;
+        self.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
+        if self.online {
+            self.inputs[&Field::Source].update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn import_result(&self, task: &workspace::TaskRecord, cx: &mut Context<Self>) -> Div {
+        let id = task.id.clone();
+        let done = Completed {
+            out_dir: task
+                .artifact
+                .clone()
+                .expect("completed import has an artifact"),
+            title: task.plan.title.clone(),
+            ..Default::default()
+        };
+        let location = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.library(&task.plan.library_id))
+            .map(|library| library.name.clone())
+            .unwrap_or_else(|| "原保存位置".into());
+        v_flex()
+            .pt(px(24.))
+            .gap_6()
+            .w_full()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(icons::circle_check().size_6().text_color(color(ACCENT)))
+                    .child(
+                        accessible_text("import-complete-title", "笔记已生成")
+                            .text_size(TEXT_DISPLAY)
+                            .font_weight(FontWeight::SEMIBOLD),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        accessible_text("import-complete-note", task.plan.title.clone())
+                            .text_size(TEXT_TITLE)
+                            .font_weight(FontWeight::MEDIUM)
+                            .whitespace_normal(),
+                    )
+                    .child(help(format!("已保存到{location}"))),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .child(
+                        primary_pill("read-completed-import")
+                            .track_focus(&self.import_submit_focus)
+                            .icon(icons::book_open())
+                            .label("阅读笔记")
+                            .loading(self.reading)
+                            .disabled(self.reading)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_course(Course::from_completed(&done), cx);
+                            })),
+                    )
+                    .child(
+                        outline_pill("convert-next-video")
+                            .icon(icons::plus())
+                            .label("转换下一个视频")
+                            .disabled(self.reading)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.begin_next_import(window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                quiet("adjust-completed-import")
+                    .self_start()
+                    .icon(icons::tune())
+                    .label("调整并重新生成")
+                    .disabled(self.reading)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.import_result_editing = Some(id.clone());
+                        this.generation_options_open = true;
+                        this.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
+                        cx.notify();
+                    })),
+            )
+    }
+
     pub fn new_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.task_options.provider != 5 && self.import_uses_speech() {
+        if let Some(task) = self.completed_import_task(cx).cloned() {
+            return self.import_result(&task, cx).into_any_element();
+        }
+        let adjusting_result = self.submitted_import_result(cx).is_some();
+        if self.task_options.provider != 5
+            && (self.import_uses_speech()
+                || (self.generation_options_open && self.task_options.source_mode != 1))
+        {
             let (provider, model, root) = self.import_model_request();
             self.ensure_model_diagnostic(provider, Some(&model), &root, cx);
         }
@@ -2148,6 +2613,20 @@ impl Desktop {
                     .text_size(TEXT_DISPLAY)
                     .font_weight(FontWeight::SEMIBOLD),
             )
+            .when(adjusting_result, |view| {
+                view.child(
+                    quiet("return-import-result")
+                        .self_start()
+                        .icon(icons::arrow_left())
+                        .label("返回生成结果")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.import_result_editing = None;
+                            this.generation_options_open = false;
+                            this.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
+                            cx.notify();
+                        })),
+                )
+            })
             .when(show_source_input, |view| {
                 view.child(self.source_kind_tabs(cx))
             });
@@ -2169,6 +2648,30 @@ impl Desktop {
                 source,
                 cx,
             ));
+            if self.source_preview.is_none()
+                && self.preview_cancel.is_none()
+                && self.source_candidates.is_empty()
+            {
+                view = view
+                    .child(self.conversion_defaults_summary())
+                    .child(self.generation_options_toggle(cx));
+                if self.generation_options_open {
+                    let options = v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_6()
+                        .child(
+                            box_section("笔记内容").child(self.import_content_options(window, cx)),
+                        )
+                        .child(self.import_destination(cx))
+                        .child(self.import_exports(window, cx));
+                    view = view.child(motion::enter(
+                        "conversion-options-before-start",
+                        options,
+                        cx,
+                    ));
+                }
+            }
         }
         let linked_task = self
             .workspace
@@ -2233,24 +2736,7 @@ impl Desktop {
                     view.child(box_section("文字来源").child(self.text_source_view(window, cx)))
                 })
                 .child(self.plan_inset(cx))
-                .child(
-                    quiet("generation-options")
-                        .self_start()
-                        .icon(if options_open {
-                            icons::chevron_up()
-                        } else {
-                            icons::tune()
-                        })
-                        .label(if options_open {
-                            "收起生成选项"
-                        } else {
-                            "调整生成选项"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.generation_options_open = !this.generation_options_open;
-                            cx.notify();
-                        })),
-                )
+                .child(self.generation_options_toggle(cx))
                 .child(disclosure(
                     "generation-options-body",
                     options_open,
@@ -2447,14 +2933,36 @@ impl Desktop {
                     false,
                 ));
             }
+            let missing_service = self.missing_import_service();
             actions = actions.child(
                 primary_pill("generate-note")
                     .track_focus(&self.import_submit_focus)
                     .self_start()
-                    .icon(icons::arrow_forward())
-                    .label(if busy { "加入队列" } else { "开始生成" })
-                    .disabled(reading || self.workspace.is_none() || preferences_blocked)
-                    .on_click(cx.listener(|this, _, window, cx| this.enqueue_current(window, cx))),
+                    .icon(if missing_service.is_some() {
+                        icons::settings()
+                    } else {
+                        icons::arrow_forward()
+                    })
+                    .label(match missing_service {
+                        Some(ServicePurpose::Speech) => "设置语音服务",
+                        Some(ServicePurpose::Ai) => "设置 AI 服务",
+                        None if self.pending_conversion.is_some() => "继续转换",
+                        None => "开始转换",
+                    })
+                    .disabled(
+                        reading
+                            || self.workspace.is_none()
+                            || preferences_blocked
+                            || (self.pending_conversion.is_some()
+                                && self.subtitle_attention_required()),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(purpose) = missing_service {
+                            this.open_task_service_editor(purpose, window, cx);
+                        } else {
+                            this.start_conversion(window, cx);
+                        }
+                    })),
             );
         }
         actions = actions.child(
@@ -2463,6 +2971,17 @@ impl Desktop {
                 .label("计划详情")
                 .on_click(cx.listener(|this, _, window, cx| this.open_generation_plan(window, cx))),
         );
+        if self.pending_conversion.is_some() && !reading {
+            actions = actions.child(
+                quiet("cancel-pending-conversion")
+                    .icon(icons::close())
+                    .label("取消转换")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pending_conversion = None;
+                        cx.notify();
+                    })),
+            );
+        }
         inset
             .when_some(submission_error, |view, message| {
                 view.child(
@@ -2479,9 +2998,127 @@ impl Desktop {
 
 #[cfg(test)]
 mod tests {
-    use super::{subtitle_needs_confirmation, uses_speech};
-    use crate::source;
+    use super::{
+        automatic_subtitle_fallback, completed_input_task, subtitle_needs_confirmation, uses_speech,
+    };
+    use crate::{source, workspace};
     use course2md::subtitle::{CachedSubtitle, SubtitleEvidence, SubtitleReadError};
+
+    #[test]
+    fn completion_belongs_to_the_submitted_input_and_requires_a_readable_result() {
+        let root = tempfile::tempdir().unwrap();
+        let mut workspace = workspace::Workspace::open_at(
+            root.path().join("workspace.json"),
+            root.path().join("library"),
+            Default::default(),
+        )
+        .unwrap();
+        let state = &mut workspace.state;
+        let source = source::Source {
+            input: "https://www.bilibili.com/video/BVfixture".into(),
+            identity: "video-fixture".into(),
+            online: true,
+            ..Default::default()
+        };
+        let plan = workspace::TaskPlan {
+            operation: Default::default(),
+            source: source.clone(),
+            source_id: source.identity.clone(),
+            title: "已提交的标题".into(),
+            library_id: state.default_library.clone(),
+            folder: None,
+            options: Default::default(),
+            subtitle: None,
+            config: Default::default(),
+            asr_service: None,
+            ai_service: None,
+        };
+        let (id, _) = state.enqueue(plan.clone(), None).unwrap();
+        let draft = state.draft_mut().unwrap();
+        draft.change_source(source.input.clone());
+        draft.submitted_task = Some(id.clone());
+        assert!(
+            completed_input_task(state.draft().unwrap(), &state.tasks, &source.input).is_none()
+        );
+        state.task_mut(&id).unwrap().state = workspace::TaskState::Complete;
+        assert!(
+            completed_input_task(state.draft().unwrap(), &state.tasks, &source.input).is_none()
+        );
+        state.task_mut(&id).unwrap().artifact = Some(root.path().join("published-version"));
+        assert_eq!(
+            completed_input_task(state.draft().unwrap(), &state.tasks, &source.input)
+                .unwrap()
+                .id,
+            id,
+        );
+        // The text can change before its observer replaces the submitted draft.
+        // That next input must remain visible even during this intermediate state.
+        for next in ["", "https://www.bilibili.com/video/BVnext"] {
+            assert!(completed_input_task(state.draft().unwrap(), &state.tasks, next).is_none());
+        }
+        state.task_mut(&id).unwrap().state = workspace::TaskState::Partial;
+        assert!(
+            completed_input_task(state.draft().unwrap(), &state.tasks, &source.input).is_none()
+        );
+        state.task_mut(&id).unwrap().state = workspace::TaskState::Complete;
+        state.prepare_next_import("https://www.bilibili.com/video/BVnext", Default::default());
+        assert!(
+            completed_input_task(state.draft().unwrap(), &state.tasks, &source.input).is_none()
+        );
+        assert!(state.task(&id).unwrap().plan == plan);
+    }
+
+    #[test]
+    fn automatic_mode_uses_speech_after_login_or_download_failure() {
+        let track = course2md::subtitle::file_track("lesson.srt".into(), None);
+        for metadata_failed in [true, false] {
+            let mut source = source::Source {
+                subtitles: if metadata_failed {
+                    SubtitleEvidence::Failed {
+                        message: "WARNING: subtitles require login".into(),
+                    }
+                } else {
+                    SubtitleEvidence::Found {
+                        tracks: vec![track.clone()],
+                        warning: None,
+                    }
+                },
+                subtitle_request: (!metadata_failed).then(|| track.clone()),
+                subtitle_read_error: (!metadata_failed).then(|| SubtitleReadError::Failed {
+                    message: "字幕文件没有下载成功".into(),
+                }),
+                ..Default::default()
+            };
+            assert!(automatic_subtitle_fallback(&mut source, 0, None));
+            assert!(uses_speech(&source, 0));
+            assert!(!subtitle_needs_confirmation(&source, 0));
+            assert!(source.subtitle_request.is_none());
+            assert!(source.subtitle_read_error.is_none());
+        }
+    }
+
+    #[test]
+    fn explicit_subtitle_and_cancelled_reads_never_fall_back_to_speech() {
+        let mut source = source::Source {
+            subtitles: SubtitleEvidence::Failed {
+                message: "字幕需要登录".into(),
+            },
+            subtitle_read_error: Some(SubtitleReadError::Failed {
+                message: "字幕需要登录".into(),
+            }),
+            ..Default::default()
+        };
+        let original = source.clone();
+        assert!(!automatic_subtitle_fallback(&mut source, 1, None));
+        assert_eq!(source, original);
+        assert!(subtitle_needs_confirmation(&source, 1));
+
+        source.subtitle_read_error = Some(SubtitleReadError::Cancelled);
+        let cancelled = source.clone();
+        assert!(!automatic_subtitle_fallback(&mut source, 0, None));
+        assert_eq!(source, cancelled);
+        assert!(!uses_speech(&source, 0));
+    }
 
     #[test]
     fn pending_or_failed_subtitles_remain_required_even_with_cached_text() {
@@ -2539,14 +3176,12 @@ mod tests {
         assert!(!uses_speech(&source, 0));
         assert!(uses_speech(&source, 2));
         source.subtitle_read_error = None;
-        for evidence in [
-            SubtitleEvidence::Unchecked,
-            SubtitleEvidence::Failed {
-                message: "请求失败".into(),
-            },
-        ] {
-            source.subtitles = evidence;
-            assert!(!uses_speech(&source, 0));
-        }
+        source.subtitles = SubtitleEvidence::Unchecked;
+        assert!(!uses_speech(&source, 0));
+        source.subtitles = SubtitleEvidence::Failed {
+            message: "请求失败".into(),
+        };
+        assert!(uses_speech(&source, 0));
+        assert!(!uses_speech(&source, 1));
     }
 }

@@ -37,6 +37,7 @@ pub struct SingleChoiceGroup {
     icons: BTreeMap<SharedString, Icon>,
     full_width: bool,
     tabs: bool,
+    activate_selected: bool,
     vertical: bool,
     provided_focus: Vec<FocusHandle>,
     disabled: bool,
@@ -53,6 +54,7 @@ impl SingleChoiceGroup {
             icons: BTreeMap::new(),
             full_width: false,
             tabs: false,
+            activate_selected: false,
             vertical: false,
             provided_focus: Vec::new(),
             disabled: false,
@@ -86,6 +88,11 @@ impl SingleChoiceGroup {
     /// Navigation uses the same surfaces, with tab semantics and optional leading layout.
     pub fn tabs(mut self) -> Self {
         self.tabs = true;
+        self
+    }
+    /// A top-level tab can also return from a detail view to its section root.
+    pub fn activate_selected(mut self) -> Self {
+        self.activate_selected = true;
         self
     }
     pub fn vertical(mut self) -> Self {
@@ -330,6 +337,7 @@ impl RenderOnce for SingleChoiceGroup {
         }
         for (index, option) in self.options.into_iter().enumerate() {
             let checked = selected == Some(index);
+            let activate_selected = self.activate_selected;
             let focus = handles[index].clone().tab_stop(entry == Some(index));
             let callback = self.on_change.clone();
             let value = option.value.clone();
@@ -377,7 +385,9 @@ impl RenderOnce for SingleChoiceGroup {
                     .child(content)
                     .on_click(move |_, window, cx| {
                         click_focus.focus(window, cx);
-                        if !checked && let Some(callback) = &callback {
+                        if (!checked || activate_selected)
+                            && let Some(callback) = &callback
+                        {
                             callback(&value, window, cx);
                         }
                     });
@@ -457,7 +467,7 @@ mod tests {
     use gpui::{
         Bounds, Context, FontWeight, IntoElement, Modifiers, ParentElement as _, Pixels, Render,
         SharedString, Styled as _, TestAppContext, TextRun, VisualTestContext, Window, div, font,
-        point, px,
+        px,
     };
     use std::time::Duration;
 

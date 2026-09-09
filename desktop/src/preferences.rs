@@ -249,7 +249,7 @@ impl Default for ApplicationPreferences {
             appearance: Default::default(),
             desktop: DesktopSettings {
                 system_titlebar: true,
-                setup_completed: true,
+                setup_completed: false,
                 ..DesktopSettings::default()
             },
         }
@@ -889,7 +889,6 @@ impl Store {
 
     pub fn save_application(&mut self, mut value: ApplicationPreferences) -> Result<()> {
         value.desktop.system_titlebar = true;
-        value.desktop.setup_completed = true;
         if let Err(error) = self.persist(PreferenceGroup::Application, &value) {
             let intent = Envelope {
                 schema: SCHEMA,
@@ -1680,6 +1679,26 @@ mod tests {
         store
             .save_service_draft(draft, Some(Secret::new("test-only-secret")))
             .unwrap()
+    }
+
+    #[test]
+    fn first_launch_remains_unfinished_until_setup_is_explicitly_completed() {
+        let (directory, mut store) = isolated();
+        assert!(!store.application().desktop.setup_completed);
+        let mut preferences = store.application().clone();
+        preferences.font_scale = 1.25;
+        preferences.desktop.reduce_motion = true;
+        store.save_application(preferences).unwrap();
+        let mut reopened = Store::open(directory.path(), store.vault());
+        assert!(!reopened.application().desktop.setup_completed);
+        assert_eq!(reopened.application().font_scale, 1.25);
+        let mut preferences = reopened.application().clone();
+        preferences.desktop.setup_completed = true;
+        reopened.save_application(preferences).unwrap();
+        let reopened = Store::open(directory.path(), store.vault());
+        assert!(reopened.application().desktop.setup_completed);
+        assert_eq!(reopened.application().font_scale, 1.25);
+        assert!(reopened.application().desktop.reduce_motion);
     }
 
     #[test]

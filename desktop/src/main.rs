@@ -17,6 +17,7 @@ mod legacy_settings;
 mod library_ui;
 mod motion;
 mod notes;
+mod onboarding;
 mod organize;
 mod palettes;
 #[cfg(feature = "performance")]
@@ -156,14 +157,15 @@ impl Default for ConversionOptions {
 struct Desktop {
     preferences: preferences::Store,
     settings_ui: settings_ui::State,
+    onboarding: onboarding::State,
     storage_ui: storage_ui::State,
     reader_ui: reader_ui::State,
     workspace: Option<workspace::Workspace>,
     workspace_error: Option<String>,
+    preference_defaults_pending: bool,
     active_task: Option<String>,
     draft_loading: bool,
     draft_deadline: Option<Instant>,
-    source_deadline: Option<Instant>,
     quit_deadline: Option<Instant>,
     account: account_ui::AccountUi,
     online: bool,
@@ -178,6 +180,8 @@ struct Desktop {
     subtitle_generation: u64,
     preview_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     preview_generation: u64,
+    pending_conversion: Option<u64>,
+    import_result_editing: Option<String>,
     preview_workers: usize,
     preview_error: Option<String>,
     source_validation: Option<String>,
@@ -291,11 +295,7 @@ impl Desktop {
         let legacy = legacy_settings::Inspection::inspect(course2md::settings::config_path());
         let config_error = legacy.problem.is_some();
         let message = None;
-        let output = legacy_settings::startup_output(
-            &configuration_directory,
-            &legacy,
-            backend::default_output,
-        );
+        let output = legacy_settings::startup_output(&configuration_directory, &legacy);
         let preferences = preferences::Store::open(
             configuration_directory.join("desktop-preferences"),
             credentials::system_vault(),
@@ -341,20 +341,18 @@ impl Desktop {
             .iter()
             .map(|(field, input)| {
                 let field = *field;
-                cx.observe(input, move |this: &mut Self, _, cx| {
+                cx.observe_in(input, window, move |this: &mut Self, _, window, cx| {
                     if this.draft_loading {
                         return;
                     }
                     if field == Field::Source {
                         let value = this.value(Field::Source, cx);
                         if value != this.last_source_input {
-                            let pasted =
-                                value.len().saturating_sub(this.last_source_input.len()) > 2;
+                            if !this.prepare_next_import(&value, window, cx) {
+                                return;
+                            }
                             this.last_source_input = value;
                             this.invalidate_source();
-                            this.source_deadline =
-                                (pasted && this.online && !this.last_source_input.is_empty())
-                                    .then(|| Instant::now() + Duration::from_millis(500));
                         }
                     }
                     if matches!(field, Field::Source | Field::Title) {
@@ -373,15 +371,15 @@ impl Desktop {
                 })
             })
             .collect();
-        subscriptions.push(cx.subscribe(
+        subscriptions.push(cx.subscribe_in(
             &inputs[&Field::Source],
-            |this: &mut Self, _, event, cx| {
+            window,
+            |this: &mut Self, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. })
                     && this.page == Page::New
                     && this.online
-                    && this.preview_cancel.is_none()
                 {
-                    this.inspect_source(cx);
+                    this.start_conversion(window, cx);
                 }
             },
         ));
@@ -427,20 +425,22 @@ impl Desktop {
                 ),
             };
         let settings_ui = settings_ui::State::new(window, cx);
+        let onboarding = onboarding::State::new(window, cx);
         let reader_ui = reader_ui::State::new(window, cx);
         let mut this = Self {
             preferences,
             settings_ui,
+            onboarding,
             reader_ui,
             storage_ui: Default::default(),
             workspace,
             workspace_error,
+            preference_defaults_pending: false,
             active_task: None,
             draft_loading: false,
             draft_deadline: None,
-            source_deadline: None,
             quit_deadline: None,
-            page: Page::Library,
+            page: Page::New,
             online: true,
             last_source_input: String::new(),
             completed_source: None,
@@ -453,6 +453,8 @@ impl Desktop {
             subtitle_generation: 0,
             preview_cancel: None,
             preview_generation: 0,
+            pending_conversion: None,
+            import_result_editing: None,
             preview_workers: 0,
             preview_error: None,
             source_validation: None,
@@ -522,12 +524,18 @@ impl Desktop {
             _poll: poll,
         };
         this.settings_snapshot = this.edited_settings(cx);
+        // Preferences and workspace records are saved separately. Reconcile
+        // inherited options after an interrupted save before restoring input.
+        this.refresh_preference_defaults(cx);
         this.restore_draft(window, cx);
         this.restore_storage_state(cx);
         cx.set_reduce_motion(this.desktop_settings.reduce_motion);
         this.refresh_account(cx);
         this.refresh_environment(cx);
         this.refresh_library(cx);
+        if !this.preferences.application().desktop.setup_completed {
+            this.start_onboarding(window, cx);
+        }
         this
     }
     fn refresh_environment(&mut self, cx: &mut Context<Self>) {
@@ -540,6 +548,7 @@ impl Desktop {
             let _ = this.update(cx, |this, cx| {
                 this.environment = Some(environment);
                 this.refresh_model_diagnostics(cx);
+                this.advance_conversion_when_ready(cx);
                 cx.notify();
             });
         })
@@ -572,10 +581,48 @@ impl Desktop {
         root
     }
 
-    fn import_video_from_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page == Page::Settings && !self.close_service_editor(window, cx) {
-            return;
+    fn prepare_next_import(
+        &mut self,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
+        let Some(workspace) = &mut self.workspace else {
+            return false;
+        };
+        if !workspace
+            .state
+            .draft()
+            .is_some_and(|draft| draft.submitted_task.is_some() && draft.input != value)
+        {
+            return true;
         }
+        match workspace.transaction(|state| Ok(state.prepare_next_import(value, defaults))) {
+            Ok(true) => {
+                if let Some(draft) = workspace.state.draft() {
+                    self.task_options = draft.options.clone();
+                    self.target_folder = draft.folder;
+                }
+                self.completed_source = None;
+                self.invalidate_source();
+                self.message = None;
+                self.draft_loading = true;
+                self.inputs[&Field::Title].update(cx, |state, cx| state.set_value("", window, cx));
+                self.draft_loading = false;
+                self.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
+                true
+            }
+            Err(error) => {
+                self.workspace_error = Some(format!("新的视频输入尚未保存：{error:#}"));
+                cx.notify();
+                false
+            }
+            Ok(false) => true,
+        }
+    }
+
+    fn import_video_from_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.source_editor_open = true;
         self.navigate(Page::New, cx);
         if self.online {
@@ -685,9 +732,6 @@ impl Desktop {
                             this.inputs[&field].update(cx, |state, cx| {
                                 state.set_value(path.display().to_string(), window, cx)
                             });
-                            if !directory {
-                                this.inspect_source(cx);
-                            }
                         }
                     }
                     Ok(Ok(None)) => {}
@@ -750,18 +794,6 @@ impl Desktop {
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             self.save_current_draft(cx);
-        }
-        if self
-            .source_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            self.source_deadline = None;
-            if self.page == Page::New
-                && self.online
-                && source::validate_url(&self.value(Field::Source, cx)).is_ok()
-            {
-                self.inspect_source(cx);
-            }
         }
         let events: Vec<_> = self
             .job
@@ -1006,6 +1038,7 @@ impl Desktop {
                 } else {
                     this.library_error = Some("当前库的文件夹信息暂时无法读取".into());
                 }
+                this.advance_conversion_when_ready(cx);
                 cx.notify();
             });
         })
@@ -1039,7 +1072,15 @@ impl Desktop {
         self.read_generation = self.read_generation.wrapping_add(1);
         let generation = self.read_generation;
         let origin = self.page;
-        self.result_origin = origin;
+        self.result_origin = if origin == Page::Result {
+            if self.result_origin == Page::Result {
+                Page::Library
+            } else {
+                self.result_origin
+            }
+        } else {
+            origin
+        };
         let task = cx
             .background_executor()
             .spawn(async move { backend::read_preview(course) });

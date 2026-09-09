@@ -204,12 +204,34 @@ pub(super) fn settings_row(
     hint: &'static str,
     control: impl IntoElement,
 ) -> Div {
+    settings_form_row(id, label, hint, control, false)
+}
+
+/// Keep the label aligned with the input when its column also contains field
+/// feedback or an action, using the same form columns as ordinary preferences.
+pub(super) fn settings_field_row(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    hint: &'static str,
+    field: impl IntoElement,
+) -> Div {
+    settings_form_row(id, label, hint, field, true)
+}
+
+fn settings_form_row(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    hint: &'static str,
+    control: impl IntoElement,
+    align_first_control: bool,
+) -> Div {
     let id = id.into();
     h_flex()
         .w_full()
         .min_w_0()
         .min_h(CONTROL_HEIGHT)
         .items_center()
+        .when(align_first_control, |row| row.items_start())
         .flex_wrap()
         .gap_4()
         .child(
@@ -217,6 +239,9 @@ pub(super) fn settings_row(
                 .flex_1()
                 .flex_basis(rems(160. / 14.))
                 .min_w(rems(140. / 14.))
+                .when(align_first_control, |label| {
+                    label.min_h(CONTROL_HEIGHT).justify_center()
+                })
                 .gap_1()
                 .child(field_label(id.clone(), label))
                 .when(!hint.is_empty(), |view| {
@@ -234,8 +259,8 @@ pub(super) fn settings_row(
                 .w(rems(360. / 14.))
                 .max_w_full()
                 .min_w_0()
+                .when(align_first_control, |field| field.min_h(CONTROL_HEIGHT))
                 .flex_shrink_0()
-                .ml_auto()
                 .justify_start()
                 .items_center()
                 .child(control),
@@ -648,6 +673,31 @@ impl Desktop {
             .text_size(TEXT_DISPLAY)
             .font_weight(FontWeight::SEMIBOLD)
             .flex_shrink_0();
+        let header = h_flex()
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .child(header)
+            .when(
+                self.settings_origin == Some(Page::Result) && self.preview.is_some(),
+                |row| {
+                    row.child(
+                        quiet("return-to-reading")
+                            .icon(icons::arrow_left())
+                            .label("返回笔记")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let focus = this.settings_return_focus.take();
+                                this.settings_origin = None;
+                                this.navigate(Page::Result, cx);
+                                if let Some(focus) = focus {
+                                    window.on_next_frame(move |window, cx| focus.focus(window, cx));
+                                }
+                            })),
+                    )
+                },
+            );
         let navigation = self.settings_navigation(sidebar, window, cx);
         let mut panel = v_flex()
             .id("settings-panel")
@@ -1458,7 +1508,7 @@ impl Desktop {
                 if default.id == version.id {
                     " · 默认服务".to_owned()
                 } else {
-                    format!(" · 默认仍使用版本 {}", default.number)
+                    " · 本次调整未设为默认".to_owned()
                 }
             })
             .unwrap_or_default();
@@ -1489,7 +1539,7 @@ impl Desktop {
         } else if has_failed_test {
             (BadgeKind::Warning, "有测试未通过".to_owned())
         } else if let Some(evidence) = passed {
-            let stamp = crate::reader_navigation::timestamp_utc(evidence.tested_at * 1000);
+            let stamp = crate::reader_navigation::timestamp_local(evidence.tested_at * 1000);
             let date = stamp.get(..10).unwrap_or(&stamp).to_owned();
             (BadgeKind::Success, format!("测试通过 · {date}"))
         } else {
@@ -1655,6 +1705,15 @@ impl Desktop {
                 ServicePurpose::Ai => refs.llm,
             }
         };
+        let editor_version = current
+            .as_deref()
+            .and_then(|id| self.preferences.version(id))
+            .filter(|version| {
+                !self
+                    .preferences
+                    .service_stopped_in_snapshot(&version.service_id)
+            })
+            .map(|version| version.id.clone());
         let mut latest = BTreeMap::<String, ServiceVersion>::new();
         for version in self.preferences.versions().filter(|v| {
             v.config.protocol.purpose() == purpose
@@ -1679,11 +1738,13 @@ impl Desktop {
                         purpose as usize * 2 + current_task as usize,
                     ),
                     format!(
-                        "{} · {} · {} · 版本 {}{}",
-                        version.config.name,
-                        version.config.host(),
+                        "{} · {}{}",
+                        if version.config.name == version.config.host() {
+                            version.config.name.clone()
+                        } else {
+                            format!("{} · {}", version.config.name, version.config.host())
+                        },
                         version.config.model,
-                        version.number,
                         if self
                             .preferences
                             .service_stopped_in_snapshot(&version.service_id)
@@ -1697,6 +1758,15 @@ impl Desktop {
                 .text_sm(),
             );
         }
+        let old_current_service = current
+            .as_deref()
+            .and_then(|id| self.preferences.version(id))
+            .filter(|version| {
+                latest
+                    .get(&version.service_id)
+                    .is_some_and(|latest| latest.id != version.id)
+            })
+            .map(|version| version.service_id.clone());
         let mut choices = latest.into_values().collect::<Vec<_>>();
         if let Some(current) = current
             .as_deref()
@@ -1722,9 +1792,18 @@ impl Desktop {
                     (
                         version.id.clone(),
                         format!(
-                            "{} · 版本 {}{}",
+                            "{} · {}{}{}",
                             version.config.name,
-                            version.number,
+                            version.config.model,
+                            if old_current_service.as_ref() == Some(&version.service_id) {
+                                if current.as_ref() == Some(&version.id) {
+                                    " · 当前使用"
+                                } else {
+                                    " · 更新后的配置"
+                                }
+                            } else {
+                                ""
+                            },
                             if self
                                 .preferences
                                 .service_stopped_in_snapshot(&version.service_id)
@@ -1757,17 +1836,18 @@ impl Desktop {
             ))
             .icon(icons::settings())
             .ghost()
-            .label(if purpose == ServicePurpose::Speech {
-                "设置语音服务"
-            } else {
-                "设置 AI 服务"
+            .label(match (purpose, editor_version.is_some()) {
+                (ServicePurpose::Speech, true) => "编辑语音服务",
+                (ServicePurpose::Speech, false) => "添加语音服务",
+                (ServicePurpose::Ai, true) => "编辑 AI 服务",
+                (ServicePurpose::Ai, false) => "添加 AI 服务",
             })
             .self_start()
             .on_click(cx.listener(move |this, _, window, cx| {
                 if current_task {
                     this.open_task_service_editor(purpose, window, cx)
                 } else {
-                    this.open_settings_service_editor(purpose, None, window, cx);
+                    this.open_settings_service_editor(purpose, editor_version.clone(), window, cx);
                 }
             })),
         );
@@ -1840,6 +1920,12 @@ impl Desktop {
         };
         match result {
             Ok(()) => {
+                self.set_settings_feedback(
+                    PreferenceGroup::Services,
+                    "服务选择已保存".into(),
+                    false,
+                );
+                self.advance_conversion_when_ready(cx);
                 cx.notify();
                 true
             }
@@ -1949,10 +2035,22 @@ impl Desktop {
                 .cloned()
         });
         let inline = target.is_none();
+        let defaults = self.preferences.default_refs();
+        let default = match draft.protocol.purpose() {
+            ServicePurpose::Speech => defaults.asr,
+            ServicePurpose::Ai => defaults.llm,
+        };
+        let also_default = default
+            .as_deref()
+            .and_then(|id| self.preferences.version(id))
+            .is_none_or(|version| {
+                self.preferences
+                    .service_stopped_in_snapshot(&version.service_id)
+            });
         self.settings_ui.editor = Some(ServiceEditor {
             draft,
             target,
-            also_default: false,
+            also_default,
             return_focus: window.focused(cx),
             errors: Vec::new(),
             status: None,
@@ -2033,7 +2131,8 @@ impl Desktop {
             .px_1();
         if !inline {
             view = view
-                .max_h((window.bounds().size.height - px(150.)).max(px(180.)))
+                .max_h((window.bounds().size.height - window.rem_size() * 10.).max(px(80.)))
+                .min_h_0()
                 .overflow_y_scroll();
         }
         view = view.child(
@@ -2214,7 +2313,7 @@ impl Desktop {
             view = view.child(
                 text(
                     "service-credential-source",
-                    format!("凭据来源：{source}；已固定为安全存储版本"),
+                    format!("密钥已安全保存 · 来源：{source}"),
                 )
                 .text_sm(),
             );
@@ -2223,7 +2322,7 @@ impl Desktop {
             view = view.child(
                 self.setting_preference(
                     "同时设为默认服务",
-                    "准备中笔记未单独选择的服务会采用这个版本。",
+                    "后续转换自动使用",
                     Switch::new("service-also-default")
                         .checked(editor.also_default)
                         .disabled(awaiting_binding)
@@ -2374,48 +2473,64 @@ impl Desktop {
         {
             view = view.child(text("service-editor-status", status.clone()).text_sm());
         }
-        view.child(
-            h_flex()
-                .w_full()
-                .gap_2()
-                .flex_wrap()
-                .child(
-                    quiet("close-service-editor")
-                        .icon(icons::close())
-                        .label("取消")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if this.close_service_editor(window, cx) && !inline {
-                                window.close_dialog(cx);
-                            }
-                        })),
-                )
-                .child(div().flex_1())
-                .child(
-                    outline_pill("run-service-test")
-                        .icon(icons::science())
-                        .label("测试服务")
-                        .loading(busy)
-                        .disabled(busy || awaiting_binding)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.start_service_test(window, cx)),
-                        ),
-                )
-                .child(
-                    primary_pill("save-service")
-                        .icon(icons::save())
-                        .label(if awaiting_binding {
-                            "重试保存本次选择"
-                        } else {
-                            "保存"
-                        })
-                        .on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.publish_open_service(window, cx)
-                            }),
-                        ),
-                ),
-        )
-        .into_any_element()
+        let actions = h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .gap_2()
+            .flex_wrap()
+            .child(
+                quiet("close-service-editor")
+                    .icon(icons::close())
+                    .label("取消")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.close_service_editor(window, cx) && !inline {
+                            window.close_dialog(cx);
+                        }
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                outline_pill("run-service-test")
+                    .icon(icons::science())
+                    .label(
+                        match editor.evidence.as_ref().map(|evidence| evidence.outcome.clone()) {
+                            Some(preferences::TestOutcome::Passed) => "测试通过 · 重测",
+                            Some(
+                                preferences::TestOutcome::AuthenticationRefused
+                                | preferences::TestOutcome::ModelRefused
+                                | preferences::TestOutcome::ContractMismatch
+                                | preferences::TestOutcome::SampleMismatch,
+                            ) => "测试未通过 · 重试",
+                            _ => "测试服务",
+                        },
+                    )
+                    .loading(busy)
+                    .disabled(busy || awaiting_binding)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.start_service_test(window, cx)),
+                    ),
+            )
+            .child(
+                primary_pill("save-service")
+                    .icon(icons::save())
+                    .label(if awaiting_binding {
+                        "重试保存本次选择"
+                    } else {
+                        "保存"
+                    })
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.publish_open_service(window, cx)),
+                    ),
+            );
+        if inline {
+            view.child(actions).into_any_element()
+        } else {
+            v_flex()
+                .gap_4()
+                .child(view)
+                .child(actions)
+                .into_any_element()
+        }
     }
     fn setting_input_changed(&mut self, field: EditField, cx: &mut Context<Self>) {
         if !self.settings_ui.initialized
@@ -2683,9 +2798,11 @@ impl Desktop {
                             .iter_mut()
                             .find(|draft| draft.id == target)
                             .context("原笔记已关闭；服务已保存，但未用于其他笔记")?;
+                        let selected =
+                            (scope == BindingScope::CurrentTask).then(|| version.id.clone());
                         match version.config.protocol.purpose() {
-                            ServicePurpose::Speech => draft.asr_service = Some(version.id.clone()),
-                            ServicePurpose::Ai => draft.ai_service = Some(version.id.clone()),
+                            ServicePurpose::Speech => draft.asr_service = selected,
+                            ServicePurpose::Ai => draft.ai_service = selected,
                         };
                         Ok(())
                     })
@@ -2705,6 +2822,7 @@ impl Desktop {
         if !inline {
             window.close_dialog(cx);
         }
+        self.advance_conversion_when_ready(cx);
         cx.notify();
     }
     pub(crate) fn close_service_editor(
@@ -2826,7 +2944,11 @@ impl Desktop {
         });
     }
 
-    fn commit_generation(&mut self, next: GenerationPreferences, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn commit_generation(
+        &mut self,
+        next: GenerationPreferences,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let previous = self
             .ordinary_preferences_submit_issue()
             .map(|issue| issue.message);
@@ -2836,6 +2958,9 @@ impl Desktop {
                 self.set_settings_feedback(PreferenceGroup::Generation, "已保存".into(), false);
                 self.refresh_preference_defaults(cx);
                 self.clear_resolved_generation_errors(previous);
+                if !self.preference_defaults_pending {
+                    self.advance_conversion_when_ready(cx);
+                }
                 true
             }
             Err(error) => {
@@ -2846,7 +2971,7 @@ impl Desktop {
             }
         }
     }
-    fn refresh_preference_defaults(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_preference_defaults(&mut self, cx: &mut Context<Self>) {
         let out = self.config.defaults.out.clone();
         self.config = self.preferences.defaults_config();
         self.config.defaults.out = out;
@@ -2866,10 +2991,15 @@ impl Desktop {
                     if let Some(draft) = workspace.state.draft() {
                         self.task_options = draft.options.clone();
                     }
+                    if self.preference_defaults_pending {
+                        self.preference_defaults_pending = false;
+                        self.workspace_error = None;
+                    }
                 }
                 Err(error) => {
+                    self.preference_defaults_pending = true;
                     self.workspace_error =
-                        Some(format!("默认设置已保存，准备中笔记尚未同步：{error:#}"))
+                        Some(format!("默认设置已保存，当前视频的选项尚未同步：{error:#}"))
                 }
             }
         }
@@ -3100,10 +3230,13 @@ impl Desktop {
                 let root = library.root.clone();
                 let id = library.id.clone();
                 let move_id = id.clone();
+                let relocate_id = id.clone();
                 let default = workspace.state.default_library == id;
-                let offline = self
-                    .cached_location_check(library)
-                    .is_some_and(|check| !check.available);
+                let check = self.cached_location_check(library);
+                let offline = check.is_some_and(|check| !check.available);
+                let needs_relocation = check.is_some_and(|check| {
+                    !check.available || check.problem.is_some() || check.needs_reassociation
+                });
                 view=view.child(v_flex().gap_2().w_full().p_4().bg(color(SURFACE)).border_1().border_color(color(CARD_LINE)).rounded(RADIUS_CARD)
                 .child(h_flex().gap_2().items_center().flex_wrap()
                     .child(text(("storage-location-name",index),library.name.clone()).font_weight(FontWeight::SEMIBOLD))
@@ -3118,10 +3251,12 @@ impl Desktop {
                             if let Err(error)=result{this.workspace_error=Some(format!("默认位置尚未更改：{error:#}"));}else{this.message=Some("后续生成的笔记将保存在此位置，已有笔记和任务保持原位置".into());}
                         }cx.notify();
                     }))))
-                    .child(outline_pill(("move-storage-location",index)).icon(icons::storage()).label("移动课程库…").on_click(cx.listener(move|this,_,window,cx|this.begin_library_move(move_id.clone(),window,cx)))))
+                    .when(!needs_relocation, |row| row.child(outline_pill(("move-storage-location",index)).icon(icons::storage()).label("移动课程库…").disabled(self.storage_ui.busy).on_click(cx.listener(move|this,_,window,cx|this.begin_library_move(move_id.clone(),window,cx))))))
                 .child(text(("storage-location-path",index),root.display().to_string()).text_size(TEXT_AUX).text_color(color(GRAY)))
+                .when(needs_relocation, |row| row.child(text(("storage-relocation-help",index),"文件夹已移动？选择它现在的位置即可恢复关联。").text_size(TEXT_AUX).text_color(color(MUTED))))
                 .child(h_flex().gap_2().flex_wrap()
-                    .child(quiet(("open-storage-location",index)).icon(icons::folder_open()).label("打开位置").disabled(offline).on_click(move|_,_,cx|cx.open_with_system(&root)))));
+                    .child(quiet(("open-storage-location",index)).icon(icons::folder_open()).label("打开位置").disabled(offline).on_click(move|_,_,cx|cx.open_with_system(&root)))
+                    .when(needs_relocation, |row| row.child(outline_pill(("relocate-storage-location",index)).icon(icons::folder_open()).label("重新定位…").disabled(self.storage_ui.busy).on_click(cx.listener(move|this,_,window,cx|this.begin_library_relocation(relocate_id.clone(),window,cx)))))));
             }
         }
         view = view.child(
@@ -3200,6 +3335,17 @@ impl Desktop {
                                     .iter()
                                     .any(|l| l.root.canonicalize().ok() == path.canonicalize().ok())
                             });
+                            if !duplicate
+                                && let Ok(identity) = std::fs::read_to_string(path.join(".course2md-library-id"))
+                                && let Some(existing) = this.workspace.as_ref().and_then(|workspace| workspace.state.library(identity.trim()))
+                            {
+                                this.workspace_error = Some(format!(
+                                    "「{}」已登记。请在这个课程库下选择“重新定位…”，恢复移动后的关联。",
+                                    existing.name
+                                ));
+                                cx.notify();
+                                return;
+                            }
                             match this
                                 .workspace
                                 .as_mut()
@@ -3296,6 +3442,17 @@ impl Desktop {
             .min_w_0()
             .gap_6()
             .child(group("about-heading", "关于").child(self.about_page(cx)))
+            .child(settings_row(
+                "restart-onboarding-label",
+                "用户引导",
+                "选择默认引擎、配置 AI 服务和准备模型",
+                outline_pill("restart-onboarding")
+                    .label("重新开始用户引导")
+                    .icon(icons::restart())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.start_onboarding(window, cx);
+                    })),
+            ))
             .when(show_legacy, |view| {
                 view.child(
                     group("legacy-settings-heading", "旧版设置")
@@ -3781,6 +3938,9 @@ impl Desktop {
                 if group == PreferenceGroup::Generation {
                     self.clear_resolved_generation_errors(previous);
                 }
+                if !self.preference_defaults_pending {
+                    self.advance_conversion_when_ready(cx);
+                }
                 cx.notify();
                 true
             }
@@ -3819,7 +3979,7 @@ impl Desktop {
         if let Err(error) = &result {
             self.set_settings_feedback(
                 PreferenceGroup::Generation,
-                format!("模型位置尚未更新，旧位置备份已保留：{error:#}"),
+                format!("模型位置尚未更新，修改已保留，可重试保存：{error:#}"),
                 true,
             );
         } else {

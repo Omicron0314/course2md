@@ -53,6 +53,7 @@ impl Desktop {
     }
 
     pub fn invalidate_source(&mut self) {
+        self.pending_conversion = None;
         if let Some(cancel) = self.preview_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -72,11 +73,13 @@ impl Desktop {
         self.source_validation = None;
         self.show_preview_details = false;
         self.expanded_subtitle_issue = None;
-        self.source_deadline = None;
     }
 
-    pub fn inspect_source(&mut self, cx: &mut Context<Self>) {
+    pub fn inspect_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut input = self.value(Field::Source, cx);
+        if !self.prepare_next_import(&input, window, cx) {
+            return;
+        }
         if self.preview_cancel.is_some() && self.last_source_input == input {
             return;
         }
@@ -114,15 +117,9 @@ impl Desktop {
             }
             if let Some(link) = links.into_iter().next() {
                 if input != link {
-                    // The app owns a single document window. Normalize the input
-                    // without accepting an async result or changing its identity.
-                    if let Some(handle) = cx.windows().first().copied() {
-                        let field = self.inputs[&Field::Source].clone();
-                        let value = link.clone();
-                        let _ = cx.update_window(handle, |_, window, cx| {
-                            field.update(cx, |state, cx| state.set_value(value, window, cx))
-                        });
-                    }
+                    self.inputs[&Field::Source].update(cx, |state, cx| {
+                        state.set_value(link.clone(), window, cx);
+                    });
                     input = link;
                 }
             }
@@ -201,6 +198,7 @@ impl Desktop {
                         Ok(source::SourceProbe::Unresolved { message }) => this.preview_error = Some(message),
                         Err(error) => this.preview_error = Some(format!("{error:#}")),
                     }
+                    this.advance_conversion(window, cx);
                     cx.notify();
                 }));
             }

@@ -82,11 +82,11 @@ pub fn has_modern_records(directory: &Path) -> bool {
 }
 
 /// This only chooses a bootstrap root. Workspace::open subsequently uses its persisted
-/// registry. A broken/retired TOML must never select or create a library in Documents.
+/// registry. Fresh installs use managed local storage so the welcome screen does not
+/// synchronously access a protected Documents folder before the user can choose a location.
 pub fn startup_output(
     directory: &Path,
     legacy: &Inspection,
-    fallback: impl FnOnce() -> PathBuf,
 ) -> PathBuf {
     if has_modern_records(directory) || legacy.problem.is_some() {
         return directory.join("desktop-local-library");
@@ -95,7 +95,7 @@ pub fn startup_output(
         .output
         .clone()
         .map(course2md::config::expand_tilde)
-        .unwrap_or_else(fallback)
+        .unwrap_or_else(|| directory.join("desktop-local-library"))
 }
 
 fn parse(bytes: &[u8]) -> Result<ConfigFile> {
@@ -248,6 +248,17 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn fresh_install_bootstraps_local_storage_before_any_folder_permission() {
+        let directory = tempfile::tempdir().unwrap();
+        let inspected = Inspection::inspect(directory.path().join("config.toml"));
+        assert_eq!(
+            startup_output(directory.path(), &inspected),
+            directory.path().join("desktop-local-library")
+        );
+        assert!(!directory.path().join("desktop-local-library").exists());
+    }
+
+    #[test]
     fn import_entry_requires_backup_and_preserves_hidden_options_across_restart() {
         use std::sync::Arc;
         let root = tempfile::tempdir().unwrap();
@@ -362,14 +373,14 @@ mod tests {
         std::fs::write(&path, b"[defaults]\nout = \"/users/real-library\"\n[bad").unwrap();
         let safe = directory.path().join("desktop-local-library");
         let inspected = Inspection::inspect(path.clone());
-        assert_eq!(startup_output(directory.path(), &inspected, || panic!("must not resolve Documents")), safe);
+        assert_eq!(startup_output(directory.path(), &inspected), safe);
         assert!(!safe.exists(), "inspection must not create or scan any library");
         std::fs::write(&path, b"[defaults]\nout = \"/users/retired-library\"\n").unwrap();
         let inspected = Inspection::inspect(path);
         std::fs::create_dir(directory.path().join("desktop-preferences")).unwrap();
-        assert_eq!(startup_output(directory.path(), &inspected, || PathBuf::from("unused")), PathBuf::from("/users/retired-library"));
+        assert_eq!(startup_output(directory.path(), &inspected), PathBuf::from("/users/retired-library"));
         std::fs::write(directory.path().join("desktop-preferences/application.json"), b"modern record").unwrap();
-        assert_eq!(startup_output(directory.path(), &inspected, || panic!("must not use retired defaults")), safe);
+        assert_eq!(startup_output(directory.path(), &inspected), safe);
     }
 
     #[test]

@@ -484,7 +484,7 @@ fn probe(bin: &Path, args: &[&str]) -> Option<String> {
     Some(text)
 }
 
-pub use crate::notes::{Course, Preview, default_output, read_preview, scan_library};
+pub use crate::notes::{Course, Preview, read_preview, scan_library};
 
 #[cfg(test)]
 mod tests {

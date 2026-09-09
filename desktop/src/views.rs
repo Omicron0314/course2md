@@ -99,6 +99,7 @@ impl Desktop {
         let nav = div().w(px(nav_width)).child(
             SingleChoiceGroup::new("main-navigation", "主导航")
                 .tabs()
+                .activate_selected()
                 .full_width()
                 .options([
                     ("import", if compact { "导入" } else { "工作台" }.to_owned()),
@@ -133,9 +134,6 @@ impl Desktop {
                         this.open_settings(window, cx);
                         return;
                     }
-                    if this.page == Page::Settings && !this.close_service_editor(window, cx) {
-                        return;
-                    }
                     let page = match value.as_ref() {
                         "library" => Page::Library,
                         "tasks" => Page::Task,
@@ -164,16 +162,31 @@ impl Desktop {
     }
 
     fn task_result_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shown_result = (self.page == Page::New)
+            .then(|| self.completed_import_task(cx))
+            .flatten()
+            .map(|task| task.id.as_str());
         let task = self
             .workspace
             .as_ref()?
             .state
             .tasks
             .iter()
-            .filter(|task| task.unread && task.handled_by.is_none())
+            .filter(|task| {
+                task.unread && task.handled_by.is_none() && Some(task.id.as_str()) != shown_result
+            })
             .max_by_key(|task| task.updated)?;
         let id = task.id.clone();
         let dismiss_id = id.clone();
+        let result = (task.state == workspace::TaskState::Complete)
+            .then(|| {
+                task.artifact.clone().map(|out_dir| Completed {
+                    out_dir,
+                    title: task.plan.title.clone(),
+                    ..Default::default()
+                })
+            })
+            .flatten();
         let action = match task.state {
             workspace::TaskState::Complete => "查看生成结果",
             workspace::TaskState::Partial => "查看未完成部分",
@@ -207,9 +220,11 @@ impl Desktop {
                             .icon(icons::arrow_forward())
                             .label(action)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.navigate(Page::Task, cx);
-                                if this.page == Page::Task {
+                                if let Some(done) = &result {
+                                    this.open_course(Course::from_completed(done), cx);
+                                } else {
                                     this.select_task(&id, cx);
+                                    this.navigate(Page::Task, cx);
                                 }
                             })),
                     )
@@ -287,6 +302,32 @@ impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::apply_preference(&self.preferences.application().appearance, window, cx);
         theme::apply_scale(self.preferences.application().font_scale, window, cx);
+        if self.onboarding.active {
+            let content = self.onboarding_page(window, cx);
+            return div()
+                .id("onboarding-action-root")
+                .track_focus(&self.root_focus)
+                .tab_stop(false)
+                .size_full()
+                .child(a11y::ModalBackground::new(
+                    v_flex()
+                        .size_full()
+                        .bg(color(CANVAS))
+                        .text_color(color(INK))
+                        .text_size(TEXT_BODY)
+                        .child(
+                            TitleBar::new()
+                                .h(px(40. * self.preferences.application().font_scale + 16.))
+                                .bg(color(CANVAS))
+                                .border_color(color(HAIRLINE))
+                                .child(h_flex().w_full().justify_center().child("course2md")),
+                        )
+                        .child(content),
+                    window.has_active_dialog(cx),
+                ))
+                .children(Root::render_dialog_layer(window, cx))
+                .into_any_element();
+        }
         let content = match self.page {
             Page::New => self.new_page(window, cx),
             Page::Task => self.queue_page(window, cx),
@@ -318,12 +359,16 @@ impl Render for Desktop {
             .child(content);
         let topbar = self.shell_topbar(window, cx);
         let task_notice = self.task_result_notice(cx);
+        let model_notice = self.onboarding_background_notice(window, cx);
         let body = v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .w_full()
             .when_some(task_notice, |body, notice| body.child(notice))
+            .when_some(model_notice, |body, notice| {
+                body.child(shell_column_for(self.page).py_2().child(notice))
+            })
             .when(self.page == Page::Library, |v| {
                 v.child(
                     shell_column_for(self.page)
@@ -334,6 +379,29 @@ impl Render for Desktop {
             .when(self.page == Page::Library, |v| {
                 v.child(shell_column_for(self.page).child(self.library_toolbar(cx)))
             })
+            .when(
+                self.page == Page::Library
+                    && self
+                        .settings_group_notice(crate::preferences::PreferenceGroup::Application)
+                        .is_some_and(|(_, error)| error),
+                |v| {
+                    v.child(
+                        shell_column_for(self.page).pb_3().flex_shrink_0().child(
+                            div()
+                                .id("library-settings-feedback")
+                                .w_full()
+                                .min_w_0()
+                                .p_3()
+                                .rounded(RADIUS_CARD)
+                                .bg(color(DANGER_BG))
+                                .child(self.group_feedback(
+                                    crate::preferences::PreferenceGroup::Application,
+                                    cx,
+                                )),
+                        ),
+                    )
+                },
+            )
             .when_some(self.workspace_error.clone(), |v, message| {
                 v.child(crate::motion::enter(
                     SharedString::from(format!("workspace-error-{message}")),
@@ -469,5 +537,6 @@ impl Render for Desktop {
                 window.has_active_dialog(cx),
             ))
             .children(Root::render_dialog_layer(window, cx))
+            .into_any_element()
     }
 }
