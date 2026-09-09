@@ -162,10 +162,9 @@ impl Desktop {
     }
 
     fn task_result_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let shown_result = (self.page == Page::New)
-            .then(|| self.completed_import_task(cx))
-            .flatten()
-            .map(|task| task.id.as_str());
+        let visible_task = (self.page == Page::New)
+            .then(|| self.current_input_task(cx).map(|task| task.id.as_str()))
+            .flatten();
         let task = self
             .workspace
             .as_ref()?
@@ -173,7 +172,14 @@ impl Desktop {
             .tasks
             .iter()
             .filter(|task| {
-                task.unread && task.handled_by.is_none() && Some(task.id.as_str()) != shown_result
+                task.unread
+                    && task.handled_by.is_none()
+                    && visible_task != Some(task.id.as_str())
+                    && !(self.reading
+                        && self.page == Page::New
+                        && self.following_conversion.as_ref().is_some_and(|follow| {
+                            follow.follows(&task.id, self.preview_generation)
+                        }))
             })
             .max_by_key(|task| task.updated)?;
         let id = task.id.clone();
@@ -318,11 +324,18 @@ impl Render for Desktop {
                         .child(
                             TitleBar::new()
                                 .h(px(40. * self.preferences.application().font_scale + 16.))
+                                .pl_0()
                                 .bg(color(CANVAS))
                                 .border_color(color(HAIRLINE))
-                                .child(h_flex().w_full().justify_center().gap_2().items_center()
-                                    .child(icons::book_open().size_4().text_color(color(GRAY)))
-                                    .child("course2md")),
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_center()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(icons::book_open().size_4().text_color(color(GRAY)))
+                                        .child("course2md"),
+                                ),
                         )
                         .child(content),
                     window.has_active_dialog(cx),
@@ -441,21 +454,28 @@ impl Render for Desktop {
                 ))
             })
             .when_some(self.message.clone(), |v, message| {
-                v.child(crate::motion::enter(
+                let completed = message.starts_with("笔记已生成");
+                v.child(crate::motion::state_enter(
                     SharedString::from(format!("app-message-{message}")),
                     shell_column_for(self.page).pb_3().child(
                         h_flex()
                             .min_w_0()
+                            .items_center()
                             .gap_3()
                             .p_3()
                             .rounded_md()
-                            .bg(color(TINT))
-                            .child(icons::info().text_color(color(ACCENT)))
+                            .bg(color(if completed { SUCCESS_BG } else { TINT }))
+                            .child(if completed {
+                                icons::check_circle().text_color(color(SUCCESS))
+                            } else {
+                                icons::info().text_color(color(ACCENT))
+                            })
                             .child(
                                 accessible_text("app-message", message)
                                     .role(Role::Status)
                                     .flex_1()
                                     .min_w_0()
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .whitespace_normal(),
                             )
                             .child(

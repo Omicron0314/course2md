@@ -20,6 +20,8 @@ enum WorkerWait {
     Starting,
     BetweenStages,
     Finishing,
+    Pausing,
+    Cancelling,
 }
 
 impl WorkerWait {
@@ -28,6 +30,8 @@ impl WorkerWait {
             Self::Starting => "正在启动任务…",
             Self::BetweenStages => "正在继续处理…",
             Self::Finishing => "正在完成笔记…",
+            Self::Pausing => "正在保存进度，随后暂停…",
+            Self::Cancelling => "正在保存进度并取消任务…",
         }
     }
 }
@@ -38,6 +42,7 @@ impl WorkerWait {
 fn worker_wait_state<'a>(
     active: bool,
     result_received: bool,
+    intent: Intent,
     stages: impl IntoIterator<Item = (&'a str, bool)>,
 ) -> Option<WorkerWait> {
     if !active {
@@ -52,7 +57,11 @@ fn worker_wait_state<'a>(
         }
         render_done |= stage == "render";
     }
-    Some(if render_done || result_received {
+    Some(if matches!(intent, Intent::Pause | Intent::Quit) {
+        WorkerWait::Pausing
+    } else if intent == Intent::Cancel {
+        WorkerWait::Cancelling
+    } else if render_done || result_received {
         WorkerWait::Finishing
     } else if has_stage {
         WorkerWait::BetweenStages
@@ -61,30 +70,275 @@ fn worker_wait_state<'a>(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageStatus {
+    Running,
+    Complete,
+    Pausing,
+    Stopping,
+    Paused,
+    Waiting,
+    Failed,
+    Uncertain,
+    Cancelled,
+}
+
+impl StageStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "处理中",
+            Self::Complete => "已完成",
+            Self::Pausing => "暂停中",
+            Self::Stopping => "停止中",
+            Self::Paused => "已暂停",
+            Self::Waiting => "等待继续",
+            Self::Failed => "未完成",
+            Self::Uncertain => "待确认",
+            Self::Cancelled => "已取消",
+        }
+    }
+
+    fn ink(self) -> Rgba {
+        color(match self {
+            Self::Running => ACCENT_STRONG,
+            Self::Complete => SUCCESS,
+            Self::Failed => DANGER,
+            Self::Uncertain => WARNING,
+            _ => GRAY,
+        })
+    }
+
+    fn icon(self, id: SharedString, indeterminate: bool, cx: &App) -> AnyElement {
+        if matches!(self, Self::Running | Self::Pausing | Self::Stopping) && indeterminate {
+            return crate::motion::spinner(id, cx);
+        }
+        (match self {
+            Self::Running => icons::refresh(),
+            Self::Complete => icons::check_circle(),
+            Self::Paused | Self::Pausing => icons::pause(),
+            Self::Stopping => icons::close(),
+            Self::Failed | Self::Uncertain => icons::warning(),
+            Self::Cancelled => icons::close(),
+            _ => icons::schedule(),
+        })
+        .size(rems(20. / 14.))
+        .text_color(self.ink())
+        .into_any_element()
+    }
+}
+
+struct TaskStage {
+    id: SharedString,
+    title: String,
+    status: StageStatus,
+    detail: String,
+    fraction: Option<f32>,
+}
+
+/// AI counters describe dispatched batches, including requests still in flight.
+/// Only the worker's stage result can move these stages into completed history.
+fn task_stage_progress(
+    name: &str,
+    done: bool,
+    live: Option<&activity::Activity>,
+    current: u64,
+    total: u64,
+) -> (String, Option<f32>) {
+    if matches!(name, "llm" | "summary" | "summarize") {
+        return (
+            if !done && live.is_some() {
+                "等待服务返回结果".into()
+            } else {
+                String::new()
+            },
+            None,
+        );
+    }
+    let detail = if !done && let Some(live) = live {
+        live.detail(name, true)
+    } else if !done
+        || name.starts_with("scenes/")
+        || name == "transcribe"
+        || name.starts_with("model/")
+    {
+        activity::quantity(name, current, total)
+    } else {
+        String::new()
+    };
+    let fraction = (!done)
+        .then(|| live.and_then(|stage| stage.fraction()))
+        .flatten();
+    (detail, fraction)
+}
+
+/// A proofreading stage can close after failed requests. Published component
+/// outcomes distinguish an ended attempt from a successfully completed step.
+fn ai_stage_outcome(name: &str, outcomes: Option<&serde_json::Value>) -> Option<StageStatus> {
+    let component = match name {
+        "llm" => "proofreading",
+        "summary" | "summarize" => "summary",
+        _ => return None,
+    };
+    match outcomes?.get(component)?.get("status")?.as_str()? {
+        "succeeded" => Some(StageStatus::Complete),
+        "failed" | "partial" => Some(StageStatus::Failed),
+        _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TaskFeedback {
+    Information(&'static str),
+    Failure(String),
+}
+
+/// User-initiated stops are normal states. Keep worker diagnostics in raw logs,
+/// and retain only a short, actionable localized failure summary in the task.
+fn task_feedback(state: TaskState, error: Option<&str>) -> Option<TaskFeedback> {
+    match state {
+        TaskState::Paused => Some(TaskFeedback::Information("转换已暂停，进度已保留")),
+        TaskState::Cancelled => Some(TaskFeedback::Information("任务已取消，已保存的内容仍保留")),
+        _ => error.map(|error| {
+            let summary = error
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or_default()
+                .split(" / ")
+                .next()
+                .unwrap_or_default()
+                .trim();
+            let localized = summary
+                .chars()
+                .any(|c| ('\u{3400}'..='\u{9fff}').contains(&c));
+            TaskFeedback::Failure(if localized && summary.chars().count() <= 140 {
+                summary.into()
+            } else {
+                "转换未完成，已保存的进度仍保留。可以继续任务，或查看原始日志。".into()
+            })
+        }),
+    }
+}
+
+pub(crate) fn task_attention_summary(task: &TaskRecord) -> String {
+    if task
+        .blocked
+        .iter()
+        .any(|request| request.reason == "uncertain")
+    {
+        return task_status_label(task);
+    }
+    match task_feedback(task.state, task.error.as_deref()) {
+        Some(TaskFeedback::Information(message)) => message.into(),
+        Some(TaskFeedback::Failure(message)) => message,
+        None => task_status_label(task),
+    }
+}
+
+#[derive(IntoElement)]
+struct TaskStages {
+    rows: Vec<TaskStage>,
+}
+
+impl RenderOnce for TaskStages {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let mut view = v_flex().w_full().min_w_0().gap_3();
+        for stage in self.rows {
+            let status_id = SharedString::from(format!("{}-status", stage.id));
+            let mut row = v_flex().w_full().min_w_0().gap_2().child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_start()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        semantic_label(
+                            stage.id.clone(),
+                            stage.title,
+                            stage.status.icon(
+                                SharedString::from(format!("{}-icon", stage.id)),
+                                stage.fraction.is_none(),
+                                cx,
+                            ),
+                        )
+                        .w(rems(14.))
+                        .max_w_full()
+                        .flex_shrink_0(),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w(rems(12.))
+                            .max_w_full()
+                            .gap_3()
+                            .items_start()
+                            .child(
+                                accessible_text(status_id, stage.status.label())
+                                    .w(rems(4.5))
+                                    .flex_shrink_0()
+                                    .text_size(TEXT_BODY)
+                                    .text_color(stage.status.ink()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .text_size(TEXT_AUX)
+                                    .text_color(color(GRAY))
+                                    .child(stage.detail),
+                            ),
+                    ),
+            );
+            if let Some(fraction) = stage.fraction {
+                row = row.child(div().pl(rems(2.)).child(crate::motion::progress(
+                    SharedString::from(format!("{}-progress", stage.id)),
+                    fraction,
+                    window,
+                    cx,
+                )));
+            }
+            view = view.child(row);
+        }
+        view
+    }
+}
+
 #[derive(IntoElement)]
 struct TaskProcessingDetails {
     task_id: String,
-    lines: Vec<(SharedString, String)>,
+    rows: Vec<TaskStage>,
 }
 
 impl RenderOnce for TaskProcessingDetails {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(
-            SharedString::from(format!("attention-stage-details-state-{}", self.task_id)),
+            SharedString::from(format!("task-stage-details-state-{}", self.task_id)),
             cx,
             |_, _| false,
         );
         let open = *state.read(cx);
+        let count = self.rows.len();
         v_flex()
-            .gap_2()
+            .w_full()
+            .min_w_0()
+            .gap_3()
             .child(
                 quiet(SharedString::from(format!(
-                    "attention-stage-details-toggle-{}",
-                    self.task_id,
+                    "task-stage-details-toggle-{}",
+                    self.task_id
                 )))
                 .self_start()
-                .icon(icons::info())
-                .label(if open { "收起处理详情" } else { "处理详情" })
+                .icon(if open {
+                    icons::chevron_up()
+                } else {
+                    icons::chevron_down()
+                })
+                .label(if open {
+                    "收起处理详情".into()
+                } else {
+                    format!("处理详情 · {count} 个已完成步骤")
+                })
                 .on_click(move |_, _, cx| {
                     state.update(cx, |open, cx| {
                         *open = !*open;
@@ -93,11 +347,82 @@ impl RenderOnce for TaskProcessingDetails {
                 }),
             )
             .child(disclosure(
-                SharedString::from(format!("attention-stage-details-{}", self.task_id)),
+                SharedString::from(format!("task-stage-details-{}", self.task_id)),
                 open,
-                v_flex().gap_2().children(self.lines.into_iter().map(|(id, line)| {
-                    accessible_text(id, line).text_sm().text_color(color(GRAY))
-                })),
+                v_flex().child(TaskStages { rows: self.rows }),
+                window,
+                cx,
+            ))
+    }
+}
+
+#[derive(IntoElement)]
+struct TaskRawLogs {
+    task_id: String,
+    text: String,
+}
+
+impl RenderOnce for TaskRawLogs {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(
+            SharedString::from(format!("task-raw-log-state-{}", self.task_id)),
+            cx,
+            |_, _| false,
+        );
+        let open = *state.read(cx);
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .child(
+                quiet(SharedString::from(format!(
+                    "task-raw-log-toggle-{}",
+                    self.task_id
+                )))
+                .self_start()
+                .icon(if open {
+                    icons::chevron_up()
+                } else {
+                    icons::info()
+                })
+                .label(if open {
+                    "收起原始日志"
+                } else {
+                    "原始日志"
+                })
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |open, cx| {
+                        *open = !*open;
+                        cx.notify();
+                    });
+                }),
+            )
+            .child(disclosure(
+                SharedString::from(format!("task-raw-log-disclosure-{}", self.task_id)),
+                open,
+                v_flex().child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "task-raw-log-content-{}",
+                            self.task_id
+                        )))
+                        .w_full()
+                        .min_w_0()
+                        .max_h(rems(16.))
+                        .overflow_y_scroll()
+                        .p_4()
+                        .rounded(RADIUS_CARD)
+                        .bg(color(INSET))
+                        .child(
+                            accessible_text(
+                                SharedString::from(format!("task-raw-log-text-{}", self.task_id)),
+                                self.text,
+                            )
+                            .text_size(TEXT_AUX)
+                            .text_color(color(GRAY))
+                            .whitespace_normal(),
+                        ),
+                ),
                 window,
                 cx,
             ))
@@ -424,6 +749,7 @@ impl Desktop {
                 Ok(())
             }) {
                 Ok(()) => {
+                    self.following_conversion = None;
                     self.invalidate_source();
                     self.completed_source = None;
                     self.message = None;
@@ -663,6 +989,10 @@ impl Desktop {
                     None
                 };
                 if let Some(field) = field {
+                    if field == Field::Title {
+                        self.pending_conversion = None;
+                        self.following_conversion = None;
+                    }
                     let input = self.inputs[&field].clone();
                     window.on_next_frame(move |window, cx| {
                         input.update(cx, |input, cx| input.focus(window, cx));
@@ -695,7 +1025,11 @@ impl Desktop {
                         .into()
                 });
                 if created {
-                    self.import_result_editing = None;
+                    self.following_conversion = self
+                        .following_conversion
+                        .take()
+                        .filter(|_| self.page == Page::New)
+                        .and_then(|follow| follow.submitted(self.preview_generation, id.clone()));
                     self.generation_options_open = false;
                     self.source_editor_open = false;
                     self.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
@@ -922,6 +1256,11 @@ impl Desktop {
             Ok(())
         }) {
             Ok(()) => {
+                if intent == Intent::Run {
+                    self.follow_resumed_input_task(&id, cx);
+                } else if intent == Intent::Cancel {
+                    self.following_conversion = None;
+                }
                 if let Some(task) = self
                     .workspace
                     .as_ref()
@@ -956,6 +1295,19 @@ impl Desktop {
             }
         }
         cx.notify();
+    }
+
+    fn follow_resumed_input_task(&mut self, id: &str, cx: &App) {
+        if self.page == Page::New
+            && self
+                .current_input_task(cx)
+                .is_some_and(|task| task.id == id)
+        {
+            self.following_conversion = Some(crate::import_ui::ConversionFollow::Task {
+                id: id.to_owned(),
+                source_revision: self.preview_generation,
+            });
+        }
     }
 
     pub fn resend_uncertain(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1009,6 +1361,7 @@ impl Desktop {
                 return;
             }
         }
+        self.follow_resumed_input_task(&id, cx);
         self.start_next_task(cx);
         cx.notify();
     }
@@ -1034,6 +1387,7 @@ impl Desktop {
         match result {
             Ok(id) => {
                 self.select_task(&id, cx);
+                self.follow_resumed_input_task(&id, cx);
                 self.start_next_task(cx);
             }
             Err(error) => self.workspace_error = Some(format!("补做任务尚未建立：{error:#}")),
@@ -1056,6 +1410,7 @@ impl Desktop {
         let result = workspace.transaction(|state| state.adjust_task(&id));
         match result {
             Ok(()) => {
+                self.following_conversion = None;
                 self.invalidate_source();
                 self.restore_draft(window, cx);
                 self.page = Page::New;
@@ -1184,7 +1539,7 @@ impl Desktop {
                         if success {
                             "处理已结束，但尚未发布可读笔记。任务材料和进度已保留。"
                         } else {
-                            "生成中断，已保存的进度仍保留。打开技术详情可以查看失败步骤。"
+                            "生成中断，已保存的进度仍保留。可以继续任务，或查看原始日志。"
                         }
                         .into(),
                     );
@@ -1194,13 +1549,20 @@ impl Desktop {
         });
         match result {
             Ok(task) => {
-                if self.page == Page::New
-                    && self
-                        .completed_import_task(cx)
-                        .is_some_and(|task| task.id == id)
-                {
-                    self.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
-                }
+                let follow_completion = self
+                    .following_conversion
+                    .as_ref()
+                    .zip(self.workspace.as_ref())
+                    .and_then(|(follow, workspace)| {
+                        follow.completed_task(
+                            self.page == Page::New,
+                            self.preview_generation,
+                            workspace.state.draft()?,
+                            &workspace.state.tasks,
+                            &self.value(Field::Source, cx),
+                        )
+                    })
+                    .is_some_and(|task| task.id == id);
                 if let Some(done) = &done {
                     self.completed = Some(done.clone());
                     if let Some(root) = self
@@ -1224,6 +1586,9 @@ impl Desktop {
                         }
                     }
                     self.refresh_library(cx);
+                    if follow_completion {
+                        self.open_completed_conversion(Course::from_completed(done), cx);
+                    }
                 }
                 self.task_status = task.state.label().into();
             }
@@ -1235,7 +1600,7 @@ impl Desktop {
         cx.notify();
     }
 
-    pub fn queue_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub fn queue_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(workspace) = &self.workspace else {
             return v_flex()
                 .gap_3()
@@ -1259,7 +1624,8 @@ impl Desktop {
                 .child(
                     accessible_text("task-empty-title", "还没有生成任务")
                         .role(Role::Heading)
-                        .text_lg().font_weight(FontWeight::SEMIBOLD),
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD),
                 )
                 .child(accessible_text(
                     "task-empty-description",
@@ -1345,14 +1711,14 @@ impl Desktop {
                 .w_full()
                 .h_auto()
                 .min_h(px(0.))
-                .gap_3()
+                .gap_2()
                 .items_center()
                 .cursor_pointer()
                 .rounded(RADIUS_SMALL)
-                .p_2()
+                .p_0()
                 .child(
                     icons::task()
-                        .size_5()
+                        .size(rems(20. / 14.))
                         .flex_shrink_0()
                         .text_color(color(MUTED)),
                 )
@@ -1377,6 +1743,7 @@ impl Desktop {
                                 crate::reader_navigation::timestamp_local(task.created * 1000),
                             )
                             .text_sm()
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(color(MUTED)),
                         ),
                 )
@@ -1432,88 +1799,33 @@ impl Desktop {
                     .and_then(|w| w.state.library(&task.plan.library_id))
                     .map(|lib| lib.name.clone())
                     .unwrap_or_else(|| "保存位置暂时不可用".into());
-                details = details.child(
-                    accessible_text(
-                        SharedString::from(format!("plan-{id}")),
-                        format!(
-                            "保存到 {destination} · {}",
-                            if task.plan.source.selected_subtitle.is_some() {
-                                "使用已确认字幕"
-                            } else {
-                                "识别视频声音"
-                            }
-                        ),
-                    )
-                    .text_sm()
-                    .text_color(color(MUTED)),
-                );
-                if self.active_task.as_deref() == Some(&id) && self.job.is_some() {
-                    details = details.child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(crate::motion::spinner(
-                                SharedString::from(format!("queue-live-{id}")),
-                                cx,
-                            ))
-                            .child(
-                                accessible_text(
-                                    SharedString::from(format!("queue-live-label-{id}")),
-                                    task.state.label(),
-                                )
-                                .text_sm(),
-                            ),
-                    );
-                    for (stage, progress) in &self.progress {
-                        if let Some(fraction) = progress.fraction() {
-                            details = details.child(
-                                v_flex()
-                                    .gap_2()
-                                    .child(
-                                        accessible_text(
-                                            SharedString::from(format!(
-                                                "queue-progress-{id}-{stage}"
-                                            )),
-                                            format!(
-                                                "{} · {}",
-                                                activity::title(stage),
-                                                progress.detail(stage, true)
-                                            ),
-                                        )
-                                        .text_sm(),
-                                    )
-                                    .child(crate::motion::progress(
-                                        SharedString::from(format!("queue-bar-{id}-{stage}")),
-                                        fraction,
-                                        window,
-                                        cx,
-                                    )),
-                            );
-                        }
-                    }
-                }
-                if task.state != TaskState::Complete {
-                    for (text_id, line) in self.stage_detail_lines(task) {
-                        details = details.child(
-                            h_flex()
-                                .gap_3()
-                                .child(accessible_text(text_id, line).text_color(color(MUTED))),
-                        );
-                    }
-                }
+                let facts = v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .child(detail_row(
+                        SharedString::from(format!("task-destination-{id}")),
+                        "保存到",
+                        icons::folder_open()
+                            .size(rems(20. / 14.))
+                            .text_color(color(GRAY)),
+                        div()
+                            .text_size(TEXT_BODY)
+                            .whitespace_normal()
+                            .child(destination),
+                    ))
+                    .child(self.task_processing_facts(task));
+                let (progress, history) = self.task_progress_sections(task, cx);
+                details = details
+                    .child(facts)
+                    .when_some(progress, |view, progress| view.child(progress));
                 let uncertain: Vec<_> = task
                     .blocked
                     .iter()
                     .filter(|b| b.reason == "uncertain")
                     .collect();
-                if let Some(error) = &task.error
-                    && uncertain.is_empty()
-                {
-                    details = details.child(
-                        accessible_text(SharedString::from(format!("error-{id}")), error.clone())
-                            .role(Role::Alert)
-                            .text_color(color(DANGER)),
-                    );
+                if let Some(message) = self.task_feedback_view(task) {
+                    details = details.child(message);
                 }
                 if let Some(block) = self.uncertain_block(task, cx) {
                     details = details.child(block);
@@ -1608,6 +1920,8 @@ impl Desktop {
                             .icon(icons::tune())
                             .label(if task.state == TaskState::Complete {
                                 "调整并生成新版"
+                            } else if task.state == TaskState::Paused {
+                                "调整选项"
                             } else {
                                 "调整后重试"
                             })
@@ -1671,54 +1985,11 @@ impl Desktop {
                             })),
                     );
                 }
-                details = details.child(actions);
-                if !task.stages.is_empty()
-                    || !task.logs.is_empty()
-                    || task.error.is_some()
-                    || !uncertain.is_empty()
-                {
-                    details = details.child(
-                        control(SharedString::from(format!("logs-{id}")))
-                            .ghost()
-                            .self_start()
-                            .icon(icons::info())
-                            .label(if self.show_logs {
-                                "收起技术详情"
-                            } else {
-                                "技术详情"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_logs = !this.show_logs;
-                                cx.notify();
-                            })),
-                    );
-                    if self.show_logs {
-                        if task.state == TaskState::Complete {
-                            details =
-                                details.child(v_flex().gap_2().children(
-                                    self.stage_detail_lines(task).into_iter().map(
-                                        |(text_id, line)| {
-                                            accessible_text(text_id, line)
-                                                .text_sm()
-                                                .text_color(color(MUTED))
-                                        },
-                                    ),
-                                ));
-                        }
-                        details = details.child(
-                            accessible_text(
-                                SharedString::from(format!("log-text-{id}")),
-                                task.logs
-                                    .iter()
-                                    .chain(task.error.iter())
-                                    .chain(uncertain.iter().map(|request| &request.message))
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            )
-                            .text_sm(),
-                        );
-                    }
+                details = details
+                    .child(actions)
+                    .when_some(history, |view, history| view.child(history));
+                if let Some(logs) = self.task_log_view(task) {
+                    details = details.child(logs);
                 }
                 card = card.child(crate::motion::enter(
                     SharedString::from(format!("task-detail-{id}")),
@@ -1734,30 +2005,149 @@ impl Desktop {
         content.into_any_element()
     }
 
-    /// Stage facts shared by the queue page and the workbench task card.
-    fn stage_detail_lines(&self, task: &TaskRecord) -> Vec<(SharedString, String)> {
-        let mut stages: Vec<_> = task.stages.iter().collect();
-        stages.sort_by_key(|(name, _)| task_stage_order(name));
-        stages
+    /// Live and retained stages use the same labels, status column and icon slot.
+    fn task_stage_rows(&self, task: &TaskRecord) -> Vec<TaskStage> {
+        let active = self.active_task.as_deref() == Some(&task.id) && self.job.is_some();
+        let mut names: std::collections::BTreeSet<_> = task.stages.keys().cloned().collect();
+        if active {
+            names.extend(self.progress.keys().cloned());
+        }
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort_by_key(|name| task_stage_order(name));
+        names
             .into_iter()
-            .map(|(stage, value)| {
-                let detail = if value.status == "done" {
-                    "已完成".into()
-                } else if stage.starts_with("scenes/") {
-                    activity::quantity(stage, value.current, value.total)
-                } else if value.total > 0 {
-                    format!("{} / {}", value.current, value.total)
-                } else if self.active_task.as_deref() != Some(&task.id) || self.job.is_none() {
-                    "尚未完成，进度已保留".into()
+            .map(|name| {
+                let stored = task.stages.get(&name);
+                let live = active.then(|| self.progress.get(&name)).flatten();
+                let done = live
+                    .map(|stage| stage.done)
+                    .unwrap_or_else(|| stored.is_some_and(|stage| stage.status == "done"));
+                let outcomes = if active {
+                    self.pending_done
+                        .as_ref()
+                        .and_then(|done| done.outcomes.as_ref())
                 } else {
-                    value.detail.clone().unwrap_or_else(|| "正在处理".into())
+                    task.outcomes.as_ref()
                 };
-                (
-                    SharedString::from(format!("stage-{}-{stage}", task.id)),
-                    format!("{}：{detail}", activity::title(stage)),
-                )
+                let status = if let Some(outcome) = ai_stage_outcome(&name, outcomes) {
+                    outcome
+                } else if done {
+                    StageStatus::Complete
+                } else if active {
+                    match task.intent {
+                        Intent::Pause | Intent::Quit => StageStatus::Pausing,
+                        Intent::Cancel => StageStatus::Stopping,
+                        Intent::Run => StageStatus::Running,
+                    }
+                } else {
+                    match task.state {
+                        TaskState::Paused | TaskState::Pausing => StageStatus::Paused,
+                        TaskState::Uncertain => StageStatus::Uncertain,
+                        TaskState::Cancelled => StageStatus::Cancelled,
+                        TaskState::Queued => StageStatus::Waiting,
+                        _ => StageStatus::Failed,
+                    }
+                };
+                let current = live
+                    .map(|stage| stage.current)
+                    .or_else(|| stored.map(|stage| stage.current))
+                    .unwrap_or(0);
+                let total = live
+                    .map(|stage| stage.total)
+                    .or_else(|| stored.map(|stage| stage.total))
+                    .unwrap_or(0);
+                let (detail, fraction) = task_stage_progress(&name, done, live, current, total);
+                TaskStage {
+                    id: SharedString::from(format!("task-stage-{}-{name}", task.id)),
+                    title: activity::title(&name),
+                    status,
+                    detail,
+                    fraction,
+                }
             })
             .collect()
+    }
+
+    fn task_progress_sections(
+        &self,
+        task: &TaskRecord,
+        cx: &App,
+    ) -> (Option<Div>, Option<TaskProcessingDetails>) {
+        let (completed, current): (Vec<_>, Vec<_>) = self
+            .task_stage_rows(task)
+            .into_iter()
+            .partition(|stage| stage.status == StageStatus::Complete);
+        let active = self.active_task.as_deref() == Some(&task.id) && self.job.is_some();
+        let waiting = worker_wait_state(
+            active,
+            self.pending_done.is_some(),
+            task.intent,
+            self.progress
+                .iter()
+                .map(|(name, item)| (name.as_str(), item.done)),
+        );
+        let progress = if current.is_empty() && waiting.is_none() {
+            None
+        } else {
+            let mut view = v_flex().w_full().min_w_0().gap_3();
+            if !current.is_empty() {
+                view = view.child(TaskStages { rows: current });
+            }
+            if let Some(waiting) = waiting {
+                view = view.child(
+                    semantic_label(
+                        SharedString::from(format!("task-waiting-{}", task.id)),
+                        waiting.label(),
+                        crate::motion::spinner(
+                            SharedString::from(format!("task-waiting-spinner-{}", task.id)),
+                            cx,
+                        ),
+                    )
+                    .text_color(color(GRAY)),
+                );
+            }
+            Some(view)
+        };
+        let history = (!completed.is_empty()).then_some(TaskProcessingDetails {
+            task_id: task.id.clone(),
+            rows: completed,
+        });
+        (progress, history)
+    }
+
+    fn task_log_view(&self, task: &TaskRecord) -> Option<TaskRawLogs> {
+        let text = task
+            .logs
+            .iter()
+            .chain(task.error.iter())
+            .chain(task.blocked.iter().map(|request| &request.message))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.trim().is_empty()).then_some(TaskRawLogs {
+            task_id: task.id.clone(),
+            text,
+        })
+    }
+
+    fn task_feedback_view(&self, task: &TaskRecord) -> Option<AnyElement> {
+        if task
+            .blocked
+            .iter()
+            .any(|request| request.reason == "uncertain")
+        {
+            return None;
+        }
+        let id = SharedString::from(format!("task-feedback-{}", task.id));
+        task_feedback(task.state, task.error.as_deref()).map(|feedback| match feedback {
+            TaskFeedback::Information(message) => info_callout(id, message).into_any_element(),
+            TaskFeedback::Failure(message) => accessible_text(id, message)
+                .role(Role::Alert)
+                .text_size(TEXT_BODY)
+                .whitespace_normal()
+                .text_color(color(DANGER))
+                .into_any_element(),
+        })
     }
 
     /// Uncertain-outcome block with the explicit resend action; shared by the
@@ -1810,59 +2200,63 @@ impl Desktop {
         )
     }
 
-    /// Workbench box card for a queued/running task: live worker numbers, real
-    /// denominators only; unknown totals show the estimating label.
-    pub fn box_task_running(
-        &mut self,
-        task: &TaskRecord,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let id = task.id.clone();
-        let active = self.active_task.as_deref() == Some(&id) && self.job.is_some();
-        let queued = task.state == TaskState::Queued;
-        let waiting = worker_wait_state(
-            active,
-            self.pending_done.is_some(),
-            self.progress
-                .iter()
-                .map(|(stage, item)| (stage.as_str(), item.done)),
-        );
-        let mut card = crate::import_ui::box_section("本次任务").gap_3().child(
-            h_flex()
-                .gap_2()
-                .items_start()
-                .child(
-                    badge(if queued {
-                        BadgeKind::Neutral
-                    } else {
-                        BadgeKind::Progress
-                    })
+    fn task_heading(&self, task: &TaskRecord) -> Div {
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_3()
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .items_start()
+                    .flex_wrap()
                     .child(
-                        if waiting == Some(WorkerWait::Finishing)
-                            && task.state == TaskState::Running
-                        {
-                            "正在完成笔记"
-                        } else {
-                            task.state.label()
-                        },
+                        semantic_label(
+                            SharedString::from(format!("workbench-task-title-{}", task.id)),
+                            task.plan.title.clone(),
+                            icons::task()
+                                .size(rems(20. / 14.))
+                                .text_color(color(ACCENT_STRONG)),
+                        )
+                        .flex_1()
+                        .min_w(rems(16.))
+                        .max_w_full(),
+                    )
+                    .child(badge(task_badge_kind(task.state)).child(task_status_label(task))),
+            )
+            .child(
+                accessible_text(
+                    SharedString::from(format!("workbench-task-created-{}", task.id)),
+                    format!(
+                        "{} 加入",
+                        crate::reader_navigation::timestamp_local(task.created * 1000)
                     ),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .whitespace_normal()
-                        .text_ellipsis()
-                        .line_clamp(2)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(task.plan.title.clone()),
-                ),
-        );
-        let mut meta = format!(
-            "{} 开始",
-            crate::reader_navigation::timestamp_local(task.created * 1000)
-        );
+                .pl(rems(2.))
+                .text_size(TEXT_AUX)
+                .text_color(color(GRAY)),
+            )
+    }
+
+    fn task_processing_facts(&self, task: &TaskRecord) -> Div {
+        let source =
+            if task.plan.options.source_mode != 2 && task.plan.source.selected_subtitle.is_some() {
+                "使用视频字幕"
+            } else if task.plan.options.provider == 5 {
+                "通过所选服务识别视频声音"
+            } else {
+                "在这台电脑上识别视频声音"
+            };
+        let mut facts = v_flex().w_full().min_w_0().gap_1().child(detail_row(
+            SharedString::from(format!("task-text-source-{}", task.id)),
+            "文字来源",
+            icons::subtitles()
+                .size(rems(20. / 14.))
+                .text_color(color(GRAY)),
+            div().text_size(TEXT_BODY).whitespace_normal().child(source),
+        ));
         if (task.plan.options.llm || task.plan.options.summarize)
             && let Some(version) = task
                 .plan
@@ -1870,22 +2264,65 @@ impl Desktop {
                 .as_ref()
                 .and_then(|id| self.preferences.version(id))
         {
-            let host = version.config.host();
-            let destination = if version.config.name == host {
-                format!("「{host}」")
-            } else {
-                format!("「{}」（{host}）", version.config.name)
-            };
-            meta.push_str(&format!(
-                " · {}发送到{destination}",
-                if task.plan.options.vision {
-                    "文字与截图"
-                } else {
-                    "文字"
-                },
+            facts = facts.child(detail_row(
+                SharedString::from(format!("task-ai-destination-{}", task.id)),
+                "AI 处理",
+                icons::auto_fix()
+                    .size(rems(20. / 14.))
+                    .text_color(color(GRAY)),
+                div()
+                    .text_size(TEXT_BODY)
+                    .whitespace_normal()
+                    .child(format!(
+                        "{}发送到「{}」",
+                        if task.plan.options.vision {
+                            "文字与截图"
+                        } else {
+                            "文字"
+                        },
+                        version.config.name,
+                    )),
             ));
         }
-        card = card.child(div().text_sm().text_color(color(GRAY)).child(meta));
+        facts
+    }
+
+    pub(super) fn box_task_opening_result(&self, task: &TaskRecord, cx: &App) -> Div {
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .child(self.task_heading(task))
+            .child(crate::motion::state_enter(
+                SharedString::from(format!("task-opening-result-{}", task.id)),
+                semantic_label(
+                    SharedString::from(format!("task-opening-result-label-{}", task.id)),
+                    "笔记已生成，正在打开",
+                    crate::motion::spinner(
+                        SharedString::from(format!("task-opening-result-spinner-{}", task.id)),
+                        cx,
+                    ),
+                )
+                .text_color(color(SUCCESS)),
+                cx,
+            ))
+    }
+
+    /// The current task and its progress retain one reading position as stages change.
+    pub fn box_task_running(
+        &mut self,
+        task: &TaskRecord,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = task.id.clone();
+        let active = self.active_task.as_deref() == Some(&id) && self.job.is_some();
+        let mut card = v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .child(self.task_heading(task))
+            .child(self.task_processing_facts(task));
         if task.plan.options.source_mode == 0
             && task.plan.source.selected_subtitle.is_none()
             && matches!(
@@ -1893,154 +2330,36 @@ impl Desktop {
                 course2md::subtitle::SubtitleEvidence::Failed { .. }
             )
         {
-            card = card.child(crate::import_ui::plan_row(
+            card = card.child(info_callout(
+                SharedString::from(format!("task-subtitle-fallback-{id}")),
                 "字幕暂时不可用，已按默认设置识别视频声音",
-                false,
             ));
         }
-        let mut work = v_flex().gap_3();
-        if active {
-            if let Some(waiting) = waiting {
-                work = work.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(crate::motion::spinner(
-                            SharedString::from(format!("task-waiting-{id}")),
-                            cx,
-                        ))
-                        .child(
-                            accessible_text(
-                                SharedString::from(format!("task-waiting-label-{id}")),
-                                waiting.label(),
-                            )
-                            .text_sm()
-                            .text_color(color(GRAY)),
-                        ),
-                );
-            }
-            let mut stages: Vec<_> = self.progress.iter().collect();
-            stages.sort_by_key(|(stage, _)| activity::stage_order(stage));
-            for (stage, item) in stages.iter().filter(|(_, item)| !item.done) {
-                let mut row = v_flex().gap_2();
-                row = row.child(
-                    h_flex()
-                        .gap_3()
-                        .items_baseline()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .flex_shrink_0()
-                                .child(crate::motion::spinner(
-                                    SharedString::from(format!("stage-busy-{id}-{stage}")),
-                                    cx,
-                                ))
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(activity::title(stage)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_sm()
-                                .text_color(color(GRAY))
-                                .child(item.detail(stage, true)),
-                        ),
-                );
-                if let Some(fraction) = item.fraction() {
-                    row = row.child(crate::motion::progress(
-                        SharedString::from(format!("box-progress-{id}-{stage}")),
-                        fraction,
-                        window,
-                        cx,
-                    ));
-                }
-                work = work.child(row);
-            }
-            if stages.iter().any(|(_, item)| item.done) {
-                let details_state = window.use_keyed_state(
-                    SharedString::from(format!("task-stage-details-state-{id}")),
-                    cx,
-                    |_, _| false,
-                );
-                let details_open = *details_state.read(cx);
-                work = work
-                    .child(
-                        quiet(SharedString::from(format!("task-stage-details-toggle-{id}")))
-                            .self_start()
-                            .icon(icons::info())
-                            .label(if details_open {
-                                "收起处理详情"
-                            } else {
-                                "处理详情"
-                            })
-                            .on_click(move |_, _, cx| {
-                                details_state.update(cx, |open, cx| {
-                                    *open = !*open;
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(disclosure(
-                        SharedString::from(format!("task-stage-details-{id}")),
-                        details_open,
-                        v_flex().gap_2().children(
-                            stages.iter().filter(|(_, item)| item.done).map(|(stage, _)| {
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        icons::check_circle()
-                                            .size_4()
-                                            .text_color(color(SUCCESS)),
-                                    )
-                                    .child(
-                                        accessible_text(
-                                            SharedString::from(format!("task-stage-done-{id}-{stage}")),
-                                            format!("{} · 已完成", activity::title(stage)),
-                                        )
-                                        .text_sm()
-                                        .text_color(color(GRAY)),
-                                    )
-                            }),
-                        ),
-                        window,
-                        cx,
-                    ));
-            }
-        } else {
-            let fact = if queued {
-                let waiting = self
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| w.state.tasks.iter().position(|other| other.id == id))
-                    .map(|position| {
-                        self.workspace
-                            .as_ref()
-                            .map(|w| {
-                                w.state.tasks[..position]
-                                    .iter()
-                                    .filter(|other| !other.state.finished())
-                                    .count()
-                            })
-                            .unwrap_or(0)
-                    })
-                    .unwrap_or(0);
+        if task.state == TaskState::Queued && !active {
+            let waiting = self
+                .workspace
+                .as_ref()
+                .map(|workspace| {
+                    workspace
+                        .state
+                        .tasks
+                        .iter()
+                        .take_while(|other| other.id != id)
+                        .filter(|other| !other.state.finished())
+                        .count()
+                })
+                .unwrap_or(0);
+            card = card.child(info_callout(
+                SharedString::from(format!("task-queued-{id}")),
                 if waiting > 0 {
-                    format!("等待处理 · 前面有 {waiting} 个任务")
+                    format!("前面还有 {waiting} 个任务，轮到后会自动开始")
                 } else {
-                    "等待处理".into()
-                }
-            } else {
-                task.state.label().into()
-            };
-            work = work.child(div().text_sm().text_color(color(GRAY)).child(fact));
+                    "即将开始处理".into()
+                },
+            ));
         }
-        card = card.child(work);
+        let (progress, history) = self.task_progress_sections(task, cx);
+        card = card.when_some(progress, |view, progress| view.child(progress));
         let mut actions = h_flex().gap_2().flex_wrap();
         if matches!(
             task.state,
@@ -2077,12 +2396,19 @@ impl Desktop {
                         })),
                 );
         }
-        card = card.child(actions).child(
-            div()
-                .text_size(TEXT_AUX)
-                .text_color(color(GRAY))
-                .child("关闭窗口后任务会继续；退出应用会暂停任务。"),
-        );
+        card = card
+            .child(actions)
+            .child(div().text_size(TEXT_AUX).text_color(color(GRAY)).child(
+                if task.state == TaskState::Pausing {
+                    if task.intent == Intent::Cancel {
+                        "取消后已生成的内容仍会保留。"
+                    } else {
+                        "暂停后可以继续，已完成的步骤会保留。"
+                    }
+                } else {
+                    "关闭窗口后任务会继续；退出应用会暂停任务。"
+                },
+            ));
         let more = self
             .workspace
             .as_ref()
@@ -2102,6 +2428,10 @@ impl Desktop {
                     .child(format!("队列中还有 {more} 个任务等待处理。")),
             );
         }
+        card = card.when_some(history, |view, history| view.child(history));
+        if let Some(logs) = self.task_log_view(task) {
+            card = card.child(logs);
+        }
         card
     }
 
@@ -2109,10 +2439,6 @@ impl Desktop {
     /// uncertain outcomes, each with its real recovery action.
     pub fn box_task_attention(&mut self, task: &TaskRecord, cx: &mut Context<Self>) -> Div {
         let id = task.id.clone();
-        let kind = match task.state {
-            TaskState::Paused | TaskState::Pausing => BadgeKind::Neutral,
-            _ => BadgeKind::Warning,
-        };
         let uncertain = task
             .blocked
             .iter()
@@ -2138,31 +2464,14 @@ impl Desktop {
         } else {
             Vec::new()
         };
-        let mut card = crate::import_ui::box_section("本次任务").gap_3().child(
-            h_flex()
-                .gap_2()
-                .items_start()
-                .child(badge(kind).child(task.state.label()))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .whitespace_normal()
-                        .text_ellipsis()
-                        .line_clamp(2)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(task.plan.title.clone()),
-                ),
-        );
-        if let Some(error) = &task.error
-            && !uncertain
-        {
-            card = card.child(
-                accessible_text(SharedString::from(format!("box-error-{id}")), error.clone())
-                    .role(Role::Alert)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color(DANGER)),
-            );
+        let mut card = v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .child(self.task_heading(task))
+            .child(self.task_processing_facts(task));
+        if let Some(message) = self.task_feedback_view(task) {
+            card = card.child(message);
         }
         for (component, _, reason) in &partial_failures {
             card = card.child(
@@ -2176,6 +2485,8 @@ impl Desktop {
         if let Some(block) = self.uncertain_block(task, cx) {
             card = card.child(block);
         }
+        let (progress, history) = self.task_progress_sections(task, cx);
+        card = card.when_some(progress, |view, progress| view.child(progress));
         let mut actions = h_flex().gap_2().flex_wrap();
         if !partial_failures.is_empty() {
             for (index, (component, label, _)) in partial_failures.iter().enumerate() {
@@ -2258,7 +2569,11 @@ impl Desktop {
                 .child(
                     outline_pill(SharedString::from(format!("box-adjust-{id}")))
                         .icon(icons::tune())
-                        .label("调整后重试")
+                        .label(if task.state == TaskState::Paused {
+                            "调整选项"
+                        } else {
+                            "调整后重试"
+                        })
                         .on_click(cx.listener({
                             let id = id.clone();
                             move |this, _, window, cx| this.adjust_task(id.clone(), window, cx)
@@ -2276,50 +2591,11 @@ impl Desktop {
                         })),
                 );
         }
-        card = card.child(actions);
-        // Recovery and any resend decision come before history. Each stage fact
-        // remains available, but is not a required step before the next action.
-        let lines = self.stage_detail_lines(task);
-        if !lines.is_empty() {
-            card = card.child(TaskProcessingDetails {
-                task_id: task.id.clone(),
-                lines,
-            });
-        }
-        if !task.logs.is_empty()
-            || task.error.is_some()
-            || uncertain
-            || !partial_failures.is_empty()
-        {
-            card = card.child(
-                quiet(SharedString::from(format!("box-logs-{id}")))
-                    .self_start()
-                    .icon(icons::info())
-                    .label(if self.show_logs {
-                        "收起技术详情"
-                    } else {
-                        "技术详情"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_logs = !this.show_logs;
-                        cx.notify();
-                    })),
-            );
-            if self.show_logs {
-                card = card.child(
-                    accessible_text(
-                        SharedString::from(format!("box-log-text-{id}")),
-                        task.logs
-                            .iter()
-                            .chain(task.error.iter())
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    )
-                    .text_sm()
-                    .whitespace_normal(),
-                );
-            }
+        card = card
+            .child(actions)
+            .when_some(history, |view, history| view.child(history));
+        if let Some(logs) = self.task_log_view(task) {
+            card = card.child(logs);
         }
         card
     }
@@ -2436,7 +2712,7 @@ fn request_scope(request: &workspace::BlockedRequest) -> String {
         } else {
             "外部处理"
         };
-        format!("{name}：此历史请求未保存具体内容范围，可在技术详情中查看请求记录。")
+        format!("{name}：此历史请求未保存具体内容范围，可在原始日志中查看请求记录。")
     }
 }
 
@@ -2457,23 +2733,38 @@ fn validate_plan_config(source: &str, config: &course2md::settings::ConfigFile) 
 #[cfg(test)]
 mod tests {
     use super::{
-        PlanValidation, WorkerWait, update_draft_source_title, update_input_form,
-        validate_plan_config, validate_plan_storage, worker_wait_state,
+        PlanValidation, StageStatus, TaskFeedback, WorkerWait, ai_stage_outcome, task_feedback,
+        task_stage_progress, update_draft_source_title, update_input_form, validate_plan_config,
+        validate_plan_storage, worker_wait_state,
     };
+    use crate::workspace::{Intent, TaskState};
 
     #[test]
     fn a_closed_intermediate_stage_does_not_claim_the_task_is_finishing() {
-        assert_eq!(worker_wait_state(true, false, []), Some(WorkerWait::Starting));
         assert_eq!(
-            worker_wait_state(true, false, [("subtitle", true)]),
+            worker_wait_state(true, false, Intent::Run, []),
+            Some(WorkerWait::Starting)
+        );
+        assert_eq!(
+            worker_wait_state(true, false, Intent::Run, [("subtitle", true)]),
             Some(WorkerWait::BetweenStages),
         );
         assert_eq!(
-            worker_wait_state(true, false, [("subtitle", true), ("download", false)]),
+            worker_wait_state(
+                true,
+                false,
+                Intent::Run,
+                [("subtitle", true), ("download", false)]
+            ),
             None,
         );
         assert_eq!(
-            worker_wait_state(true, false, [("subtitle", true), ("download", true)]),
+            worker_wait_state(
+                true,
+                false,
+                Intent::Run,
+                [("subtitle", true), ("download", true)]
+            ),
             Some(WorkerWait::BetweenStages),
         );
     }
@@ -2482,21 +2773,129 @@ mod tests {
     fn finishing_uses_worker_evidence_and_stops_with_the_process() {
         let stages = [("subtitle", true), ("render", true)];
         assert_eq!(
-            worker_wait_state(true, false, stages),
+            worker_wait_state(true, false, Intent::Run, stages),
             Some(WorkerWait::Finishing),
         );
         // Reusing a complete artifact can emit Done without any new stages.
         assert_eq!(
-            worker_wait_state(true, true, []),
+            worker_wait_state(true, true, Intent::Run, []),
             Some(WorkerWait::Finishing),
         );
         // A retry/remaining active stage keeps its real progress visible.
         assert_eq!(
-            worker_wait_state(true, false, [("render", true), ("summary", false)]),
+            worker_wait_state(
+                true,
+                false,
+                Intent::Run,
+                [("render", true), ("summary", false)]
+            ),
             None,
         );
-        assert_eq!(worker_wait_state(false, true, stages), None);
-        assert_eq!(worker_wait_state(false, false, []), None);
+        assert_eq!(worker_wait_state(false, true, Intent::Run, stages), None);
+        assert_eq!(worker_wait_state(false, false, Intent::Run, []), None);
+    }
+
+    #[test]
+    fn ai_dispatch_counts_do_not_claim_received_results() {
+        for name in ["llm", "summary", "summarize"] {
+            let mut activity = crate::activity::Activity::new();
+            for (current, total) in [(0, 3), (1, 3), (3, 3), (1, 1)] {
+                activity.update(current, total, None);
+                let (detail, fraction) =
+                    task_stage_progress(name, activity.done, Some(&activity), current, total);
+                assert!(fraction.is_none());
+                assert!(!detail.contains('%'));
+                assert!(!detail.contains("收尾"));
+                assert!(!activity.done);
+            }
+            activity.done = true;
+            let (detail, fraction) = task_stage_progress(name, true, Some(&activity), 1, 1);
+            assert!(detail.is_empty());
+            assert!(fraction.is_none());
+        }
+        // Quantities that measure completed work keep their determinate progress.
+        let mut screenshots = crate::activity::Activity::new();
+        screenshots.update(2, 6, None);
+        let (detail, fraction) =
+            task_stage_progress("scenes/extract", false, Some(&screenshots), 2, 6);
+        assert!(detail.contains("2 / 6"));
+        assert_eq!(fraction, Some(2. / 6.));
+    }
+
+    #[test]
+    fn pause_and_cancel_intents_do_not_report_continued_generation() {
+        for intent in [Intent::Pause, Intent::Quit, Intent::Cancel] {
+            let expected = if intent == Intent::Cancel {
+                WorkerWait::Cancelling
+            } else {
+                WorkerWait::Pausing
+            };
+            assert_eq!(worker_wait_state(true, false, intent, []), Some(expected));
+            assert_eq!(
+                worker_wait_state(true, false, intent, [("llm", true)]),
+                Some(expected),
+            );
+            assert_eq!(
+                worker_wait_state(true, true, intent, [("render", true)]),
+                Some(expected),
+            );
+            assert_eq!(worker_wait_state(false, false, intent, []), None);
+        }
+    }
+
+    #[test]
+    fn completed_ai_attempts_use_component_results_to_classify_success() {
+        use course2md::artifact::{Outcome, Outcomes, Status};
+        let mut outcomes = Outcomes::default();
+        outcomes.proofreading = Outcome::failed("服务拒绝凭据");
+        outcomes.summary = Outcome::succeeded();
+        let value = serde_json::to_value(&outcomes).unwrap();
+        assert_eq!(
+            ai_stage_outcome("llm", Some(&value)),
+            Some(StageStatus::Failed)
+        );
+        assert_eq!(
+            ai_stage_outcome("summary", Some(&value)),
+            Some(StageStatus::Complete)
+        );
+        outcomes.proofreading.status = Status::Partial;
+        let value = serde_json::to_value(&outcomes).unwrap();
+        assert_eq!(
+            ai_stage_outcome("llm", Some(&value)),
+            Some(StageStatus::Failed)
+        );
+        outcomes.proofreading = Outcome::succeeded();
+        let value = serde_json::to_value(&outcomes).unwrap();
+        assert_eq!(
+            ai_stage_outcome("llm", Some(&value)),
+            Some(StageStatus::Complete)
+        );
+        assert_eq!(ai_stage_outcome("llm", None), None);
+        assert_eq!(ai_stage_outcome("scenes/extract", Some(&value)), None);
+    }
+
+    #[test]
+    fn user_pause_is_information_and_worker_failures_have_a_localized_summary() {
+        let paused = "生成已暂停，进度已保留 / Generation paused; progress retained";
+        assert!(matches!(
+            task_feedback(TaskState::Paused, Some(paused)),
+            Some(TaskFeedback::Information(_))
+        ));
+        assert_eq!(
+            task_feedback(
+                TaskState::NeedsAttention,
+                Some("服务拒绝凭据，请检查 API Key / Unauthorized: provider response\nraw details")
+            ),
+            Some(TaskFeedback::Failure("服务拒绝凭据，请检查 API Key".into())),
+        );
+        let Some(TaskFeedback::Failure(message)) = task_feedback(
+            TaskState::NeedsAttention,
+            Some("ERROR: request failed\nTraceback: provider transport details"),
+        ) else {
+            panic!("a failed task needs a user-facing summary");
+        };
+        assert!(!message.contains("ERROR"));
+        assert!(!message.contains("Traceback"));
     }
 
     #[test]

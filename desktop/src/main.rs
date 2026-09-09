@@ -41,7 +41,7 @@ mod workspace;
 use backend::{Completed, Course, Event, Job};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     *,
 };
 use std::{
@@ -182,7 +182,7 @@ struct Desktop {
     preview_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     preview_generation: u64,
     pending_conversion: Option<u64>,
-    import_result_editing: Option<String>,
+    following_conversion: Option<import_ui::ConversionFollow>,
     preview_workers: usize,
     preview_error: Option<String>,
     source_validation: Option<String>,
@@ -349,6 +349,11 @@ impl Desktop {
                     if field == Field::Source {
                         let value = this.value(Field::Source, cx);
                         if value != this.last_source_input {
+                            this.following_conversion = None;
+                            if this.reading && this.page == Page::New {
+                                this.read_generation = this.read_generation.wrapping_add(1);
+                                this.reading = false;
+                            }
                             if !this.prepare_next_import(&value, window, cx) {
                                 return;
                             }
@@ -455,7 +460,7 @@ impl Desktop {
             preview_cancel: None,
             preview_generation: 0,
             pending_conversion: None,
-            import_result_editing: None,
+            following_conversion: None,
             preview_workers: 0,
             preview_error: None,
             source_validation: None,
@@ -632,6 +637,9 @@ impl Desktop {
     }
 
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
+        if page != Page::New {
+            self.following_conversion = None;
+        }
         self.save_reading_position(cx);
         self.read_generation = self.read_generation.wrapping_add(1);
         self.reading = false;
@@ -1067,6 +1075,21 @@ impl Desktop {
         self.library_indexes.get(root)?.folder_key(&cached.relative)
     }
     fn open_course(&mut self, course: Course, cx: &mut Context<Self>) {
+        self.following_conversion = None;
+        self.open_course_with_conversion_guard(course, None, cx);
+    }
+
+    fn open_completed_conversion(&mut self, course: Course, cx: &mut Context<Self>) {
+        let follow = self.following_conversion.clone();
+        self.open_course_with_conversion_guard(course, follow, cx);
+    }
+
+    fn open_course_with_conversion_guard(
+        &mut self,
+        course: Course,
+        follow: Option<import_ui::ConversionFollow>,
+        cx: &mut Context<Self>,
+    ) {
         self.save_reading_position(cx);
         cx.notify();
         self.reading = true;
@@ -1092,6 +1115,14 @@ impl Desktop {
                     return;
                 }
                 this.reading = false;
+                if follow.as_ref().is_some_and(|follow| {
+                    this.following_conversion.as_ref() != Some(follow)
+                        || !matches!(follow, import_ui::ConversionFollow::Task { source_revision, .. }
+                            if *source_revision == this.preview_generation)
+                }) {
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(preview) => {
                         if let Some(workspace) = &mut this.workspace {
@@ -1119,6 +1150,12 @@ impl Desktop {
                         this.apply_course_title_aliases();
                         this.restore_reading_position(cx);
                         this.page = Page::Result;
+                        if follow.is_some() {
+                            this.following_conversion = None;
+                            if this.message.is_none() {
+                                this.message = Some("笔记已生成，已为你打开".into());
+                            }
+                        }
                     }
                     Err(error) => this.message = Some(format!("读取笔记失败：{error:#}")),
                 }

@@ -1,4 +1,4 @@
-//! A continuous source → content → destination → generation form.
+//! One start intent continues source preparation through to a readable note.
 use super::*;
 use crate::{motion, preferences::ServicePurpose, theme::*};
 use anyhow::Context as _;
@@ -69,7 +69,7 @@ fn preference_icon(icon: Icon) -> Div {
         .flex_shrink_0()
         .child(icon.size_5().text_color(color(GRAY)))
 }
-/// A consistent heading and spacing for one part of the import plan.
+/// A shared heading for related conversion options.
 pub(crate) fn box_section(label: &'static str) -> Div {
     let icon = match label {
         "所选视频" => icons::movie(),
@@ -91,10 +91,10 @@ pub(crate) fn box_section(label: &'static str) -> Div {
             ),
     )
 }
-/// One fact row inside the plan confirmation inset.
-pub(crate) fn plan_row(value: impl Into<SharedString>, warning: bool) -> Stateful<Div> {
+/// A consequence or recovery fact kept beside its action.
+pub(crate) fn conversion_fact(value: impl Into<SharedString>, warning: bool) -> Stateful<Div> {
     let value = value.into();
-    accessible_text(text_id("plan-row", &value), value)
+    accessible_text(text_id("conversion-fact", &value), value)
         .w_full()
         .min_w_0()
         .whitespace_normal()
@@ -214,45 +214,70 @@ fn completed_input_task<'a>(
         .filter(|task| task.state == workspace::TaskState::Complete && task.artifact.is_some())
 }
 
-struct PlanDialog {
-    desktop: Entity<Desktop>,
-    _observation: Subscription,
+/// A live navigation intent is separate from the saved task. Leaving the
+/// workbench ends following without cancelling source preparation or work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConversionFollow {
+    Preparing(u64),
+    Task { id: String, source_revision: u64 },
 }
 
-impl Render for PlanDialog {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sections = self.desktop.read(cx).generation_plan();
-        let available =
-            (window.bounds().size.height - window.rem_size() * 8. - px(64.)).max(px(120.));
-        v_flex()
-            .id("import-full-plan-dialog")
-            .role(Role::Dialog)
-            .aria_label("本次笔记的完整计划")
-            .min_w_0()
-            .gap_4()
-            .child(
-                v_flex()
-                    .id("import-full-plan-content")
-                    .max_h(available)
-                    .overflow_y_scroll()
-                    .min_w_0()
-                    .gap_6()
-                    .children(sections.into_iter().map(|(title, lines)| {
-                        box_section(title).children(lines.into_iter().map(|line| {
-                            accessible_text(text_id("full-plan-line", &line), line)
-                                .w_full()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .text_size(TEXT_BODY)
-                        }))
-                    })),
-            )
-            .child(
-                outline_pill("close-import-full-plan")
-                    .icon(IconName::ArrowLeft)
-                    .label("返回")
-                    .on_click(|_, window, cx| window.close_dialog(cx)),
-            )
+impl ConversionFollow {
+    pub(crate) fn submitted(self, revision: u64, id: String) -> Option<Self> {
+        matches!(self, Self::Preparing(current) if current == revision).then_some(Self::Task {
+            id,
+            source_revision: revision,
+        })
+    }
+
+    pub(crate) fn follows(&self, id: &str, revision: u64) -> bool {
+        matches!(self, Self::Task { id: followed, source_revision }
+            if followed == id && *source_revision == revision)
+    }
+
+    pub(crate) fn completed_task<'a>(
+        &self,
+        on_workbench: bool,
+        revision: u64,
+        draft: &workspace::Draft,
+        tasks: &'a [workspace::TaskRecord],
+        input: &str,
+    ) -> Option<&'a workspace::TaskRecord> {
+        let task = completed_input_task(draft, tasks, input)?;
+        (on_workbench && self.follows(&task.id, revision)).then_some(task)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConversionGate {
+    Wait,
+    Stop,
+    Submit,
+}
+
+/// Normal asynchronous stages retain the first Start intent. Only an abandoned
+/// source or an unresolved material choice ends this automatic continuation.
+fn conversion_gate(
+    requested_revision: u64,
+    current_revision: u64,
+    reading: bool,
+    has_source: bool,
+    needs_text_choice: bool,
+    environment_ready: bool,
+    existing_note: bool,
+) -> ConversionGate {
+    if requested_revision != current_revision {
+        ConversionGate::Stop
+    } else if reading {
+        ConversionGate::Wait
+    } else if !has_source {
+        ConversionGate::Stop
+    } else if needs_text_choice || !environment_ready {
+        ConversionGate::Wait
+    } else if existing_note {
+        ConversionGate::Stop
+    } else {
+        ConversionGate::Submit
     }
 }
 
@@ -260,12 +285,16 @@ impl Desktop {
     /// A start command owns preparation and submission for this source revision.
     pub fn start_conversion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_queued_message();
+        if self.reading && self.page == Page::New {
+            self.read_generation = self.read_generation.wrapping_add(1);
+            self.reading = false;
+        }
         let input = self.value(Field::Source, cx);
         if input != self.last_source_input {
             if !self.prepare_next_import(&input, window, cx) {
                 return;
             }
-            self.import_result_editing = None;
+            self.following_conversion = None;
             self.last_source_input = input.clone();
             self.invalidate_source();
         }
@@ -285,6 +314,8 @@ impl Desktop {
             self.inspect_source(window, cx);
         }
         self.pending_conversion = Some(self.preview_generation);
+        self.following_conversion = (self.page == Page::New)
+            .then_some(ConversionFollow::Preparing(self.preview_generation));
         self.advance_conversion(window, cx);
     }
 
@@ -307,43 +338,38 @@ impl Desktop {
         let Some(generation) = self.pending_conversion else {
             return;
         };
-        if generation != self.preview_generation {
-            self.pending_conversion = None;
-            return;
-        }
-        if self.preview_cancel.is_some() || self.subtitle_loading {
-            return;
-        }
-        let Some(source) = &mut self.source_preview else {
-            // A collection or source error needs an explicit source decision.
-            self.pending_conversion = None;
-            cx.notify();
-            return;
-        };
-        if automatic_subtitle_fallback(
-            source,
-            self.task_options.source_mode,
-            self.subtitle_error.as_deref(),
-        ) {
+        let reading = self.preview_cancel.is_some() || self.subtitle_loading;
+        if generation == self.preview_generation
+            && !reading
+            && let Some(source) = &mut self.source_preview
+            && automatic_subtitle_fallback(
+                source,
+                self.task_options.source_mode,
+                self.subtitle_error.as_deref(),
+            )
+        {
             self.subtitle_error = None;
             if !self.save_current_draft(cx) {
                 self.pending_conversion = None;
                 return;
             }
         }
-        if self.subtitle_attention_required() || self.environment.is_none() {
-            // Explicit subtitle mode keeps its choice/retry controls visible.
-            // Resolving that choice continues the already requested conversion.
-            cx.notify();
-            return;
+        match conversion_gate(
+            generation,
+            self.preview_generation,
+            reading,
+            self.source_preview.is_some(),
+            self.subtitle_attention_required(),
+            self.environment.is_some(),
+            self.existing_source_note().is_some(),
+        ) {
+            ConversionGate::Wait => cx.notify(),
+            ConversionGate::Stop => {
+                self.pending_conversion = None;
+                cx.notify();
+            }
+            ConversionGate::Submit => self.enqueue_current(window, cx),
         }
-        if self.existing_source_note().is_some() {
-            // Keep the existing-note/new-version decision and its cost boundary.
-            self.pending_conversion = None;
-            cx.notify();
-            return;
-        }
-        self.enqueue_current(window, cx);
     }
 
     fn subtitle_issue(
@@ -769,17 +795,6 @@ impl Desktop {
         )
     }
 
-    fn source_input_visible(&self) -> bool {
-        self.source_preview.is_none()
-            || self.source_editor_open
-            || self.preview_cancel.is_some()
-            || self
-                .workspace
-                .as_ref()
-                .and_then(|workspace| workspace.state.draft())
-                .is_some_and(|input| input.submitted_task.is_some())
-    }
-
     pub(super) fn subtitle_attention_required(&self) -> bool {
         self.subtitle_loading
             || self.subtitle_error.is_some()
@@ -827,7 +842,7 @@ impl Desktop {
                                         }),
                                 ),
                             )
-                            .when(self.source_preview.is_none(), |row| {
+                            .when(self.can_start_input(cx), |row| {
                                 row.child(self.box_bottom_row(cx))
                             }),
                     )
@@ -847,69 +862,103 @@ impl Desktop {
                         icons::bilibili().text_color(rgb(0x00a1d6)),
                     )),
             );
-        } else if self.source_input_visible() {
+        } else {
             let input = self.value(Field::Source, cx);
-            let selected = !input.is_empty();
-            let filename = PathBuf::from(&input)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .filter(|name| !name.is_empty());
-            let title = if selected {
-                filename.unwrap_or_else(|| input.clone())
-            } else {
-                "拖入本地视频".into()
-            };
-            view = view.child(
-                v_flex()
-                    .id("video-drop-zone")
-                    .gap_4()
-                    .p_6()
-                    .items_center()
-                    .rounded(RADIUS_CARD)
-                    .bg(color(INSET))
-                    .border_1()
-                    .border_color(color(CONTROL))
-                    .child(
-                        (if selected {
-                            icons::movie()
-                        } else {
+            if input.is_empty() {
+                view = view.child(
+                    v_flex()
+                        .id("video-drop-zone")
+                        .gap_4()
+                        .p_6()
+                        .items_center()
+                        .rounded(RADIUS_CARD)
+                        .bg(color(INSET))
+                        .border_1()
+                        .border_color(color(CONTROL))
+                        .child(
                             icons::file_upload()
-                        })
-                        .size(px(32.))
-                        .text_color(color(ACCENT_STRONG)),
-                    )
-                    .child(
-                        accessible_text("import-drop-instruction", title)
-                            .w_full()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_size(if selected { TEXT_TITLE } else { TEXT_BODY })
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_center(),
-                    )
-                    .child(
-                        (if input.is_empty() {
+                                .size(rems(32. / 14.))
+                                .text_color(color(ACCENT_STRONG)),
+                        )
+                        .child(
+                            accessible_text("import-drop-instruction", "拖入本地视频")
+                                .text_size(TEXT_BODY)
+                                .font_weight(FontWeight::MEDIUM),
+                        )
+                        .child(
                             primary_pill("choose-video")
-                        } else {
-                            outline_pill("choose-video")
-                        })
-                        .icon(IconName::FolderOpen)
-                        .label(if input.is_empty() {
-                            "选择视频"
-                        } else {
-                            "更换视频"
-                        })
-                        .on_click(cx.listener(|this, _, window, cx| this.pick(false, window, cx))),
-                    )
-                    .when(selected, |view| {
-                        view.child(help("也可以拖入另一个视频").w_full().text_center())
-                    })
-                    .on_drop(
-                        cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
-                            this.drop_source_files(paths.paths(), window, cx)
-                        }),
-                    ),
-            );
+                                .icon(IconName::FolderOpen)
+                                .label("选择视频")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.pick(false, window, cx)),
+                                ),
+                        )
+                        .on_drop(
+                            cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                                this.drop_source_files(paths.paths(), window, cx)
+                            }),
+                        ),
+                );
+            } else {
+                let filename = PathBuf::from(&input)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| input.clone());
+                view = view.child(
+                    h_flex()
+                        .id("selected-local-video")
+                        .w_full()
+                        .min_w_0()
+                        .items_center()
+                        .flex_wrap()
+                        .gap_3()
+                        .p_4()
+                        .rounded(RADIUS_CARD)
+                        .bg(color(SURFACE))
+                        .border_1()
+                        .border_color(color(HAIRLINE))
+                        .child(
+                            semantic_label(
+                                "selected-local-video-name",
+                                filename,
+                                icons::movie()
+                                    .size(rems(20. / 14.))
+                                    .text_color(color(ACCENT_STRONG)),
+                            )
+                            .flex_1()
+                            .min_w(rems(18.))
+                            .max_w_full(),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .flex_wrap()
+                                .items_center()
+                                .child(
+                                    outline_pill("choose-video")
+                                        .icon(IconName::FolderOpen)
+                                        .label("更换视频")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.pick(false, window, cx)
+                                        })),
+                                )
+                                .when(self.can_start_input(cx), |row| {
+                                    row.child(self.box_bottom_row(cx))
+                                }),
+                        )
+                        .on_drop(
+                            cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                                this.drop_source_files(paths.paths(), window, cx)
+                            }),
+                        ),
+                );
+                if self.source_preview.is_none()
+                    && let Some(error) = &self.source_validation
+                {
+                    view = view.child(issue(error.clone()));
+                }
+            }
         }
         if self.preview_cancel.is_some() {
             view = view.child(motion::enter(
@@ -1683,8 +1732,7 @@ impl Desktop {
                     .as_ref()
                     .is_some_and(|prompt| !prompt.trim().is_empty())
                 {
-                    ai_options =
-                        ai_options.child(help("本次校对使用自定义规则，可在计划详情中查看。"));
+                    ai_options = ai_options.child(help("本次校对使用已保存的自定义规则。"));
                 }
             }
         }
@@ -2225,239 +2273,31 @@ impl Desktop {
             .cloned()
     }
 
-    fn generation_summary(&self) -> Vec<String> {
-        let Some(source) = &self.source_preview else {
-            return Vec::new();
-        };
-        let mut lines = Vec::new();
-        let subtitle = (self.task_options.source_mode != 2)
-            .then(|| source.selected_subtitle.as_ref())
-            .flatten();
-        if self.subtitle_loading {
-            lines.push("文字来源：正在确认字幕正文".into());
-        } else if self.task_options.source_mode != 2
-            && (source.subtitle_request.is_some() || source.subtitle_read_error.is_some())
-        {
-            lines.push("文字来源：所选字幕尚未确认".into());
-        } else if let Some(subtitle) = subtitle {
-            lines.push(format!("文字来源：已读取的{}", subtitle.label));
-        } else if !self.import_uses_speech() {
-            lines.push("文字来源尚未确认".into());
-        } else if self.task_options.provider == 5 {
-            if let Some(service) = self.selected_task_service(ServicePurpose::Speech) {
-                lines.push(format!(
-                    "音频发送到{}识别",
-                    service_destination(&service.config)
-                ));
-            } else {
-                lines.push("语音识别服务尚未选择".into());
-            }
-        } else {
-            lines.push("音频在这台电脑上识别".into());
-        }
-        if self.task_options.llm || self.task_options.summarize {
-            if let Some(service) = self.selected_task_service(ServicePurpose::Ai) {
-                let content = if self.task_options.llm && self.task_options.vision {
-                    "文字和截图"
-                } else {
-                    "文字"
-                };
-                let action = match (self.task_options.llm, self.task_options.summarize) {
-                    (true, true) => "校对并生成摘要",
-                    (true, false) => "校对",
-                    _ => "生成摘要",
-                };
-                lines.push(format!(
-                    "{content}发送到{}{action}",
-                    service_destination(&service.config)
-                ));
-            } else {
-                lines.push("AI 服务尚未选择".into());
-            }
-        }
-        if let Some(workspace) = &self.workspace {
-            if let Some(draft) = workspace.state.draft() {
-                if let Some(library) = workspace.state.library(&draft.library_id) {
-                    let folder = match draft.folder {
-                        None => "未分类".into(),
-                        Some(id) => match self.library_indexes.get(&library.root) {
-                            Some(organization) => organization
-                                .folders
-                                .get(&id)
-                                .cloned()
-                                .unwrap_or_else(|| "原文件夹已不可用，请重新选择".into()),
-                            None => "正在读取文件夹".into(),
-                        },
-                    };
-                    lines.push(format!("保存到：{} / {folder}", library.name));
-                }
-            }
-        }
-        lines
-    }
-
-    fn generation_plan(&self) -> Vec<(&'static str, Vec<String>)> {
-        let Some(source) = &self.source_preview else {
-            return Vec::new();
-        };
-        let mut sections = Vec::new();
-        let mut attention = Vec::new();
-        if let Some(message) = self
-            .ordinary_preferences_submit_issue()
-            .map(|issue| issue.message)
-            .or_else(|| self.submission_issue())
-        {
-            attention.push(message);
-        }
-        if let Some(task) = self.matching_current_task() {
-            attention.push(format!(
-                "已有相同处理任务：《{}》。查看时保留该任务的名称和文件夹，当前输入与选项尚未应用。",
-                task.plan.title
-            ));
-        } else if let Some(course) = self.existing_source_note() {
-            attention.push(format!(
-                "这个视频已有笔记：《{}》。当前输入与选项可用于生成新版，原笔记继续保留。",
-                course.title
-            ));
-        }
-        if !attention.is_empty() {
-            sections.push(("需要处理", attention));
-        }
-        sections.push((
-            "所选视频",
-            vec![
-                format!("本次处理 1 个视频：{}", source.title),
-                format!("来源：{}", source.input),
-                if source.online {
-                    "下载所选视频并提取画面".into()
-                } else {
-                    "读取所选视频并提取画面，原视频留在原位置".into()
-                },
-            ],
-        ));
-        sections.push((
-            "笔记内容",
-            self.generation_summary()
-                .into_iter()
-                .filter(|line| !line.starts_with("保存到："))
-                .collect(),
-        ));
-        let mut saving = Vec::new();
-        if let Some(workspace) = &self.workspace {
-            if let Some(draft) = workspace.state.draft() {
-                saving.push(format!("笔记名称：{}", draft.title));
-                if let Some(library) = workspace.state.library(&draft.library_id) {
-                    saving.push(format!("保存位置：{}", library.root.display()));
-                }
-            }
-        }
-        saving.extend(
-            self.generation_summary()
-                .into_iter()
-                .filter(|line| line.starts_with("保存到：")),
-        );
-        let formats: Vec<_> = ["Markdown 包", "网页文件", "JSON 数据"]
-            .into_iter()
-            .enumerate()
-            .filter(|(index, _)| self.task_options.formats[*index])
-            .map(|(_, label)| label)
-            .collect();
-        if !formats.is_empty() {
-            saving.push(format!(
-                "同时导出：{}。文件位于本版笔记的 exports 文件夹。",
-                formats.join("、")
-            ));
-        }
-        if source.online && self.task_options.keep_video {
-            saving.push("保留下载的视频供离线播放".into());
-        }
-        sections.push(("名称与保存", saving));
-        let mut technical = Vec::new();
-        if self.import_uses_speech() {
-            if self.task_options.provider == 5 {
-                if let Some(service) = self.selected_task_service(ServicePurpose::Speech) {
-                    technical.push(format!("语音识别模型：{}", service.config.model));
-                    technical.push(format!("识别服务地址：{}", service.config.endpoint));
-                }
-            } else {
-                let (_, model, root) = self.import_model_request();
-                technical.push(format!(
-                    "本机识别方式：{}；模型：{model}",
-                    self.local_engine_name()
-                ));
-                technical.push(format!("模型位置：{}", root.display()));
-            }
-        }
-        if self.task_options.llm || self.task_options.summarize {
-            if let Some(service) = self.selected_task_service(ServicePurpose::Ai) {
-                technical.push(format!("AI 模型：{}", service.config.model));
-                technical.push(format!("AI 服务地址：{}", service.config.endpoint));
-            }
-            if self.task_options.llm {
-                if let Some(prompt) = self
-                    .import_base_config()
-                    .llm
-                    .prompt
-                    .filter(|prompt| !prompt.trim().is_empty())
-                {
-                    technical.push(format!("自定义校对规则：\n{prompt}"));
-                }
-            }
-        }
-        if !technical.is_empty() {
-            sections.push(("技术详情", technical));
-        }
-        sections
-    }
-
-    fn open_generation_plan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.save_current_draft(cx) {
-            return;
-        }
-        let desktop = cx.entity();
-        let content = cx.new(|cx| PlanDialog {
-            _observation: cx.observe(&desktop, |_, _, cx| cx.notify()),
-            desktop,
-        });
-        let focus = window.focused(cx);
-        window.open_dialog(cx, move |dialog, _, _| {
-            let focus = focus.clone();
-            dialog
-                .title("本次笔记的完整计划")
-                .w(px(680.))
-                .margin_top(px(24.))
-                .overlay_closable(false)
-                .close_button(false)
-                .child(content.clone())
-                .on_close(move |_, window, cx| {
-                    if let Some(focus) = &focus {
-                        focus.focus(window, cx);
-                    }
-                })
-        });
+    fn can_start_input(&self, cx: &App) -> bool {
+        (self.online || !self.value(Field::Source, cx).is_empty())
+            && self.preview_error.is_none()
+            && self.existing_source_note().is_none()
+            && self.current_input_task(cx).is_none_or(|task| {
+                matches!(
+                    task.state,
+                    workspace::TaskState::Complete | workspace::TaskState::Cancelled
+                ) && !(self.reading
+                    && self
+                        .following_conversion
+                        .as_ref()
+                        .is_some_and(|follow| follow.follows(&task.id, self.preview_generation)))
+            })
     }
 
     /// The single start command owns source preparation and conversion.
     fn box_bottom_row(&self, cx: &mut Context<Self>) -> Div {
-        h_flex().items_center().gap_3().when(
-            (self.online || !self.value(Field::Source, cx).is_empty())
-                && self.preview_error.is_none()
-                && self.source_preview.is_none(),
-            |row| {
-                row.child(
-                    primary_pill("start-conversion")
-                        .icon(icons::arrow_forward())
-                        .label("开始转换")
-                        .disabled(self.pending_conversion.is_some())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.value(Field::Source, cx).is_empty() {
-                                this.inputs[&Field::Source]
-                                    .update(cx, |state, cx| state.focus(window, cx));
-                            }
-                            this.start_conversion(window, cx);
-                        })),
-                )
-            },
+        h_flex().items_center().child(
+            primary_pill("start-conversion")
+                .track_focus(&self.import_submit_focus)
+                .icon(icons::arrow_forward())
+                .label("开始转换")
+                .disabled(self.pending_conversion.is_some())
+                .on_click(cx.listener(|this, _, window, cx| this.start_conversion(window, cx))),
         )
     }
 
@@ -2482,26 +2322,24 @@ impl Desktop {
     }
 
     fn conversion_defaults_summary(&self) -> Div {
-        let mut summary = v_flex()
-            .gap_2()
-            .child(help(match self.task_options.source_mode {
-                1 => "使用视频字幕生成笔记",
-                2 => "识别视频声音生成笔记",
-                _ => "优先使用字幕，字幕不可用时自动识别视频声音",
-            }));
+        let mut summary = vec![match self.task_options.source_mode {
+            1 => "使用视频字幕生成笔记".to_owned(),
+            2 => "识别视频声音生成笔记".to_owned(),
+            _ => "优先使用字幕，字幕不可用时自动识别视频声音".to_owned(),
+        }];
         if self.task_options.provider == 5
             && self.task_options.source_mode != 1
             && let Some(service) = self.selected_task_service(ServicePurpose::Speech)
         {
-            summary = summary.child(help(format!(
+            summary.push(format!(
                 "需要识别声音时，音频会发送到「{}」",
-                service.config.name
-            )));
+                service.config.name,
+            ));
         }
         if (self.task_options.llm || self.task_options.summarize)
             && let Some(service) = self.selected_task_service(ServicePurpose::Ai)
         {
-            summary = summary.child(help(format!(
+            summary.push(format!(
                 "{}会发送到「{}」{}",
                 if self.task_options.llm && self.task_options.vision {
                     "文字与截图"
@@ -2509,143 +2347,51 @@ impl Desktop {
                     "文字"
                 },
                 service.config.name,
-                if self.task_options.llm {
-                    "进行校对"
-                } else {
-                    "生成摘要"
-                }
-            )));
+                match (self.task_options.llm, self.task_options.summarize) {
+                    (true, true) => "进行校对并生成摘要",
+                    (true, false) => "进行校对",
+                    _ => "生成摘要",
+                },
+            ));
         }
-        summary
+        info_callout("conversion-defaults-summary", summary.join("\n"))
     }
 
-    fn submitted_import_result(&self, cx: &App) -> Option<&workspace::TaskRecord> {
+    pub(super) fn current_input_task(&self, cx: &App) -> Option<&workspace::TaskRecord> {
         let state = &self.workspace.as_ref()?.state;
-        completed_input_task(state.draft()?, &state.tasks, &self.value(Field::Source, cx))
-    }
-
-    /// The result shown in place of the form, also used to suppress its duplicate notice.
-    pub(crate) fn completed_import_task(&self, cx: &App) -> Option<&workspace::TaskRecord> {
-        let task = self.submitted_import_result(cx)?;
-        if self.import_result_editing.as_deref() == Some(task.id.as_str()) {
-            return None;
-        }
-        Some(task)
-    }
-
-    fn begin_next_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.prepare_next_import("", window, cx) {
-            return;
-        }
-        self.import_result_editing = None;
-        self.last_source_input.clear();
-        self.inputs[&Field::Source].update(cx, |input, cx| input.set_value("", window, cx));
-        self.invalidate_source();
-        self.source_editor_open = true;
-        self.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
-        if self.online {
-            self.inputs[&Field::Source].update(cx, |input, cx| input.focus(window, cx));
-        }
-        cx.notify();
-    }
-
-    fn import_result(&self, task: &workspace::TaskRecord, cx: &mut Context<Self>) -> Div {
-        let id = task.id.clone();
-        let done = Completed {
-            out_dir: task
-                .artifact
-                .clone()
-                .expect("completed import has an artifact"),
-            title: task.plan.title.clone(),
-            ..Default::default()
-        };
-        let location = self
-            .workspace
-            .as_ref()
-            .and_then(|workspace| workspace.state.library(&task.plan.library_id))
-            .map(|library| library.name.clone())
-            .unwrap_or_else(|| "原保存位置".into());
-        v_flex()
-            .pt(px(24.))
-            .gap_6()
-            .w_full()
-            .min_w_0()
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .child(icons::circle_check().size_6().text_color(color(ACCENT)))
-                    .child(
-                        accessible_text("import-complete-title", "笔记已生成")
-                            .text_size(TEXT_DISPLAY)
-                            .font_weight(FontWeight::SEMIBOLD),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .min_w_0()
-                    .child(
-                        accessible_text("import-complete-note", task.plan.title.clone())
-                            .text_size(TEXT_TITLE)
-                            .font_weight(FontWeight::MEDIUM)
-                            .whitespace_normal(),
-                    )
-                    .child(help(format!("已保存到{location}"))),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .flex_wrap()
-                    .child(
-                        primary_pill("read-completed-import")
-                            .track_focus(&self.import_submit_focus)
-                            .icon(icons::book_open())
-                            .label("阅读笔记")
-                            .loading(self.reading)
-                            .disabled(self.reading)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_course(Course::from_completed(&done), cx);
-                            })),
-                    )
-                    .child(
-                        outline_pill("convert-next-video")
-                            .icon(icons::plus())
-                            .label("转换下一个视频")
-                            .disabled(self.reading)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.begin_next_import(window, cx);
-                            })),
-                    ),
-            )
-            .child(
-                quiet("adjust-completed-import")
-                    .self_start()
-                    .icon(icons::tune())
-                    .label("调整并重新生成")
-                    .disabled(self.reading)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.import_result_editing = Some(id.clone());
-                        this.generation_options_open = true;
-                        this.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
-                        cx.notify();
-                    })),
-            )
+        submitted_input_task(state.draft()?, &state.tasks, &self.value(Field::Source, cx))
     }
 
     pub fn new_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(task) = self.completed_import_task(cx).cloned() {
-            return self.import_result(&task, cx).into_any_element();
-        }
-        let adjusting_result = self.submitted_import_result(cx).is_some();
-        if self.task_options.provider != 5
+        let opening_result = self.reading && self.following_conversion.is_some();
+        let linked_task = self.current_input_task(cx).cloned().filter(|task| {
+            (opening_result && task.state == workspace::TaskState::Complete)
+                || !task.state.finished()
+                || (task.state == workspace::TaskState::Partial
+                    && task.artifact.as_ref().is_some_and(|path| {
+                        !crate::task_ui::task_component_failures(task, path).is_empty()
+                    }))
+        });
+        if linked_task.is_none()
+            && self.task_options.provider != 5
             && (self.import_uses_speech()
                 || (self.generation_options_open && self.task_options.source_mode != 1))
         {
             let (provider, model, root) = self.import_model_request();
             self.ensure_model_diagnostic(provider, Some(&model), &root, cx);
         }
-        let show_source_input = self.source_input_visible();
+        let existing_note_decision = linked_task.is_none()
+            && self.matching_current_task().is_none()
+            && self.existing_source_note().is_some();
+        let mut input = v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .child(self.source_kind_tabs(cx))
+            .child(self.box_source_input(window, cx));
+        if existing_note_decision {
+            input = input.child(self.conversion_recovery(cx));
+        }
         let mut view = v_flex()
             .pt(px(24.))
             .gap_6()
@@ -2656,90 +2402,15 @@ impl Desktop {
                     .text_size(TEXT_DISPLAY)
                     .font_weight(FontWeight::SEMIBOLD),
             )
-            .when(adjusting_result, |view| {
-                view.child(
-                    quiet("return-import-result")
-                        .self_start()
-                        .icon(icons::arrow_left())
-                        .label("返回生成结果")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.import_result_editing = None;
-                            this.generation_options_open = false;
-                            this.scrolls[Page::New as usize].set_offset(point(px(0.), px(0.)));
-                            cx.notify();
-                        })),
-                )
-            })
-            .when(show_source_input, |view| {
-                view.child(self.source_kind_tabs(cx))
-            });
-        if show_source_input {
-            let mut source = v_flex()
-                .w_full()
-                .min_w_0()
-                .gap(px(16.))
-                .child(self.box_source_input(window, cx));
-            if !self.online {
-                source = source.child(self.box_bottom_row(cx));
-            }
-            view = view.child(motion::enter(
-                if self.online {
-                    "source-input-online"
-                } else {
-                    "source-input-local"
-                },
-                source,
-                cx,
-            ));
-            if self.source_preview.is_none()
-                && self.preview_cancel.is_none()
-                && self.source_candidates.is_empty()
-            {
-                view = view
-                    .child(self.conversion_defaults_summary())
-                    .child(self.generation_options_toggle(cx));
-                if self.generation_options_open {
-                    let options = v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap_6()
-                        .child(
-                            box_section("笔记内容").child(self.import_content_options(window, cx)),
-                        )
-                        .child(self.import_destination(cx))
-                        .child(self.import_exports(window, cx));
-                    view = view.child(motion::enter(
-                        "conversion-options-before-start",
-                        options,
-                        cx,
-                    ));
-                }
-            }
-        }
-        let linked_task = self
-            .workspace
-            .as_ref()
-            .and_then(|workspace| {
-                submitted_input_task(
-                    workspace.state.draft()?,
-                    &workspace.state.tasks,
-                    &self.value(Field::Source, cx),
-                )
-                .cloned()
-            })
-            .filter(|task| {
-                // 部分完成仍有可补做的失败项，盒内继续出示这张卡。
-                !task.state.finished()
-                    || (task.state == crate::workspace::TaskState::Partial
-                        && task.artifact.as_ref().is_some_and(|path| {
-                            !crate::task_ui::task_component_failures(task, path).is_empty()
-                        }))
-            });
+            .child(input);
         if let Some(task) = linked_task {
             let task_view = match task.state {
-                crate::workspace::TaskState::Queued
-                | crate::workspace::TaskState::Running
-                | crate::workspace::TaskState::Pausing => self.box_task_running(&task, window, cx),
+                workspace::TaskState::Complete if opening_result => {
+                    self.box_task_opening_result(&task, cx)
+                }
+                workspace::TaskState::Queued
+                | workspace::TaskState::Running
+                | workspace::TaskState::Pausing => self.box_task_running(&task, window, cx),
                 _ => self.box_task_attention(&task, cx),
             };
             view = view.child(
@@ -2750,45 +2421,54 @@ impl Desktop {
                     .border_1()
                     .border_color(color(HAIRLINE)),
             );
-        } else if let Some(source) = &self.source_preview {
-            let source_key = text_id("source-confirmation", &source.identity);
-            let options_open = self.generation_options_open;
+        } else {
             let text_required = self.subtitle_attention_required();
-            let mut content_options = box_section("笔记内容");
-            if !text_required {
-                content_options = content_options.child(self.text_source_view(window, cx));
+            if self.source_preview.is_some() && !existing_note_decision {
+                let mut source = v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_4()
+                    .child(self.box_selected_video(window, cx));
+                if text_required {
+                    source = source
+                        .child(box_section("文字来源").child(self.text_source_view(window, cx)));
+                }
+                source = source.child(self.conversion_recovery(cx));
+                view = view.child(source);
+            } else if text_required {
+                view = view.child(box_section("文字来源").child(self.text_source_view(window, cx)));
             }
-            content_options = content_options.child(self.import_content_options(window, cx));
-            let options = v_flex()
-                .w_full()
-                .min_w_0()
-                .gap_6()
-                .child(content_options)
-                .child(self.import_destination(cx))
-                .child(self.import_exports(window, cx));
-            let confirmation = v_flex()
-                .w_full()
-                .min_w_0()
-                .p_6()
-                .gap_6()
-                .bg(color(SURFACE))
-                .border_1()
-                .border_color(color(HAIRLINE))
-                .rounded(RADIUS_HERO)
-                .child(self.box_selected_video(window, cx))
-                .when(text_required, |view| {
-                    view.child(box_section("文字来源").child(self.text_source_view(window, cx)))
-                })
-                .child(self.plan_inset(cx))
-                .child(self.generation_options_toggle(cx))
-                .child(disclosure(
-                    "generation-options-body",
-                    options_open,
-                    options,
-                    window,
-                    cx,
-                ));
-            view = view.child(motion::enter(source_key, confirmation, cx));
+            if self.preview_cancel.is_none() && self.source_candidates.is_empty() {
+                let options_open = self.generation_options_open;
+                let mut content_options = box_section("笔记内容");
+                if self.source_preview.is_some() && !text_required {
+                    content_options = content_options.child(self.text_source_view(window, cx));
+                }
+                content_options = content_options.child(self.import_content_options(window, cx));
+                let options = v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_6()
+                    .child(content_options)
+                    .child(self.import_destination(cx))
+                    .child(self.import_exports(window, cx));
+                view = view
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .child(self.conversion_defaults_summary())
+                            .child(self.generation_options_toggle(cx)),
+                    )
+                    .child(disclosure(
+                        "generation-options-body",
+                        options_open,
+                        options,
+                        window,
+                        cx,
+                    ));
+            }
         }
         if let Some(recent) = self.recent_notes_section(cx) {
             view = view.child(recent);
@@ -2807,8 +2487,8 @@ impl Desktop {
         view.into_any_element()
     }
 
-    /// Plan confirmation inset at the box bottom: the facts and the one primary.
-    fn plan_inset(&mut self, cx: &mut Context<Self>) -> Div {
+    /// Only unresolved choices interrupt a submitted conversion.
+    fn conversion_recovery(&mut self, cx: &mut Context<Self>) -> Div {
         let busy = self.job.is_some()
             || self.workspace.as_ref().is_some_and(|workspace| {
                 workspace.state.tasks.iter().any(|task| {
@@ -2825,34 +2505,14 @@ impl Desktop {
             .as_ref()
             .map(|issue| issue.message.clone())
             .or_else(|| {
-                if self.source_preview.is_some() && !reading {
+                if self.source_preview.is_some() && !reading && !self.subtitle_attention_required()
+                {
                     self.submission_issue()
                 } else {
                     None
                 }
             });
-        let mut inset = v_flex()
-            .w_full()
-            .min_w_0()
-            .flex_shrink_0()
-            .gap_2()
-            .p_4()
-            .rounded(RADIUS_CARD)
-            .bg(color(INSET))
-            .border_1()
-            .border_color(color(HAIRLINE))
-            .child(
-                accessible_text("plan-inset-label", "准备生成")
-                    .text_size(TEXT_BODY)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color(GRAY)),
-            );
-        for line in self.generation_summary() {
-            let warning = line.starts_with("文字来源尚未确认")
-                || line.contains("尚未选择")
-                || line.contains("已不可用");
-            inset = inset.child(plan_row(line, warning));
-        }
+        let mut inset = v_flex().w_full().min_w_0().gap_3();
         let mut actions = h_flex().gap_2().flex_wrap();
         if let Some(issue) = preferences_issue {
             actions = actions.child(
@@ -2913,11 +2573,14 @@ impl Desktop {
                 .map(|library| library.name.clone())
                 .unwrap_or_else(|| "原保存位置".into());
             inset = inset
-                .child(plan_row(
+                .child(conversion_fact(
                     format!("已有相同处理任务：《{}》（{location}）", task.plan.title),
                     true,
                 ))
-                .child(plan_row("查看现有任务；当前输入与选项尚未应用。", false));
+                .child(conversion_fact(
+                    "查看现有任务；当前输入与选项尚未应用。",
+                    false,
+                ));
             actions = actions.child(
                 primary_pill("show-matching-task")
                     .track_focus(&self.import_submit_focus)
@@ -2927,8 +2590,7 @@ impl Desktop {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.save_current_draft(cx);
                         this.select_task(&id, cx);
-                        // M4: 任务详情并入工作台输入盒；先回到工作台。
-                        this.page = Page::New;
+                        this.navigate(Page::Task, cx);
                         cx.notify();
                     })),
             );
@@ -2937,12 +2599,10 @@ impl Desktop {
                 .course_location(&course)
                 .map(|library| library.name.clone())
                 .unwrap_or_else(|| "课程库".into());
-            inset = inset
-                .child(plan_row(
-                    format!("这个视频已有笔记：《{}》（{location}）", course.title),
-                    false,
-                ))
-                .child(plan_row("原笔记继续保留；本次更改可用于生成新版。", false));
+            inset = inset.child(info_callout(
+                "existing-note-notice",
+                format!("这个视频已有笔记，保存在「{location}」。生成新版会保留原笔记。"),
+            ));
             actions = actions.child(
                 h_flex()
                     .gap_2()
@@ -2962,59 +2622,48 @@ impl Desktop {
                             .track_focus(&self.import_submit_focus)
                             .label("生成新版笔记")
                             .disabled(reading || self.workspace.is_none() || preferences_blocked)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.enqueue_current(window, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.following_conversion =
+                                    Some(ConversionFollow::Preparing(this.preview_generation));
+                                this.enqueue_current(window, cx);
+                            })),
                     ),
             );
             if busy {
-                inset = inset.child(plan_row("新版笔记会加入队列，等待当前任务完成。", false));
-            }
-        } else {
-            if busy {
-                inset = inset.child(plan_row(
-                    "加入后等待当前任务完成，可以继续准备其他笔记。",
+                inset = inset.child(conversion_fact(
+                    "新版笔记会加入队列，等待当前任务完成。",
                     false,
                 ));
             }
-            let missing_service = self.missing_import_service();
+        } else if let Some(purpose) = self.missing_import_service() {
             actions = actions.child(
-                primary_pill("generate-note")
-                    .track_focus(&self.import_submit_focus)
-                    .self_start()
-                    .icon(if missing_service.is_some() {
-                        icons::settings()
-                    } else {
-                        icons::arrow_forward()
+                primary_pill("configure-conversion-service")
+                    .icon(icons::settings())
+                    .label(match purpose {
+                        ServicePurpose::Speech => "设置语音服务",
+                        ServicePurpose::Ai => "设置 AI 服务",
                     })
-                    .label(match missing_service {
-                        Some(ServicePurpose::Speech) => "设置语音服务",
-                        Some(ServicePurpose::Ai) => "设置 AI 服务",
-                        None if self.pending_conversion.is_some() => "继续转换",
-                        None => "开始转换",
-                    })
-                    .disabled(
-                        reading
-                            || self.workspace.is_none()
-                            || preferences_blocked
-                            || (self.pending_conversion.is_some()
-                                && self.subtitle_attention_required()),
-                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(purpose) = missing_service {
-                            this.open_task_service_editor(purpose, window, cx);
-                        } else {
-                            this.start_conversion(window, cx);
-                        }
+                        this.open_task_service_editor(purpose, window, cx);
                     })),
             );
         }
-        actions = actions.child(
-            quiet("show-import-full-plan")
-                .icon(IconName::Info)
-                .label("计划详情")
-                .on_click(cx.listener(|this, _, window, cx| this.open_generation_plan(window, cx))),
-        );
+        if self.pending_conversion.is_some()
+            && self.source_validation.is_some()
+            && !reading
+            && self.missing_import_service().is_none()
+            && self.existing_source_note().is_none()
+            && self.matching_current_task().is_none()
+        {
+            actions = actions.child(
+                outline_pill("retry-conversion-validation")
+                    .icon(icons::refresh())
+                    .label("重试转换")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.start_conversion(window, cx);
+                    })),
+            );
+        }
         if self.pending_conversion.is_some() && !reading {
             actions = actions.child(
                 quiet("cancel-pending-conversion")
@@ -3022,6 +2671,7 @@ impl Desktop {
                     .label("取消转换")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.pending_conversion = None;
+                        this.following_conversion = None;
                         cx.notify();
                     })),
             );
@@ -3043,11 +2693,107 @@ impl Desktop {
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_subtitle_fallback, completed_input_task, submitted_input_task,
-        subtitle_needs_confirmation, uses_speech,
+        ConversionFollow, ConversionGate, automatic_subtitle_fallback, completed_input_task,
+        conversion_gate, submitted_input_task, subtitle_needs_confirmation, uses_speech,
     };
     use crate::{source, workspace};
     use course2md::subtitle::{CachedSubtitle, SubtitleEvidence, SubtitleReadError};
+
+    #[test]
+    fn one_start_continues_metadata_subtitles_and_environment_without_a_confirmation_stage() {
+        // The same Start revision survives each independently completing prerequisite.
+        let start = 7;
+        for (reading, source, text_choice, environment) in [
+            (true, false, false, false),
+            (true, true, true, true),
+            (false, true, false, false),
+            (false, true, true, true),
+        ] {
+            assert_eq!(
+                conversion_gate(start, 7, reading, source, text_choice, environment, false),
+                ConversionGate::Wait,
+            );
+        }
+        assert_eq!(
+            conversion_gate(start, 7, false, true, false, true, false),
+            ConversionGate::Submit
+        );
+        // Source replacement and duplicate content require a fresh intent/choice.
+        assert_eq!(
+            conversion_gate(start, 8, true, false, false, true, false),
+            ConversionGate::Stop
+        );
+        assert_eq!(
+            conversion_gate(start, 7, false, true, false, true, true),
+            ConversionGate::Stop
+        );
+        assert_eq!(
+            conversion_gate(start, 7, false, false, false, true, false),
+            ConversionGate::Stop
+        );
+    }
+
+    #[test]
+    fn completion_opens_only_the_result_still_followed_in_the_current_input() {
+        let (draft, mut tasks) = submitted_recovery_chain();
+        let followed = ConversionFollow::Preparing(7)
+            .submitted(7, "recovery".into())
+            .unwrap();
+        assert!(
+            ConversionFollow::Preparing(7)
+                .submitted(8, "recovery".into())
+                .is_none()
+        );
+        assert!(
+            followed
+                .completed_task(true, 7, &draft, &tasks, &draft.input)
+                .is_none()
+        );
+        tasks[1].state = workspace::TaskState::Complete;
+        assert!(
+            followed
+                .completed_task(true, 7, &draft, &tasks, &draft.input)
+                .is_none()
+        );
+        tasks[1].artifact = Some("versions/recovery".into());
+        assert_eq!(
+            followed
+                .completed_task(true, 7, &draft, &tasks, &draft.input)
+                .unwrap()
+                .id,
+            "recovery"
+        );
+        assert!(
+            followed
+                .completed_task(false, 7, &draft, &tasks, &draft.input)
+                .is_none()
+        );
+        assert!(
+            followed
+                .completed_task(true, 8, &draft, &tasks, &draft.input)
+                .is_none()
+        );
+        assert!(
+            followed
+                .completed_task(true, 7, &draft, &tasks, "new video")
+                .is_none()
+        );
+        let other = ConversionFollow::Task {
+            id: "original".into(),
+            source_revision: 7,
+        };
+        assert!(
+            other
+                .completed_task(true, 7, &draft, &tasks, &draft.input)
+                .is_none()
+        );
+        tasks[1].state = workspace::TaskState::Partial;
+        assert!(
+            followed
+                .completed_task(true, 7, &draft, &tasks, &draft.input)
+                .is_none()
+        );
+    }
 
     #[test]
     fn completion_belongs_to_the_submitted_input_and_requires_a_readable_result() {
