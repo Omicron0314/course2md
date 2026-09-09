@@ -33,11 +33,18 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ffmpeg
 
+      - name: Install ffmpeg (windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress --yes
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Unit tests
         run: cargo test --lib
+
+      - name: Integration tests (task protocol, CLI, legacy import)
+        run: cargo test --test cli_ux --test legacy_import --test login_cli --test task_execution
 
       - name: Integration tests (synthetic video)
         if: runner.os != 'Windows'

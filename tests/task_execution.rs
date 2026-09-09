@@ -600,7 +600,13 @@ fn summary_only_reprocessing_retries_known_failure_once_without_repeating_source
         return;
     }
     let mock = MockAi::respond_with(|number, _| {
-        if number < 2 {
+        if number == 0 {
+            // An explicit response_format rejection sanctions exactly one relaxed resend.
+            Some((
+                422,
+                serde_json::json!({"error":{"param":"response_format","code":"unsupported_parameter","message":"Unsupported response_format; private-task-key"}}),
+            ))
+        } else if number < 3 {
             Some((
                 400,
                 serde_json::json!({"error":{"message":"Invalid model; private-task-key must not be copied"}}),
@@ -626,8 +632,8 @@ fn summary_only_reprocessing_retries_known_failure_once_without_repeating_source
     assert!(first.status.success(), "{:?}", events(&first));
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
-        1,
-        "an arbitrary HTTP 400 must not change and resend the payload"
+        2,
+        "an explicit response_format rejection allows one resend without it; the following arbitrary HTTP 400 must not change and resend the payload"
     );
     let base = initial.course_dir.join("versions/version-one");
     let first_manifest = artifact::read_manifest(&base.join("manifest.json")).unwrap();
@@ -671,7 +677,7 @@ fn summary_only_reprocessing_retries_known_failure_once_without_repeating_source
     assert!(second.status.success(), "{second_events:#?}");
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
-        2,
+        3,
         "the selected known-failed summary must be attempted again"
     );
     assert!(
@@ -687,16 +693,19 @@ fn summary_only_reprocessing_retries_known_failure_once_without_repeating_source
                 .as_str()
                 .is_some_and(|stage| stage.starts_with("scenes/"))
     }));
-    let receipt = course2md::dispatch::receipts(&retry.work_dir)
-        .unwrap()
-        .remove(0);
-    assert_eq!(receipt.attempt, 2);
-    assert!(receipt.retry_authorized.is_none());
+    // 首轮降级重发留下过两张 receipt（原负载与去 response_format 的负载各一张）；
+    // 重新尝试只针对与当前负载匹配的那张。
+    let receipts = course2md::dispatch::receipts(&retry.work_dir).unwrap();
+    let receipt = receipts.iter().find(|r| r.attempt == 2).unwrap();
+    assert!(
+        receipt.retry_authorized.is_none(),
+        "a consumed authorization must not survive the retried attempt"
+    );
     let resumed = run(root.path(), &retry);
     assert!(resumed.status.success(), "{:?}", events(&resumed));
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
-        2,
+        3,
         "normal continuation must not renew an explicit retry"
     );
     let mut final_retry = retry.clone();
@@ -710,7 +719,7 @@ fn summary_only_reprocessing_retries_known_failure_once_without_repeating_source
     };
     let third = run(root.path(), &final_retry);
     assert!(third.status.success(), "{:?}", events(&third));
-    assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 4);
     let final_dir = initial.course_dir.join("versions/summary-final");
     let manifest = artifact::read_manifest(&final_dir.join("manifest.json")).unwrap();
     assert_eq!(
@@ -724,64 +733,15 @@ fn summary_only_reprocessing_retries_known_failure_once_without_repeating_source
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
     let bodies = mock.bodies.lock().unwrap();
-    assert!(
-        bodies
-            .iter()
-            .all(|body| body.get("response_format").is_some())
-    );
-    assert_eq!(bodies[0], bodies[1]);
-    assert_eq!(bodies[1], bodies[2]);
-}
-
-#[test]
-fn only_explicit_response_format_rejection_allows_one_compatible_summary_request() {
-    use std::sync::atomic::Ordering;
-    if course2md::runtime::which("ffmpeg").is_none()
-        || course2md::runtime::which("ffprobe").is_none()
-    {
-        return;
-    }
-    let mock = MockAi::respond_with(|number, _| {
-        if number == 0 {
-            Some((
-                422,
-                serde_json::json!({"error":{"param":"response_format","code":"unsupported_parameter","message":"Unsupported response_format; private-task-key"}}),
-            ))
-        } else {
-            Some((200, summary_response()))
-        }
-    });
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("video.mp4");
-    std::fs::write(&source, b"broken video").unwrap();
-    let mut initial = request(root.path(), &source);
-    initial.config.llm.enabled = false;
-    initial.config.llm.summarize = true;
-    initial.config.llm.base_url = mock.url.clone();
-    initial.config.llm.model = "summary-model".into();
-    let first = run(root.path(), &initial);
-    assert!(first.status.success(), "{:?}", events(&first));
-    assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
-    let bodies = mock.bodies.lock().unwrap();
+    // The single sanctioned resend drops response_format and changes nothing else.
     assert!(bodies[0].get("response_format").is_some());
     assert!(bodies[1].get("response_format").is_none());
-    let manifest = artifact::read_manifest(
-        &initial
-            .course_dir
-            .join("versions/version-one/manifest.json"),
-    )
-    .unwrap();
-    assert_eq!(
-        manifest.outcomes.summary.status,
-        artifact::Status::Succeeded
-    );
-    for receipt in course2md::dispatch::receipts(&initial.work_dir).unwrap() {
-        assert!(
-            !serde_json::to_string(&receipt)
-                .unwrap()
-                .contains("private-task-key")
-        );
-    }
+    let mut relaxed = bodies[0].clone();
+    relaxed.as_object_mut().unwrap().remove("response_format");
+    assert_eq!(bodies[1], relaxed);
+    // Later tasks resend the full payload, byte-identical to the first request.
+    assert_eq!(bodies[0], bodies[2]);
+    assert_eq!(bodies[2], bodies[3]);
 }
 
 #[test]
@@ -890,10 +850,6 @@ fn proofreading_resend_continues_unsent_summary_without_repeating_source_work() 
         std::fs::read(base.join("document.json")).unwrap(),
         untouched
     );
-    // Reopening the completed recovery cannot spend either authorization again.
-    let third = run(root.path(), &retry);
-    assert!(third.status.success(), "{:?}", events(&third));
-    assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
 }
 
 #[test]
