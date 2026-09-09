@@ -1,4 +1,4 @@
-//! Pure reader identities, source links, search and proportional reading anchors.
+//! Reader identities, source links, search, proportional anchors and display timestamps.
 use std::{
     collections::BTreeMap,
     ops::Range,
@@ -172,6 +172,35 @@ pub fn text_matches(text: &str, query: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
+/// Display an immutable UTC instant using the system timezone's rules for that
+/// date, rather than applying today's offset to every historical timestamp.
+pub fn timestamp_local(milliseconds: u64) -> String {
+    timestamp_in_timezone(milliseconds, &chrono::Local)
+}
+
+fn timestamp_in_timezone<Tz: chrono::TimeZone>(milliseconds: u64, timezone: &Tz) -> String {
+    use chrono::Datelike;
+
+    let display = || {
+        let instant = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            i64::try_from(milliseconds).ok()?,
+        )?;
+        // Keep ordinary display years bounded before adding a timezone offset;
+        // malformed persisted values must not overflow or invent a nearby date.
+        if !(1..=9999).contains(&instant.year()) {
+            return None;
+        }
+        let local = instant.with_timezone(timezone).naive_local();
+        if !(1..=9999).contains(&local.year()) {
+            return None;
+        }
+        Some(local.format("%Y-%m-%d %H:%M").to_string())
+    };
+    display().unwrap_or_else(|| "时间未知".into())
+}
+
+/// Explicit UTC formatting remains available for technical evidence.
+#[allow(dead_code)]
 pub fn timestamp_utc(milliseconds: u64) -> String {
     // Gregorian civil date from days since Unix epoch; constant time for untrusted dates.
     let seconds = (milliseconds / 1000).min(253402300799);
@@ -277,5 +306,37 @@ mod tests {
     fn creation_time_has_a_real_calendar_date_and_explicit_timezone() {
         assert_eq!(timestamp_utc(0), "1970-01-01 00:00 UTC");
         assert_eq!(timestamp_utc(1709164800000), "2024-02-29 00:00 UTC");
+    }
+    #[test]
+    fn local_display_rolls_dates_across_year_and_leap_day_boundaries() {
+        let singapore = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let pacific = chrono::FixedOffset::west_opt(8 * 3600).unwrap();
+        let milliseconds = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .timestamp_millis() as u64
+        };
+        assert_eq!(
+            timestamp_in_timezone(milliseconds("2023-12-31T20:30:00Z"), &singapore),
+            "2024-01-01 04:30"
+        );
+        assert_eq!(
+            timestamp_in_timezone(milliseconds("2024-02-28T20:30:00Z"), &singapore),
+            "2024-02-29 04:30"
+        );
+        assert_eq!(timestamp_in_timezone(0, &pacific), "1969-12-31 16:00");
+        assert_eq!(
+            timestamp_in_timezone(milliseconds("2024-03-01T00:15:00Z"), &pacific),
+            "2024-02-29 16:15"
+        );
+    }
+    #[test]
+    fn local_display_preserves_non_hour_offsets_and_rejects_invalid_dates() {
+        let nepal = chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60).unwrap();
+        assert_eq!(timestamp_in_timezone(0, &nepal), "1970-01-01 05:45");
+        assert_eq!(timestamp_in_timezone(u64::MAX, &nepal), "时间未知");
+        assert_eq!(timestamp_in_timezone(253402300799999, &nepal), "时间未知");
+        // This is presentation only; explicit UTC output retains its old meaning.
+        assert_eq!(timestamp_utc(0), "1970-01-01 00:00 UTC");
     }
 }

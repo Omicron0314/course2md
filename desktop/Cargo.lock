@@ -1399,6 +1399,7 @@ version = "2.0.0-alpha.1"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "course2md",
  "embed-resource",
  "gpui",

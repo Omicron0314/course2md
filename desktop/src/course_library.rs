@@ -1136,7 +1136,7 @@ impl Desktop {
                     .unwrap_or(0),
             ),
         };
-        let stamp = crate::reader_navigation::timestamp_utc(ms);
+        let stamp = crate::reader_navigation::timestamp_local(ms);
         let date = stamp.get(..10).unwrap_or(&stamp).to_owned();
         let mut meta = match revision {
             Some(revision) => format!("版本 {revision} · {date}"),
