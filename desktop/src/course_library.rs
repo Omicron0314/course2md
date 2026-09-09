@@ -13,6 +13,7 @@ struct LibraryLayout {
     chip_max: Pixels,
     card_chip_max: Pixels,
     compact: bool,
+    stacked: bool,
 }
 
 #[derive(Clone)]
@@ -479,13 +480,14 @@ impl Desktop {
         let rem = f32::from(window.rem_size());
         let content = crate::views::shell_content_width(Page::Library, window);
         // gap_4 is one rem, and card padding/menu spacing scales with that rem.
-        let columns = ((content + rem) / (16. * rem + rem)).floor().max(1.) as usize;
+        let columns = ((content + rem) / (20. * rem + rem)).floor().max(1.) as usize;
         let card_w = (content - rem * columns.saturating_sub(1) as f32) / columns as f32;
         let layout = LibraryLayout {
             columns,
             chip_max: px(f32::min(224. * scale, 0.26 * content)),
             card_chip_max: px((card_w - 5. * rem - 2.).max(48. * scale)),
             compact: content < 336. * scale,
+            stacked: content < 56. * rem + 24.,
         };
         let query = self.value(Field::Search, cx).to_lowercase();
         let Some(all_access) = self.cached_library_access() else {
@@ -1122,8 +1124,7 @@ impl Desktop {
             .child(controls)
     }
 
-    /// Note meta line, mirroring docs/ux-mock: 版本 N · 生成日期；未完成的补记一笔。
-    /// 平台/作者/时长不在 Course 索引里，补数据是数据接线活，超出本次渲染复刻范围。
+    /// Existing index data gives similarly named notes useful distinguishing detail.
     fn course_meta(course: &Course) -> String {
         let (revision, ms) = match &course.manifest {
             Some(manifest) => (Some(manifest.revision), manifest.created_at_ms),
@@ -1138,14 +1139,10 @@ impl Desktop {
         };
         let stamp = crate::reader_navigation::timestamp_local(ms);
         let date = stamp.get(..10).unwrap_or(&stamp).to_owned();
-        let mut meta = match revision {
+        match revision {
             Some(revision) => format!("版本 {revision} · {date}"),
             None => date,
-        };
-        if course.manifest.as_ref().is_some_and(|m| m.partial) {
-            meta.push_str(" · 部分处理未完成");
         }
-        meta
     }
 
     /// Note collections, mirroring docs/ux-mock `noteRow`/`noteCard`: white SURFACE
@@ -1165,67 +1162,68 @@ impl Desktop {
                 .gap_2()
                 .children(courses.iter().map(|(index, course)| {
                     let mut read = h_flex().w_full().min_w_0().items_center().gap(px(12.));
-                    if let Some(thumbnail) = &course.thumbnail {
-                        read = read.child(
-                            img(thumbnail.clone())
-                                .w(rems(6.857))
-                                .h(rems(3.857))
-                                .object_fit(ObjectFit::Cover)
-                                .rounded(RADIUS_SMALL)
-                                .flex_shrink_0(),
-                        );
+                    if !layout.stacked {
+                        if let Some(thumbnail) = &course.thumbnail {
+                            read = read.child(
+                                img(thumbnail.clone())
+                                    .w(rems(6.857))
+                                    .h(rems(3.857))
+                                    .object_fit(ObjectFit::Cover)
+                                    .rounded(RADIUS_SMALL)
+                                    .flex_shrink_0(),
+                            );
+                        }
                     }
                     read = read.child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .gap_1()
+                            .gap_2()
                             .child(
                                 div()
                                     .w_full()
                                     .whitespace_normal()
-                                    .text_ellipsis()
-                                    .line_clamp(2)
+                                    .when(!layout.stacked, |title| {
+                                        title.text_ellipsis().line_clamp(2)
+                                    })
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(course.title.clone()),
                             )
                             .child(
                                 div()
                                     .w_full()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
+                                    .whitespace_normal()
                                     .text_size(TEXT_AUX)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(color(GRAY))
-                                    .child(Self::course_meta(course)),
+                                    .child(format!(
+                                        "{} · {}",
+                                        Self::course_meta(course),
+                                        course.description()
+                                    )),
                             ),
                     );
-                    h_flex()
-                        .w_full()
+                    let read = control(("read-course", *index))
+                        .ghost()
+                        .flex_1()
+                        .min_w_0()
+                        .h_auto()
+                        .p_0()
+                        .justify_start()
+                        .when(layout.stacked, |button| button.w_full().flex_none())
+                        .accessibility_label(format!("阅读 {}", course.title))
+                        .tooltip("阅读笔记")
+                        .child(read)
+                        .on_click({
+                            let course = course.clone();
+                            cx.listener(move |this, _, _, cx| this.open_course(course.clone(), cx))
+                        });
+                    let actions = h_flex()
+                        .min_w_0()
+                        .flex_shrink_0()
                         .items_center()
-                        .p_4()
-                        .gap_4()
-                        .bg(color(SURFACE))
-                        .border_1()
-                        .border_color(color(CARD_LINE))
-                        .rounded(RADIUS_CARD)
-                        .child(
-                            control(("read-course", *index))
-                                .ghost()
-                                .flex_1()
-                                .min_w_0()
-                                .h_auto()
-                                .p_0()
-                                .justify_start()
-                                .accessibility_label(format!("阅读 {}", course.title))
-                                .tooltip("阅读笔记")
-                                .child(read)
-                                .on_click({
-                                    let course = course.clone();
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.open_course(course.clone(), cx)
-                                    })
-                                }),
-                        )
+                        .gap_2()
+                        .when(layout.stacked, |row| row.w_full().flex_wrap())
                         .when(show_chip, |row| {
                             row.child(self.folder_chip(
                                 Some(course.dir.clone()),
@@ -1235,10 +1233,13 @@ impl Desktop {
                                 cx,
                             ))
                         })
+                        .when(layout.stacked, |row| row.child(div().flex_1()))
                         .child(
                             outline_pill(("read-course-action", *index))
                                 .icon(IconName::BookOpen)
-                                .when(!layout.compact, |button| button.label("阅读"))
+                                .when(!layout.compact || layout.stacked, |button| {
+                                    button.label("阅读")
+                                })
                                 .accessibility_label(format!("阅读 {}", course.title))
                                 .tooltip("阅读笔记")
                                 .on_click({
@@ -1248,7 +1249,20 @@ impl Desktop {
                                     })
                                 }),
                         )
-                        .child(self.course_actions(course.clone(), *index, cx))
+                        .child(self.course_actions(course.clone(), *index, cx));
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .items_center()
+                        .p_4()
+                        .gap_4()
+                        .when(layout.stacked, |row| row.flex_col().items_start())
+                        .bg(color(SURFACE))
+                        .border_1()
+                        .border_color(color(CARD_LINE))
+                        .rounded(RADIUS_CARD)
+                        .child(read)
+                        .child(actions)
                 }));
             return v_flex().w_full().child(crate::motion::enter(
                 ("library-list", collection_id),
@@ -1298,6 +1312,7 @@ impl Desktop {
                         }
                         card.child(
                             v_flex()
+                                .flex_1()
                                 .w_full()
                                 .min_w_0()
                                 .p_4()
@@ -1314,8 +1329,9 @@ impl Desktop {
                                             div()
                                                 .w_full()
                                                 .whitespace_normal()
-                                                .text_ellipsis()
-                                                .line_clamp(2)
+                                                .when(!layout.stacked, |title| {
+                                                    title.text_ellipsis().line_clamp(2)
+                                                })
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .child(course.title.clone()),
                                         )
@@ -1334,18 +1350,18 @@ impl Desktop {
                                         .child(
                                             div()
                                                 .w_full()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
+                                                .whitespace_normal()
                                                 .text_size(TEXT_AUX)
+                                                .font_weight(FontWeight::NORMAL)
                                                 .text_color(color(GRAY))
                                                 .child(Self::course_meta(course)),
                                         )
                                         .child(
                                             div()
                                                 .w_full()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
+                                                .whitespace_normal()
                                                 .text_size(TEXT_AUX)
+                                                .font_weight(FontWeight::NORMAL)
                                                 .text_color(color(GRAY))
                                                 .child(course.description()),
                                         )
@@ -1355,6 +1371,7 @@ impl Desktop {
                                                 .min_w_0()
                                                 .gap_2()
                                                 .items_center()
+                                                .flex_wrap()
                                                 .child(self.folder_chip(
                                                     Some(course.dir.clone()),
                                                     index + 1,
@@ -1372,6 +1389,7 @@ impl Desktop {
                                 )
                                 .child(
                                     outline_pill(("read-card-action", *index))
+                                        .mt_auto()
                                         .w_full()
                                         .icon(IconName::BookOpen)
                                         .label("阅读笔记")
@@ -1396,11 +1414,7 @@ impl Desktop {
     /// Workbench "最近笔记": attention tasks first, then recent readable notes.
     /// An empty library renders nothing at all (the hero plus box are the empty state).
     pub fn recent_notes_section(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let linked = self
-            .workspace
-            .as_ref()
-            .and_then(|w| w.state.draft())
-            .and_then(|d| d.submitted_task.clone());
+        let linked = self.current_input_task(cx).map(|task| task.id.clone());
         let mut attention: Vec<_> = self
             .workspace
             .as_ref()
@@ -1497,11 +1511,7 @@ impl Desktop {
                                     .text_color(color(GRAY))
                                     .whitespace_nowrap()
                                     .text_ellipsis()
-                                    .child(
-                                        task.error
-                                            .clone()
-                                            .unwrap_or_else(|| task.state.label().into()),
-                                    ),
+                                    .child(crate::task_ui::task_attention_summary(&task)),
                             ),
                     )
                     .child(
