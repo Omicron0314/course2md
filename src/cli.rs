@@ -13,12 +13,12 @@ pub const QUICK_START: &str = "快速开始 / Quick start:
   --transcript-source asr       强制语音识别 / Speech recognition only
 
 下一步 / Next steps:
-  course2md --login bilibili   扫码登录 / Log in with a QR code
-  course2md --logout bilibili  清除登录 / Remove saved login
-  course2md doctor          检查依赖与配置 / Check dependencies and settings
-  course2md config init     生成配置模板 / Create a configuration template
-  course2md llm setup       配置可选的 AI 润色 / Set up optional AI proofreading
-  course2md summarize ./notes  为已有笔记生成总结 / Summarize existing notes
+  course2md --login bilibili    扫码登录 / Log in with a QR code
+  course2md --logout bilibili   清除登录 / Remove saved login
+  course2md doctor              检查依赖与配置 / Check dependencies and settings
+  course2md config init         生成配置模板 / Create a configuration template
+  course2md llm setup           配置可选的 AI 润色 / Set up optional AI proofreading
+  course2md summarize ./notes   为已有笔记生成总结 / Summarize existing notes
 
 交互终端首次转换会引导配置；脚本请显式传入所需参数。
 First conversion in a terminal offers setup; scripts should pass options explicitly.
@@ -259,6 +259,7 @@ pub struct RunOpts {
 #[derive(Subcommand)]
 pub enum Command {
     /// 执行已保存的任务；从标准输入读取完整 JSON 参数 / Execute a saved task from stdin JSON
+    #[command(hide = true)]
     RunTask,
     /// 管理 gpu/cpu 本地识别模型 / Manage gpu/cpu speech models
     Models {
@@ -301,6 +302,9 @@ pub struct SummarizeArgs {
     /// 另存独立总结到此目录 / Also export standalone summaries to this directory
     #[arg(short = 'o', long)]
     pub out: Option<PathBuf>,
+    /// 静默模式，仅报告错误 / Quiet mode: report errors only
+    #[arg(short, long)]
+    pub quiet: bool,
 }
 
 #[derive(Subcommand)]

@@ -11,7 +11,7 @@
 use crate::timeline::{Section, TranscriptEvent};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
@@ -41,7 +41,7 @@ pub struct LlmSettings {
     pub vision: bool,
     /// 独立生成视频总结并写入笔记（不依赖校对 enabled）
     pub summarize: bool,
-    /// 润色并发数（Section 间相互独立；自建网关/代理可调高）
+    /// 润色并发数（chunk 间相互独立；自建网关/代理可调高）
     pub concurrency: usize,
 }
 
@@ -79,20 +79,26 @@ pub fn validate(s: &LlmSettings) -> Result<()> {
     if s.model.trim().is_empty() {
         bail!("未配置 LLM 模型。 / LLM model is missing. Run: course2md llm setup");
     }
-    let endpoint = url::Url::parse(s.base_url.trim()).context(
-        "服务地址无效，请使用完整的 HTTP(S) URL。 / Invalid base URL; use a complete HTTP(S) URL.",
-    )?;
-    anyhow::ensure!(
-        matches!(endpoint.scheme(), "http" | "https") && endpoint.host_str().is_some(),
-        "服务地址无效，请使用完整的 HTTP(S) URL。 / Invalid base URL; use a complete HTTP(S) URL."
-    );
+    crate::config::ensure_http_url(&s.base_url)?;
     Ok(())
 }
 
-/// LLM 润色默认并发数（Section 间相互独立；可经 [llm] concurrency 调整）。
+/// LLM 润色默认并发数（chunk 间相互独立；可经 [llm] concurrency 调整）。
 const DEFAULT_CONCURRENCY: usize = 8;
+/// 润色并发上限：再高对端点限流没有好处，只放大 429 风险
+const MAX_CONCURRENCY: usize = 16;
 /// LLM 请求最大尝试次数（1 次原始 + 重试）。
 const MAX_ATTEMPTS: usize = 3;
+
+/// 润色/总结共享的 HTTP agent：整个任务复用同一 TCP+TLS 连接池，
+/// 不再每请求新建（对照 asr.rs 的共享 client 模式）。
+/// Agent clone 共享底层连接池，可安全传入 spawn_blocking 任务。
+pub(crate) fn chat_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(300))
+        .redirects(0)
+        .build()
+}
 
 /// chat/completions 公共参数：温度固定 0（校对/总结都要求确定性输出）。
 pub(crate) const CHAT_TEMPERATURE: f64 = 0.0;
@@ -120,16 +126,6 @@ pub(crate) fn chat_body(
     })
 }
 
-/// 对已合并的 Section 做润色（在 merge 之后调用）。
-/// - 失败批次保留原文（润色失败不阻断转换）
-/// - vision=true 时附对应截图；服务失败不自动改为另一种请求。
-/// - 模型对纯语气词条目返回空 text → 该条被删除（issue #5）
-/// - Section 间真并发（worker 池抢占式取活，无波次队头阻塞）；
-///   已确认响应持久复用；未确认响应不自动重发。
-pub fn polish_sections(sections: &mut [Section], frames_root: &Path, s: &LlmSettings) {
-    let _ = polish_sections_report(sections, frames_root, s);
-}
-
 #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PolishReport {
     pub attempted: usize,
@@ -137,6 +133,13 @@ pub struct PolishReport {
     pub failed: usize,
 }
 
+/// 对已合并的 Section 做润色（在 merge 之后调用）。
+/// - 失败批次保留原文（润色失败不阻断转换）
+/// - vision=true 时附对应截图（每节只读盘 + base64 一次）；服务失败不自动改为另一种请求。
+/// - 模型对纯语气词条目返回空 text → 该条被删除（issue #5）
+/// - 队列单元为 chunk（同一 Section 内的 chunk 也相互独立，单节长视频不再退化为
+///   纯串行）；worker 池抢占式取活，无波次队头阻塞；已确认响应持久复用；
+///   未确认响应不自动重发。
 pub fn polish_sections_report(
     sections: &mut [Section],
     frames_root: &Path,
@@ -161,10 +164,29 @@ pub fn polish_sections_report(
     let pb = crate::progress::Bar::new("llm", total as u64)
         .with_template("{spinner:.green} llm {pos}/{len} [{bar:32.cyan/blue}] {msg}");
     let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let workers = s.concurrency.clamp(1, 16);
-    // worker 池：共享迭代器抢占式取 Section，谁先完成谁取下一个
-    // （旧波次实现里最慢的 Section 会挡住整队）
-    let queue = std::sync::Mutex::new(sections.iter_mut());
+    let workers = s.concurrency.clamp(1, MAX_CONCURRENCY);
+    // 整个任务共享一个 agent（连接池复用 TCP+TLS），不再每请求新建
+    let agent = chat_agent();
+    // vision：同一 Section 的多 chunk 共用一张截图，只读盘 + base64 一次
+    //（数 MB 大，逐 chunk 重复编码太贵）；所需截图不可读的 Section 整体保留原文。
+    // 空 Section 不读图也不告警（其 chunks 迭代本就不会产生任务）。
+    let images: Vec<Option<Option<String>>> = sections
+        .iter()
+        .map(|sec| {
+            if sec.speech.is_empty() {
+                Some(None)
+            } else {
+                section_image_b64(s, frames_root, sec, &warned)
+            }
+        })
+        .collect();
+    // worker 池：共享迭代器抢占式取 chunk，谁先完成谁取下一个
+    let queue = std::sync::Mutex::new(
+        sections
+            .iter_mut()
+            .enumerate()
+            .flat_map(|(si, sec)| sec.speech.chunks_mut(BATCH).map(move |chunk| (si, chunk))),
+    );
     let succeeded = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
         for _ in 0..workers {
@@ -172,8 +194,13 @@ pub fn polish_sections_report(
                 loop {
                     let next = queue.lock().map(|mut it| it.next());
                     match next {
-                        Ok(Some(sec)) => {
-                            let count = polish_section(s, frames_root, sec, &pb, &warned);
+                        Ok(Some((si, chunk))) => {
+                            let Some(image_b64) = images[si].as_ref() else {
+                                continue; // 截图不可用：整节保留原文（同原实现的提前返回）
+                            };
+                            pb.inc(1);
+                            let count =
+                                polish_chunk(&agent, s, chunk, image_b64.as_deref(), &warned);
                             succeeded.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
                         }
                         Ok(None) => break,
@@ -183,6 +210,11 @@ pub fn polish_sections_report(
             });
         }
     });
+    // 删除「成功润色为空串」的纯语气词条目（全部 chunk 完成后统一过滤；
+    // 截图不可用而跳过的 Section 未经修改，retain 对其是 no-op）
+    for sec in sections.iter_mut() {
+        sec.speech.retain(|e| !e.text.trim().is_empty());
+    }
     pb.finish();
     let succeeded = succeeded.load(std::sync::atomic::Ordering::Relaxed);
     PolishReport {
@@ -192,89 +224,72 @@ pub fn polish_sections_report(
     }
 }
 
-/// 润色单个 Section（含视觉图片解析与纯语气词条目删除）。
-fn polish_section(
+/// 读取本节的校对截图（vision=true 时）：外层 Some = 该节参与润色（内层为截图
+/// base64，vision=false 时为 None）；外层 None = 截图不可用，整节跳过保留原文。
+fn section_image_b64(
     s: &LlmSettings,
     frames_root: &Path,
-    sec: &mut Section,
-    pb: &crate::progress::Bar,
+    sec: &Section,
     warned: &std::sync::atomic::AtomicBool,
-) -> usize {
-    if sec.speech.is_empty() {
-        return 0;
+) -> Option<Option<String>> {
+    if !s.vision {
+        return Some(None);
     }
-    // 同一 Section 的多 chunk 共用一张截图：只读盘 + base64 一次
-    //（数 MB 大，逐 chunk 重复编码太贵）；所需截图不可读时保留原文。
-    let image_b64 = if s.vision {
-        let p = frames_root.join(&sec.image);
-        if p.is_file() {
-            match std::fs::read(&p) {
-                Ok(bytes) => {
-                    use base64::Engine as _;
-                    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
-                }
-                Err(e) => {
-                    warn_once(
-                        warned,
-                        &format!(
-                            "无法读取校对所需截图，已保留原文 / Required image could not be read; original text retained: {}: {e:#}",
-                            p.display()
-                        ),
-                    );
-                    return 0;
-                }
-            }
-        } else {
+    let p = frames_root.join(&sec.image);
+    if !p.is_file() {
+        warn_once(
+            warned,
+            "校对所需截图暂不可用，原文已保留 / Required image is unavailable; original text retained",
+        );
+        return None;
+    }
+    match std::fs::read(&p) {
+        Ok(bytes) => {
+            use base64::Engine as _;
+            Some(Some(
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            ))
+        }
+        Err(e) => {
             warn_once(
                 warned,
-                "校对所需截图暂不可用，原文已保留 / Required image is unavailable; original text retained",
+                &format!(
+                    "无法读取校对所需截图，已保留原文 / Required image could not be read; original text retained: {}: {e:#}",
+                    p.display()
+                ),
             );
-            return 0;
+            None
         }
-    } else {
-        None
-    };
-    let mut succeeded = 0;
-    for chunk in sec.speech.chunks_mut(BATCH) {
-        pb.inc(1);
-        succeeded += polish_chunk(s, chunk, image_b64.as_deref(), warned);
     }
-    // 删除「成功润色为空串」的纯语气词条目
-    sec.speech.retain(|e| !e.text.trim().is_empty());
-    succeeded
 }
 
 /// 校对一个已确认的分块；失败保留原文，不拆分或降低本次请求的能力。
-/// `image_b64` 为该节幻灯片截图的 base64（由 polish_section 统一读取一次）。
+/// `image_b64` 为该节幻灯片截图的 base64（由 polish_sections_report 统一读取一次）。
 fn polish_chunk(
+    agent: &ureq::Agent,
     s: &LlmSettings,
     chunk: &mut [TranscriptEvent],
     image_b64: Option<&str>,
     warned: &std::sync::atomic::AtomicBool,
 ) -> usize {
-    if chunk.is_empty() {
-        return 0;
-    }
     let items: Vec<(usize, &str)> = chunk
         .iter()
         .enumerate()
         .map(|(i, e)| (i, e.text.as_str()))
         .collect();
     let description = format!(
-        "校对 {}–{} 的文字",
+        "校对 {0}–{1} 的文字 / Proofread transcript {0}–{1}",
         crate::render::fmt_ts(chunk.first().unwrap().start),
         crate::render::fmt_ts(chunk.last().unwrap().end)
     );
-    match chat(s, &items, image_b64, &description) {
+    match chat(agent, s, &items, image_b64, &description) {
         Ok(polished) => {
             let mismatched = apply_polish(chunk, &polished);
             if mismatched {
-                {
-                    warn_once(
-                        warned,
-                        "润色结果与原文段落不匹配，保留原文 / Polished segments do not match the input; keeping original text",
-                    );
-                }
+                warn_once(
+                    warned,
+                    "润色结果与原文段落不匹配，保留原文 / Polished segments do not match the input; keeping original text",
+                );
                 0
             } else {
                 chunk.len()
@@ -292,18 +307,22 @@ fn polish_chunk(
     }
 }
 
+/// 润色结果的 id 集恰好覆盖 0..expected（无缺失/重复/越界）的判定。
+/// request_chat_once 的响应校验与 apply_polish 的应用前校验共用同一逻辑。
+fn segment_ids_match(polished: &[(usize, String)], expected: usize) -> bool {
+    let ids: std::collections::HashSet<usize> = polished.iter().map(|(id, _)| *id).collect();
+    polished.len() == expected && ids.len() == expected && (0..expected).all(|id| ids.contains(&id))
+}
+
 /// 把 (id, 新文本) 应用到一批事件上；空字符串 = 删除该条（由调用方 retain）。
 /// 返回 true = 返回集与输入不匹配（重排/缺项/重复），该批保留原文。
 fn apply_polish(chunk: &mut [TranscriptEvent], polished: &[(usize, String)]) -> bool {
+    if !segment_ids_match(polished, chunk.len()) {
+        return true;
+    }
     let mut by_id: Vec<Option<&str>> = vec![None; chunk.len()];
     for (id, text) in polished {
-        if *id >= chunk.len() || by_id[*id].is_some() {
-            return true;
-        }
         by_id[*id] = Some(text.as_str());
-    }
-    if by_id.iter().any(|v| v.is_none()) {
-        return true;
     }
     for (ev, new) in chunk.iter_mut().zip(by_id) {
         let new = new.unwrap_or("");
@@ -328,13 +347,14 @@ fn warn_once(warned: &std::sync::atomic::AtomicBool, msg: &str) {
 /// `image_b64` 提供时在用户消息中附上该幻灯片截图（OpenAI 兼容 image_url 协议）。
 /// 失败由持久请求账本记录；此层保留完整原文。
 fn chat(
+    agent: &ureq::Agent,
     s: &LlmSettings,
     items: &[(usize, &str)],
     image_b64: Option<&str>,
     description: &str,
 ) -> Result<Vec<(usize, String)>> {
     let body = build_chat_body(s, items, image_b64)?;
-    let content = send_chat_described(s, &body, "proofreading", description)
+    let content = send_chat_described(agent, s, &body, "proofreading", description)
         .map_err(|failure| failure.err)?;
     parse_segments(&content).context("校对响应结构无效 / Invalid proofreading response structure")
 }
@@ -540,12 +560,13 @@ fn lenient_scan(s: &str) -> Option<Vec<(usize, String)>> {
 /// 兼容性降级：部分 OpenAI 兼容端点不支持 `response_format: json_object`
 /// 仅当服务明确拒绝这个字段（400/422）时去掉该字段重试一次。
 pub(crate) fn send_chat_described(
+    agent: &ureq::Agent,
     s: &LlmSettings,
     body: &serde_json::Value,
     purpose: &str,
     description: &str,
 ) -> std::result::Result<String, ChatFailure> {
-    let resp = match request_chat(s, body, purpose, description) {
+    let resp = match request_chat(agent, s, body, purpose, description) {
         Ok(r) => r,
         Err(first) => {
             let degradable = first
@@ -561,7 +582,7 @@ pub(crate) fn send_chat_described(
             }
             // 降级请求只试一次：原请求已按 MAX_ATTEMPTS 重试过，这里只验证
             // response_format 兼容性，再走完整重试循环会成倍放大等待时间。
-            let response = request_chat_once(s, &relaxed, purpose, description)?;
+            let response = request_chat_once(agent, s, &relaxed, purpose, description)?;
             tracing::debug!("端点不支持 response_format，降级重试成功");
             response
         }
@@ -570,10 +591,9 @@ pub(crate) fn send_chat_described(
         retryable: false,
         err,
     };
-    let v = resp;
     // A gateway may return HTTP 200 with an error object. Missing content is a
     // protocol failure, never an empty success or permission to send a different payload.
-    v["choices"][0]["message"]["content"]
+    resp["choices"][0]["message"]["content"]
         .as_str()
         .filter(|c| !c.is_empty())
         .map(|c| c.to_string())
@@ -616,6 +636,7 @@ fn backoff_duration(attempt: usize) -> Duration {
 
 /// One attempt; validation errors omit provider response bodies which may echo credentials.
 fn request_chat_once(
+    agent: &ureq::Agent,
     s: &LlmSettings,
     body: &serde_json::Value,
     purpose: &str,
@@ -623,7 +644,6 @@ fn request_chat_once(
 ) -> std::result::Result<serde_json::Value, ChatFailure> {
     let url = endpoint(&s.base_url);
     crate::dispatch::json_request_described("llm", purpose, description, &url, body, || {
-        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(300)).redirects(0).build();
         let request = agent.post(&url).set("Content-Type", "application/json");
         let request = if s.api_key.is_empty() { request } else { request.set("Authorization", &format!("Bearer {}", s.api_key)) };
         crate::dispatch::receive(request.send_json(body))
@@ -633,10 +653,9 @@ fn request_chat_once(
         if purpose == "summary" { anyhow::ensure!(crate::summarize::parse_summary(content).is_some(), "服务返回的摘要结构无效 / Invalid summary structure"); }
         if purpose == "proofreading" {
             let parsed = parse_segments(content).context("服务返回的校对结构无效 / Invalid proofreading structure")?;
-            let input = body["messages"][1]["content"][0]["text"].as_str().context("校对输入结构无效")?;
+            let input = body["messages"][1]["content"][0]["text"].as_str().context("校对输入结构无效 / Invalid proofreading input structure")?;
             let expected = serde_json::from_str::<Vec<serde_json::Value>>(input)?.len();
-            let ids = parsed.iter().map(|(id,_)|*id).collect::<std::collections::HashSet<_>>();
-            anyhow::ensure!(parsed.len() == expected && ids.len() == expected && (0..expected).all(|id|ids.contains(&id)), "校对结果与原文段落不对应，已保留原文 / Proofread segments do not match the input");
+            anyhow::ensure!(segment_ids_match(&parsed, expected), "校对结果与原文段落不对应，已保留原文 / Proofread segments do not match the input");
         }
         Ok(())
     }).map_err(|failure| ChatFailure { retryable: failure.retryable, err: anyhow::Error::new(failure) })
@@ -644,6 +663,7 @@ fn request_chat_once(
 
 /// 发请求：可重试错误按指数退避重试，总共最多 [`MAX_ATTEMPTS`] 次尝试。
 fn request_chat(
+    agent: &ureq::Agent,
     s: &LlmSettings,
     body: &serde_json::Value,
     purpose: &str,
@@ -661,7 +681,7 @@ fn request_chat(
             );
             std::thread::sleep(wait);
         }
-        match request_chat_once(s, body, purpose, description) {
+        match request_chat_once(agent, s, body, purpose, description) {
             Ok(resp) => return Ok(resp),
             Err(f) if f.retryable => last_err = Some(f),
             Err(f) => return Err(f),
@@ -850,11 +870,6 @@ pub fn print_status(cfg: &crate::settings::ConfigFile) {
     if !s.enabled {
         println!("开启润色 / Enable transcript polish: course2md llm setup");
     }
-}
-
-pub fn write_hint_note(_path: &std::path::Path) {
-    let msg = "\n可选：配置 LLM 润色字幕 / Optional: set up transcript polishing with course2md llm setup.\n隐藏此提示 / Hide this hint: --no-llm-hint\n";
-    let _ = std::io::stderr().write_all(msg.as_bytes());
 }
 
 #[cfg(test)]

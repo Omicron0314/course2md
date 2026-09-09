@@ -25,7 +25,7 @@ pub fn file_name(format: OutputFormat) -> &'static str {
 /// exported file, but must never mutate the immutable note version itself.
 pub fn export(version_dir: &Path, format: OutputFormat, destination: &Path) -> Result<PathBuf> {
     if !version_dir.join("manifest.json").is_file() && crate::legacy::is_candidate(version_dir) {
-        let note = crate::legacy::read(version_dir)?.context("这份旧资料没有可读正文")?;
+        let note = crate::legacy::read(version_dir)?.context("这份旧资料没有可读正文 / This legacy archive has no readable document")?;
         let temporary = crate::runtime::TempWorkDir::new("legacy-export")?;
         let imported = crate::legacy::import_note(temporary.path(), note)?;
         return export(&imported.version_dir, format, destination);
@@ -61,7 +61,7 @@ fn images(root: &Path, document: &Document) -> Result<BTreeMap<String, ImageAsse
         let sha256 = execution::digest(&bytes);
         let id = format!("image-{}", &sha256[..24]);
         let mime =
-            crate::legacy::image_mime(&bytes).context("截图不是可识别的图片，原文件已保留")?;
+            crate::legacy::image_mime(&bytes).context("截图不是可识别的图片，原文件已保留 / Screenshot is not a recognized image; original file kept")?;
         let ext = match mime {
             "image/png" => "png",
             "image/gif" => "gif",
@@ -91,7 +91,7 @@ fn write_legacy(
 ) -> Result<PathBuf> {
     anyhow::ensure!(
         !destination.exists(),
-        "导出位置已有文件，未覆盖：{}",
+        "导出位置已有文件，未覆盖 / A file already exists at the export destination; not overwritten: {}",
         destination.display()
     );
     let parent = destination

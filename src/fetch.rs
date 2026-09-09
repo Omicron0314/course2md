@@ -5,6 +5,24 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+/// yt-dlp 调用的 socket 超时（秒）：兜底挂死的连接，三处调用统一
+const YTDLP_SOCKET_TIMEOUT: &str = "12";
+/// 视频下载尝试次数（首次 + 2 次重试）：网络类错误由外层循环重试
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+/// 视频下载重试间隔
+const DOWNLOAD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// yt-dlp 公共参数基座：--ignore-config（用户全局配置会让同一命令在不同机器上
+/// 行为漂移）、socket 超时。差异参数由调用方追加，最后以 [`ytdlp_url`] 收尾。
+fn ytdlp_base(cmd: &mut Command) -> &mut Command {
+    cmd.args(["--ignore-config", "--socket-timeout", YTDLP_SOCKET_TIMEOUT])
+}
+
+/// yt-dlp 命令收尾：`--` 分隔符保证 URL 不被当作选项解析。
+fn ytdlp_url<'a>(cmd: &'a mut Command, url: &str) -> &'a mut Command {
+    cmd.arg("--").arg(url)
+}
+
 /// 我们关心的元数据字段子集。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VideoMeta {
@@ -153,10 +171,10 @@ fn concrete_url(info: &ExtractorInfo) -> Option<String> {
 /// Successful extraction can still contain explicit subtitle permission warnings.
 pub fn parse_online_probe(bytes: &[u8], input: &str, diagnostics: &str) -> Result<OnlineProbe> {
     let info: ExtractorInfo =
-        serde_json::from_slice(bytes).context("无法读取视频信息，请重新读取")?;
+        serde_json::from_slice(bytes).context("无法读取视频信息，请重新读取 / Cannot read video info; probe again")?;
     if info.kind == "multi_video" {
         return Ok(OnlineProbe::Unresolved {
-            message: "这个来源由多个媒体片段组成，暂时无法确认完整的视频范围。请选择本地完整视频。"
+            message: "这个来源由多个媒体片段组成，暂时无法确认完整的视频范围。请选择本地完整视频。 / This source consists of multiple media segments, so the full video range cannot be confirmed yet. Choose a complete local video."
                 .into(),
         });
     }
@@ -207,16 +225,16 @@ pub fn parse_online_probe(bytes: &[u8], input: &str, diagnostics: &str) -> Resul
     }
     if matches!(info.kind.as_str(), "url" | "url_transparent") {
         return Ok(OnlineProbe::Unresolved {
-            message: "还无法确定要处理哪个视频。请复制具体视频的链接。".into(),
+            message: "还无法确定要处理哪个视频。请复制具体视频的链接。 / Cannot determine which video to process yet. Paste the link to a specific video.".into(),
         });
     }
     let extractor = extractor_name(&info).to_owned();
     let id = info
         .id
         .as_deref()
-        .context("来源没有提供可确认的视频身份，请复制具体视频的链接")?;
+        .context("来源没有提供可确认的视频身份，请复制具体视频的链接 / The source did not provide a verifiable video identity; paste the link to a specific video")?;
     let identity = online_identity(&extractor, id)
-        .context("来源没有提供可确认的视频身份，请复制具体视频的链接")?;
+        .context("来源没有提供可确认的视频身份，请复制具体视频的链接 / The source did not provide a verifiable video identity; paste the link to a specific video")?;
     let input = concrete_url(&info).unwrap_or_else(|| input.to_owned());
     // The original concrete part link is authoritative if the extractor returns a
     // canonical base URL: do not erase an explicitly selected Bilibili part.
@@ -250,7 +268,7 @@ pub fn parse_online_probe(bytes: &[u8], input: &str, diagnostics: &str) -> Resul
                 title: info
                     .title
                     .filter(|title| !title.trim().is_empty())
-                    .context("来源没有返回视频标题，请重新读取")?,
+                    .context("来源没有返回视频标题，请重新读取 / The source returned no video title; probe again")?,
                 uploader: info.uploader.unwrap_or_default(),
                 duration: info
                     .duration
@@ -371,7 +389,7 @@ fn subtitle_evidence(
         SubtitleEvidence::Failed { message }
     } else if info.subtitles.is_none() && info.automatic_captions.is_none() {
         SubtitleEvidence::Unsupported {
-            message: "此来源暂不支持读取字幕，可以识别视频声音".into(),
+            message: "此来源暂不支持读取字幕，可以识别视频声音 / This source does not support reading subtitles yet; you can transcribe the video audio instead".into(),
         }
     } else {
         SubtitleEvidence::NoneFound
@@ -388,23 +406,23 @@ pub fn local_content_identity(
     use std::io::Read;
     use std::sync::atomic::Ordering;
     let mut file = std::fs::File::open(path)
-        .with_context(|| format!("无法读取视频文件 {}", path.display()))?;
+        .with_context(|| format!("无法读取视频文件 {0} / Cannot read video file {0}", path.display()))?;
     let before = file.metadata()?;
     let mut hash = Sha256::new();
     let mut buffer = vec![0; 1024 * 1024];
     loop {
-        ensure!(!cancel.load(Ordering::Relaxed), "已取消读取视频");
+        ensure!(!cancel.load(Ordering::Relaxed), "已取消读取视频 / Video reading cancelled");
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
         }
         hash.update(&buffer[..count]);
     }
-    ensure!(!cancel.load(Ordering::Relaxed), "已取消读取视频");
+    ensure!(!cancel.load(Ordering::Relaxed), "已取消读取视频 / Video reading cancelled");
     let after = file.metadata()?;
     ensure!(
         before.len() == after.len() && before.modified().ok() == after.modified().ok(),
-        "视频文件在读取时发生变化，请重新读取"
+        "视频文件在读取时发生变化，请重新读取 / The video file changed while reading; read it again"
     );
     Ok(format!("local:sha256:{:x}", hash.finalize()))
 }
@@ -418,10 +436,15 @@ impl VideoMeta {
 
 /// 抓取元数据（不下载）。
 pub async fn fetch_meta(url: &str) -> Result<VideoMeta> {
+    Ok(probe_video(url).await?.meta)
+}
+
+/// Probe once and return the single video; collection/unresolved links are errors.
+pub async fn probe_video(url: &str) -> Result<OnlineVideo> {
     match probe_online(url).await? {
-        OnlineProbe::Video { video } => Ok(video.meta),
+        OnlineProbe::Video { video } => Ok(video),
         OnlineProbe::Collection { .. } => {
-            anyhow::bail!("这个链接包含多个视频，请选择具体单集后生成笔记")
+            anyhow::bail!("这个链接包含多个视频，请选择具体单集后生成笔记 / This link contains multiple videos; choose a specific episode before generating notes")
         }
         OnlineProbe::Unresolved { message } => anyhow::bail!("{message}"),
     }
@@ -431,26 +454,20 @@ pub async fn fetch_meta(url: &str) -> Result<VideoMeta> {
 pub async fn probe_online(url: &str) -> Result<OnlineProbe> {
     let mut cmd = Command::new("yt-dlp");
     let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
-    let out = run_output(
-        cmd.args([
-            "--ignore-config",
-            "--simulate",
-            "--dump-single-json",
-            "--flat-playlist",
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs",
-            "all",
-            "--socket-timeout",
-            "12",
-            "--retries",
-            "1",
-            "--",
-        ])
-        .arg(url),
-    )
-    .await
-    .map_err(|e| crate::auth::with_bilibili_login_tip(url, e))?;
+    ytdlp_base(&mut cmd).args([
+        "--simulate",
+        "--dump-single-json",
+        "--flat-playlist",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs",
+        "all",
+        "--retries",
+        "1",
+    ]);
+    let out = run_output(ytdlp_url(&mut cmd, url))
+        .await
+        .map_err(|e| crate::auth::with_bilibili_login_tip(url, e))?;
     parse_online_probe(&out.stdout, url, &String::from_utf8_lossy(&out.stderr))
 }
 
@@ -461,32 +478,29 @@ pub struct SubtitleFetch {
     pub auto: bool,
 }
 
-/// CLI compatibility path. Probe first so discovery failures remain errors;
-/// select from every language, then fetch that exact track without silent fallback.
-pub async fn fetch_subtitle(url: &str, out_dir: &Path) -> Result<Option<SubtitleFetch>> {
+/// CLI compatibility path. `video` comes from the run's single probe so discovery
+/// stays consistent; select from every language, then fetch that exact track
+/// without silent fallback.
+pub async fn fetch_subtitle(video: &OnlineVideo, out_dir: &Path) -> Result<Option<SubtitleFetch>> {
     use crate::subtitle::SubtitleEvidence;
-    let video = match probe_online(url).await? {
-        OnlineProbe::Video { video } => video,
-        OnlineProbe::Collection { .. } => anyhow::bail!("这个链接包含多个视频，请选择具体单集"),
-        OnlineProbe::Unresolved { message } => anyhow::bail!("{message}"),
-    };
-    match video.subtitles {
-        SubtitleEvidence::Found { mut tracks, .. } => {
+    match &video.subtitles {
+        SubtitleEvidence::Found { tracks, .. } => {
+            let mut tracks = tracks.clone();
             crate::subtitle::sort_tracks(
                 &mut tracks,
                 &[],
                 "zh",
                 video.original_language.as_deref(),
             );
-            let track = tracks.first().context("字幕列表为空，请重新读取字幕")?;
+            let track = tracks.first().context("字幕列表为空，请重新读取字幕 / Subtitle list is empty; probe subtitles again")?;
             fetch_selected_subtitle(&video.meta.webpage_url, &video.identity, track, out_dir)
                 .await
                 .map(Some)
         }
         SubtitleEvidence::Failed { message } => {
-            anyhow::bail!("字幕未读取成功，尚不能确认是否可用：{message}")
+            anyhow::bail!("字幕未读取成功，尚不能确认是否可用 / Subtitles were not read successfully, so availability cannot be confirmed yet: {message}")
         }
-        SubtitleEvidence::Unchecked => anyhow::bail!("尚未检查字幕，请重新读取视频信息"),
+        SubtitleEvidence::Unchecked => anyhow::bail!("尚未检查字幕，请重新读取视频信息 / Subtitles not checked yet; probe the video info again"),
         SubtitleEvidence::NoneFound | SubtitleEvidence::Unsupported { .. } => Ok(None),
     }
 }
@@ -521,13 +535,13 @@ pub async fn fetch_selected_subtitle(
         inline_text,
     } = &track.origin
     else {
-        anyhow::bail!("所选字幕不是在线字幕");
+        anyhow::bail!("所选字幕不是在线字幕 / The selected subtitle is not an online subtitle");
     };
     ensure!(
         track
             .id
             .starts_with(&format!("{source_identity}:subtitle:")),
-        "所选字幕与当前视频不一致，请重新选择字幕"
+        "所选字幕与当前视频不一致，请重新选择字幕 / The selected subtitle no longer matches the current video; select the subtitle again"
     );
     let dir = out_dir.join(".subs");
     tokio::fs::create_dir_all(&dir).await?;
@@ -540,8 +554,7 @@ pub async fn fetch_selected_subtitle(
         let template = temp.path().join("subtitle");
         let mut cmd = Command::new("yt-dlp");
         let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
-        cmd.args([
-            "--ignore-config",
+        ytdlp_base(&mut cmd).args([
             "--skip-download",
             "--no-simulate",
             "--dump-single-json",
@@ -554,38 +567,33 @@ pub async fn fetch_selected_subtitle(
             "srt/vtt/best",
             "--sub-langs",
             &exact_subtitle_language(language_key),
-            "--socket-timeout",
-            "12",
             "--retries",
             "1",
             "-o",
-        ])
-        .arg(&template)
-        .arg(if *automatic {
+        ]);
+        cmd.arg(&template).arg(if *automatic {
             "--write-auto-subs"
         } else {
             "--write-subs"
-        })
-        .arg("--")
-        .arg(url);
-        let out = run_output(&mut cmd)
+        });
+        let out = run_output(ytdlp_url(&mut cmd, url))
             .await
             .map_err(|error| crate::auth::with_bilibili_login_tip(url, error))?;
         match parse_online_probe(&out.stdout, url, &String::from_utf8_lossy(&out.stderr))? {
             OnlineProbe::Video { video } => ensure!(
                 video.identity == source_identity,
-                "视频来源发生变化，请重新读取并选择字幕"
+                "视频来源发生变化，请重新读取并选择字幕 / The video source changed; probe again and reselect the subtitle"
             ),
-            _ => anyhow::bail!("无法确认字幕对应的视频，请重新读取"),
+            _ => anyhow::bail!("无法确认字幕对应的视频，请重新读取 / Cannot confirm the video for the subtitle; probe again"),
         }
         let path = crate::subtitle::pick_subtitle_file(temp.path())
-            .context("所选字幕没有下载成功，请重新读取字幕或明确选择其他文字来源")?;
+            .context("所选字幕没有下载成功，请重新读取字幕或明确选择其他文字来源 / The selected subtitle was not downloaded; probe subtitles again or explicitly choose another text source")?;
         crate::subtitle::read_subtitle_text(&path)?
     };
     let events = crate::subtitle::parse_subtitle(&text);
     ensure!(
         !events.is_empty(),
-        "这份字幕未包含可读取的文字，请选择其他字幕"
+        "这份字幕未包含可读取的文字，请选择其他字幕 / This subtitle contains no readable text; choose another subtitle"
     );
     let path = temp.path().join("selected.srt");
     crate::checkpoint::atomic_write(&path, crate::subtitle::to_srt(&events).as_bytes())?;
@@ -611,17 +619,17 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
         tokio::fs::create_dir_all(p).await?;
     }
     let tmp: PathBuf = dest.with_extension("mp4.part");
-    // 网络类错误重试 2 次
+    // 网络类错误由外层循环重试（共 DOWNLOAD_ATTEMPTS 次）
     let mut last_err = None;
-    for attempt in 0..3 {
+    for attempt in 0..DOWNLOAD_ATTEMPTS {
         if attempt > 0 {
             tracing::warn!(attempt, "视频下载失败，正在重试 / Retrying video download");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(DOWNLOAD_RETRY_DELAY).await;
         }
         let mut cmd = Command::new("yt-dlp");
         let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
         let fmt = format!("bv*[height<={max_height}]+ba/b[height<={max_height}]/b");
-        cmd.args([
+        ytdlp_base(&mut cmd).args([
             "-f",
             &fmt,
             "-S",
@@ -632,13 +640,12 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
             "--no-part",
             "--no-progress",
             "-o",
-        ])
-        .arg(&tmp)
-        .arg(url);
+        ]);
+        cmd.arg(&tmp);
         if verbose {
             cmd.arg("-v");
         }
-        match run_status(&mut cmd)
+        match run_status(ytdlp_url(&mut cmd, url))
             .await
             .map_err(|e| crate::auth::with_bilibili_login_tip(url, e))
         {
@@ -692,7 +699,7 @@ pub fn bilibili_retry_delay(stderr: &str, retries: usize) -> Option<std::time::D
         .map(std::time::Duration::from_secs)
 }
 
-pub const BILIBILI_412_HINT: &str = "Bilibili 暂时限制了请求（HTTP 412）。请稍后重试；若持续失败，请运行 course2md --login bilibili 登录或重新登录，更新 yt-dlp，并确认该链接能在浏览器播放，也可以导入已下载的本地视频。";
+pub const BILIBILI_412_HINT: &str = "Bilibili 暂时限制了请求（HTTP 412）。请稍后重试；若持续失败，请运行 course2md --login bilibili 登录或重新登录，更新 yt-dlp，并确认该链接能在浏览器播放，也可以导入已下载的本地视频。 / Bilibili is rate-limiting requests (HTTP 412). Retry later; if it keeps failing, run course2md --login bilibili to log in again, update yt-dlp, and confirm the link plays in a browser, or import a downloaded local video.";
 
 #[cfg(all(test, unix))]
 async fn run(cmd: &mut Command) -> Result<String> {
@@ -707,14 +714,14 @@ async fn run_output(cmd: &mut Command) -> Result<std::process::Output> {
             .kill_on_drop(true)
             .output()
             .await
-            .context("启动 yt-dlp 失败")?;
+            .context("启动 yt-dlp 失败 / Failed to start yt-dlp")?;
         if out.status.success() {
             return Ok(out);
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         if let Some(delay) = bilibili_retry_delay(&stderr, retries) {
             retries += 1;
-            tracing::warn!(retries, "Bilibili HTTP 412，等待后重试");
+            tracing::warn!(retries, "Bilibili HTTP 412，等待后重试 / Bilibili HTTP 412; retrying after a wait");
             tokio::time::sleep(delay).await;
             continue;
         }

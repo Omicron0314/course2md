@@ -55,8 +55,13 @@ async fn extract_frame(media: &Path, t: f64, dest: &Path) -> Result<()> {
         "ffmpeg",
     )
     .await?;
-    anyhow::ensure!(dest.is_file(), "ffmpeg 未生成截图 {}", dest.display());
+    anyhow::ensure!(dest.is_file(), "ffmpeg 未生成截图 {0} / ffmpeg did not produce screenshot {0}", dest.display());
     Ok(())
+}
+
+/// 第 n 张（1 起）截图的文件名。
+fn slide_name(n: usize) -> String {
+    format!("slide_{n:04}.jpg")
 }
 
 /// 1fps（或 sample_interval）灰度流 + SSIM，得到新幻灯片时间点。
@@ -108,6 +113,7 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
     // Duration/fps gives an estimate, not the number ffmpeg will actually
     // decode (especially for VFR input). Report observed samples without a
     // fabricated denominator. Candidate selection happens within this scan.
+    // （tests/task_execution.rs 钉死了 total=0 这一语义，勿改）
     let pb = crate::progress::Bar::new("scenes/scan", 0)
         .with_template("{spinner:.green} sample {pos} frames {msg}");
     pb.set_position(0);
@@ -141,50 +147,55 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
         let t = i as f64 * interval;
         i += 1;
         pb.inc(1);
-        let gray = GrayImage::from_raw(tw, th, buf.clone())
-            .ok_or_else(|| anyhow::anyhow!("灰度帧尺寸不匹配 {tw}x{th}"))?;
-        let cmp = crop_roi(&gray, cfg.roi);
+        // 帧缓冲复用：move 进 GrayImage 计算，结束时 into_raw 收回供下一帧
+        // （取消每帧 230KB 的 buf.clone()；仅物化 candidate 时才产生拥有所有权的拷贝）
+        let gray = GrayImage::from_raw(tw, th, std::mem::take(&mut buf))
+            .ok_or_else(|| anyhow::anyhow!("灰度帧尺寸不匹配 {tw}x{th} / Grayscale frame size mismatch {tw}x{th}"))?;
+        {
+            let cmp = crop_roi(&gray, cfg.roi);
 
-        let differs_from_emitted = match &last_emitted {
-            None => true,
-            Some(prev) => {
-                prev.dimensions() != cmp.dimensions() || ssim(prev, &cmp) < cfg.similarity
+            let differs_from_emitted = match &last_emitted {
+                None => true,
+                Some(prev) => {
+                    prev.dimensions() != cmp.dimensions() || ssim(prev, &cmp) < cfg.similarity
+                }
+            };
+            if !differs_from_emitted {
+                // 画面回到已输出状态：候选是过渡帧（动画/抖动），丢弃
+                candidate = None;
+                candidate_first_t = None;
+            } else {
+                // 与已输出状态不同：跟踪候选（若候选本身又变了，说明动画进行中，重置起点）
+                let candidate_changed = match &candidate {
+                    None => true,
+                    Some(c) => c.dimensions() != cmp.dimensions() || ssim(c, &cmp) < cfg.similarity,
+                };
+                if candidate_changed {
+                    // 仅候选变更时才物化为拥有所有权的图；其余路径 cmp 只借不拷
+                    candidate = Some(cmp.into_owned());
+                    candidate_first_t = Some(t);
+                    candidate_last_t = Some(t);
+                } else if candidate_last_t.is_some() {
+                    // 同一视觉状态的后续采样：更新代表帧时间（取稳定后的最后一帧）
+                    candidate_last_t = Some(t);
+                }
+                let onset_t = candidate_first_t.unwrap_or(t);
+                let capture_t = candidate_last_t.unwrap_or(t);
+                let stable = t - onset_t >= stable_for;
+                let gap_ok = t - last_emit_t >= cfg.cooldown;
+                if stable && gap_ok {
+                    // 发射两个时间戳：onset 用于时间线对齐，capture 用于全分辨率截帧
+                    // （stable 模式下 capture 取确认稳定时的代表帧，避开 transition 早期态）
+                    times.push((onset_t, capture_t));
+                    last_emitted = candidate.take();
+                    candidate_first_t = None;
+                    candidate_last_t = None;
+                    last_emit_t = t;
+                    pb.set_message(format!("已找到 {0} 张候选截图 / Found {0} candidate slides", times.len()));
+                }
             }
-        };
-        if !differs_from_emitted {
-            // 画面回到已输出状态：候选是过渡帧（动画/抖动），丢弃
-            candidate = None;
-            candidate_first_t = None;
-            continue;
         }
-        // 与已输出状态不同：跟踪候选（若候选本身又变了，说明动画进行中，重置起点）
-        let candidate_changed = match &candidate {
-            None => true,
-            Some(c) => c.dimensions() != cmp.dimensions() || ssim(c, &cmp) < cfg.similarity,
-        };
-        if candidate_changed {
-            // 仅候选变更时才物化为拥有所有权的图；其余路径 cmp 只借不拷
-            candidate = Some(cmp.into_owned());
-            candidate_first_t = Some(t);
-            candidate_last_t = Some(t);
-        } else if candidate_last_t.is_some() {
-            // 同一视觉状态的后续采样：更新代表帧时间（取稳定后的最后一帧）
-            candidate_last_t = Some(t);
-        }
-        let onset_t = candidate_first_t.unwrap_or(t);
-        let capture_t = candidate_last_t.unwrap_or(t);
-        let stable = t - onset_t >= stable_for;
-        let gap_ok = t - last_emit_t >= cfg.cooldown;
-        if stable && gap_ok {
-            // 发射两个时间戳：onset 用于时间线对齐，capture 用于全分辨率截帧
-            // （stable 模式下 capture 取确认稳定时的代表帧，避开 transition 早期态）
-            times.push((onset_t, capture_t));
-            last_emitted = candidate.take();
-            candidate_first_t = None;
-            candidate_last_t = None;
-            last_emit_t = t;
-            pb.set_message(format!("已找到 {} 张候选截图", times.len()));
-        }
+        buf = gray.into_raw();
     }
     // EOF 冲刷：最后一个已稳定的候选即使还没过 cooldown 也补发（否则尾页永远丢失）
     if let (Some(_), Some(onset), Some(capture)) = (&candidate, candidate_first_t, candidate_last_t)
@@ -197,15 +208,7 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
     let status = child.wait().await?;
     let stderr_bytes = stderr_task.await.unwrap_or_default();
     if !status.success() {
-        let tail = String::from_utf8_lossy(&stderr_bytes)
-            .lines()
-            .rev()
-            .take(5)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
+        let tail = crate::error::tail_lines(&String::from_utf8_lossy(&stderr_bytes), 5);
         anyhow::bail!("读取视频画面失败 / Frame sampling failed ({status}): {tail}");
     }
     pb.finish();
@@ -221,7 +224,7 @@ pub async fn run(cfg: &PipelineConfig, media: &Path) -> Result<Vec<FrameEvent>> 
     crate::progress::stage("scenes/scan", "start");
     let times = sample_timestamps(cfg, media).await?;
     crate::progress::stage("scenes/scan", "done");
-    anyhow::ensure!(!times.is_empty(), "未采样到任何帧");
+    anyhow::ensure!(!times.is_empty(), "未采样到任何帧 / No frames sampled");
 
     crate::progress::stage("scenes/extract", "start");
     let pb = crate::progress::Bar::new("scenes/extract", times.len() as u64)
@@ -240,7 +243,7 @@ pub async fn run(cfg: &PipelineConfig, media: &Path) -> Result<Vec<FrameEvent>> 
                 break;
             };
             // 截帧用代表帧时间（稳定后），时间线用 onset（首次出现）
-            let path = frames_dir.join(format!("slide_{:04}.jpg", i + 1));
+            let path = frames_dir.join(slide_name(i + 1));
             let media = media.to_path_buf();
             set.spawn(async move { (i, extract_frame(&media, capture_t, &path).await) });
         }
@@ -267,7 +270,7 @@ pub async fn run(cfg: &PipelineConfig, media: &Path) -> Result<Vec<FrameEvent>> 
                 i + 1
             )
         })?;
-        let name = format!("slide_{:04}.jpg", i + 1);
+        let name = slide_name(i + 1);
         frames.push(FrameEvent {
             t: onset_t,
             image: format!("frames/{name}"),

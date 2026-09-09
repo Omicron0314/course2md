@@ -180,7 +180,7 @@ fn run_blocking(
         let devices = gpu_devices(&bin)?;
         anyhow::ensure!(
             !devices.is_empty(),
-            "选择了 GPU 识别，但 llama-server 未检测到可用 GPU。{}",
+            "选择了 GPU 识别，但 llama-server 未检测到可用 GPU / GPU transcription selected, but llama-server detected no usable GPU. {}",
             GPU_SETUP_HINT
         );
         tracing::info!(devices = %devices.join(", "), "GPU backend detected");
@@ -190,16 +190,16 @@ fn run_blocking(
     let cpu_only = offload.provider == crate::config::AsrProvider::Cpu;
     if cpu_only && !(caps.device && caps.no_op_offload && caps.no_mmproj_offload) {
         let devices = gpu_devices(&bin).context(
-            "无法确认当前 llama-server 能严格禁用 GPU，请更新 llama.cpp 后重试 CPU 模式",
+            "无法确认当前 llama-server 能严格禁用 GPU，请更新 llama.cpp 后重试 CPU 模式 / Cannot confirm the current llama-server can strictly disable GPU; update llama.cpp and retry CPU mode",
         )?;
         anyhow::ensure!(
             devices.is_empty(),
-            "当前 llama-server 缺少严格禁用 GPU 所需的参数，请升级 llama.cpp 或使用 CPU-only 构建后重试 --provider cpu"
+            "当前 llama-server 缺少严格禁用 GPU 所需的参数，请升级 llama.cpp 或使用 CPU-only 构建后重试 --provider cpu / The current llama-server lacks the flags required to strictly disable GPU; upgrade llama.cpp or use a CPU-only build, then retry --provider cpu"
         );
     } else if !cpu_only && !offload.mmproj_offload {
         anyhow::ensure!(
             caps.no_mmproj_offload,
-            "当前 llama-server 不支持 --no-mmproj-offload，请升级 llama.cpp 后重试"
+            "当前 llama-server 不支持 --no-mmproj-offload，请升级 llama.cpp 后重试 / The current llama-server does not support --no-mmproj-offload; upgrade llama.cpp and retry"
         );
     }
     let args = build_server_args(model, mmproj, offload, caps, threads, port);
@@ -260,15 +260,7 @@ fn run_blocking(
     let _ = child.wait();
     let events = r.map_err(|e| {
         // 转写中途失败大概率是 server 侧问题，附上 stderr 尾部便于定位
-        let tail = stderr_tail.tail();
-        if tail.is_empty() {
-            e
-        } else {
-            e.context(format!(
-                "识别服务错误详情 / llama-server error details:\n{}",
-                tail
-            ))
-        }
+        stderr_tail.attach(e, "识别服务错误详情 / llama-server error details")
     })?;
     tracing::info!(
         n = events.len(),
@@ -281,6 +273,10 @@ fn run_blocking(
 /// 顺序 chunk 执行器：统一切音频、断点跳过、进度条、记录（含空结果）、
 /// chunk 清理与收尾排序。backend 只需提供「chunk 文件 → 文本」函数。
 /// Ok(None) = 后端确认无语音内容（同样记录完成，避免静音段反复重跑）。
+///
+/// 双缓冲流水线：转写当前 chunk 期间由后台线程预切下一个未完成 chunk
+///（ffmpeg 切音频约 30-80ms，不再占用串行路径）；失败语义与 checkpoint
+/// record 顺序与纯串行版完全一致。
 pub(crate) fn run_chunks(
     wav: &Path,
     segs: &[Seg],
@@ -290,47 +286,73 @@ pub(crate) fn run_chunks(
     mut transcribe: impl FnMut(usize, Seg, &Path) -> Result<Option<String>>,
 ) -> Result<Vec<TranscriptEvent>> {
     let pb = crate::progress::Bar::new("transcribe", segs.len() as u64).with_template(&format!(
-        "{{spinner:.green}} {label} {{pos}}/{{len}} [{{bar:32.cyan/blue}}] {{elapsed}} {{msg}}"
+        "{{spinner:.green}} {label} {{pos}}/{{len}} [{{bar:32.cyan/blue}}] {{elapsed}} {{eta}} {{msg}}"
     ));
 
     let mut err: Option<anyhow::Error> = None;
-    for (i, seg) in segs.iter().copied().enumerate() {
-        crate::dispatch::check_control()?;
-        let (start, end) = (seg.start, seg.end);
-        if cp.is_done(start, end) {
-            pb.inc(1);
-            continue; // 断点续跑：该 chunk 上次已完成
-        }
-        let chunk = tmp_dir.join(format!("c{i:04}.wav"));
-        if let Err(e) = cut_wav(wav, seg.cut_start, seg.cut_end, &chunk) {
-            err = Some(e);
-            break;
-        }
-        match transcribe(i, seg, &chunk) {
-            Ok(text) => {
-                // 空结果也记录完成；写盘失败则中断且不标记完成
-                if let Err(e) = cp.record(start, end, text.as_deref().unwrap_or("")) {
+    std::thread::scope(|scope| {
+        let mut prefetch: Option<(usize, std::thread::ScopedJoinHandle<'_, Result<()>>)> = None;
+        for (i, seg) in segs.iter().copied().enumerate() {
+            crate::dispatch::check_control()?;
+            let (start, end) = (seg.start, seg.end);
+            if cp.is_done(start, end) {
+                pb.inc(1);
+                continue; // 断点续跑：该 chunk 上次已完成
+            }
+            let chunk = tmp_dir.join(format!("c{i:04}.wav"));
+            // 取本 chunk 的预切结果；未预切（首个待处理 chunk）则现切
+            let cut = match prefetch.take() {
+                Some((j, handle)) => {
+                    debug_assert_eq!(j, i, "预切游标与当前 chunk 对齐");
+                    handle.join().unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!(
+                            "音频切分线程异常终止 / Audio split thread terminated unexpectedly"
+                        ))
+                    })
+                }
+                None => cut_wav(wav, seg.cut_start, seg.cut_end, &chunk),
+            };
+            if let Err(e) = cut {
+                err = Some(e);
+                break;
+            }
+            // 预切下一个未完成 chunk（与本 chunk 的转写并行）
+            if let Some(j) = (i + 1..segs.len()).find(|&j| !cp.is_done(segs[j].start, segs[j].end))
+            {
+                let next_seg = segs[j];
+                let next_chunk = tmp_dir.join(format!("c{j:04}.wav"));
+                prefetch = Some((
+                    j,
+                    scope.spawn(move || {
+                        cut_wav(wav, next_seg.cut_start, next_seg.cut_end, &next_chunk)
+                    }),
+                ));
+            }
+            match transcribe(i, seg, &chunk) {
+                Ok(text) => {
+                    // 空结果也记录完成；写盘失败则中断且不标记完成
+                    if let Err(e) = cp.record(start, end, text.as_deref().unwrap_or("")) {
+                        err = Some(e);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&chunk);
                     err = Some(e);
                     break;
                 }
             }
-            Err(e) => {
-                let _ = std::fs::remove_file(&chunk);
-                err = Some(e);
-                break;
-            }
+            let _ = std::fs::remove_file(&chunk);
+            pb.inc(1);
         }
-        let _ = std::fs::remove_file(&chunk);
-        pb.inc(1);
-    }
+        Ok::<(), anyhow::Error>(())
+    })?;
     pb.finish();
     if let Some(e) = err {
         return Err(e);
     }
     // 事件统一来自 checkpoint（历史 + 本次），按时间排序
-    let mut all: Vec<TranscriptEvent> = cp.events().to_vec();
-    all.sort_by(|a, b| a.start.total_cmp(&b.start));
-    Ok(all)
+    Ok(cp.sorted_events())
 }
 
 /// 云端 STT：ffmpeg VAD 分段 + 逐段 POST /audio/transcriptions（OpenAI 兼容 / OpenRouter）。
@@ -362,8 +384,9 @@ fn run_api(
 
     let tmp = crate::runtime::TempWorkDir::new("asr")?;
     let url = crate::config::asr_endpoint(api)?;
-    let pb = crate::progress::Bar::new("transcribe", segs.len() as u64)
-        .with_template("{spinner:.green} asr {pos}/{len} [{bar:32.cyan/blue}] {elapsed} {msg}");
+    let pb = crate::progress::Bar::new("transcribe", segs.len() as u64).with_template(
+        "{spinner:.green} asr {pos}/{len} [{bar:32.cyan/blue}] {elapsed} {eta} {msg}",
+    );
 
     let client = ureq::AgentBuilder::new()
         .timeout(API_HTTP_TIMEOUT)
@@ -446,8 +469,7 @@ fn run_api(
         return Err(e);
     }
     // 事件统一来自 checkpoint（收集循环里已 record），按时间排序
-    let mut events: Vec<TranscriptEvent> = cp.events().to_vec();
-    events.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let events: Vec<TranscriptEvent> = cp.sorted_events();
     tracing::info!(
         n = events.len(),
         secs = format_args!("{:.1}", t0.elapsed().as_secs_f64()),
@@ -504,11 +526,11 @@ fn post_bytes_retry(
                 scope["segment_end"].as_f64(),
             ) {
                 (Some(start), Some(end)) => format!(
-                    "识别视频 {}–{} 的声音",
+                    "识别视频 {0}–{1} 的声音 / Transcribe video audio {0}–{1}",
                     crate::render::fmt_ts(start),
                     crate::render::fmt_ts(end)
                 ),
-                _ => "识别视频声音".into(),
+                _ => "识别视频声音 / Transcribe video audio".into(),
             };
             crate::dispatch::json_request_described(
                 "asr",
@@ -522,13 +544,8 @@ fn post_bytes_retry(
                         value.get("error").is_none_or(serde_json::Value::is_null),
                         "语音服务返回错误内容 / Speech service returned an error"
                     );
-                    let content = &value["choices"][0]["message"]["content"];
                     anyhow::ensure!(
-                        value["text"].is_string()
-                            || content.is_string()
-                            || content.as_array().is_some_and(|parts| parts
-                                .iter()
-                                .any(|part| part["text"].is_string())),
+                        value["text"].is_string() || chat_content_has_text(value),
                         "语音服务响应缺少文字，不能当作静音 / Speech response is missing text"
                     );
                     Ok(())
@@ -549,7 +566,7 @@ fn post_bytes_retry(
                     status: Some(response.status),
                     retryable: response.status == 429 || response.status >= 500,
                     uncertain: false,
-                    message: format!("本机识别请求失败（HTTP {}）", response.status),
+                    message: format!("本机识别请求失败（HTTP {0}） / Local transcription request failed (HTTP {0})", response.status),
                     unsupported_response_format: false,
                 }),
                 Err(error) => Err(crate::dispatch::Failure {
@@ -640,13 +657,9 @@ fn transcribe_api(t: &ApiTarget, chunk: &Path, seg: Seg, wav: &Path) -> Result<O
             .trim()
             .to_string(),
         crate::settings::AsrApiMode::Chat => {
-            let content = &v["choices"][0]["message"]["content"];
             anyhow::ensure!(
-                content.is_string()
-                    || content
-                        .as_array()
-                        .is_some_and(|parts| parts.iter().any(|part| part["text"].is_string())),
-                "转写响应缺少文本内容，不能当作静音"
+                chat_content_has_text(&v),
+                "转写响应缺少文本内容，不能当作静音 / Transcription response is missing text; cannot treat it as silence"
             );
             parse_chat_content(&v).trim().to_string()
         }
@@ -671,6 +684,17 @@ fn transcription_form(model: &str, audio: &[u8]) -> (String, Vec<u8>) {
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
+/// chat/completions 响应的 message.content 是否携带文本：字符串形式，或
+/// 多模态分片数组 [{type:"text", text:...}] 中任一片含 text 字段。
+/// post_bytes_retry 的预校验与 transcribe_api 的取值前校验共用同一判定。
+fn chat_content_has_text(v: &serde_json::Value) -> bool {
+    let content = &v["choices"][0]["message"]["content"];
+    content.is_string()
+        || content
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|part| part["text"].is_string()))
+}
+
 /// 从 chat/completions 响应取文本：content 通常是字符串；部分多模态端点
 /// 返回 [{type:"text", text:...}] 分片数组，拼起来即可。
 fn parse_chat_content(v: &serde_json::Value) -> String {
@@ -690,7 +714,7 @@ fn parse_chat_content(v: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-pub const GPU_SETUP_HINT: &str = "Arch/CachyOS 的 Intel/AMD 显卡可安装 ggml-vulkan 和对应 Vulkan 驱动；其他平台请安装支持显卡的 llama.cpp 构建及驱动。用 llama-server --list-devices 检查；如需 CPU 识别，请显式使用 --provider cpu。";
+pub const GPU_SETUP_HINT: &str = "Arch/CachyOS 的 Intel/AMD 显卡可安装 ggml-vulkan 和对应 Vulkan 驱动；其他平台请安装支持显卡的 llama.cpp 构建及驱动。用 llama-server --list-devices 检查；如需 CPU 识别，请显式使用 --provider cpu。 / On Arch/CachyOS with Intel/AMD GPUs, install ggml-vulkan and the matching Vulkan driver; on other platforms install a GPU-capable llama.cpp build and drivers. Check with llama-server --list-devices; for CPU transcription, explicitly use --provider cpu.";
 
 /// A positive -ngl is only a request: CPU-only llama.cpp builds ignore it.
 /// Probe with a deadline and file-backed output so a failing driver cannot hang
@@ -705,21 +729,12 @@ pub fn gpu_devices(bin: &Path) -> Result<Vec<String>> {
         .stdout(stdout.try_clone()?)
         .stderr(stderr);
     let mut child = crate::runtime::ManagedChild::spawn("llama-server", &mut cmd)?;
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait() {
-            break status;
-        }
-        anyhow::ensure!(
-            start.elapsed() < Duration::from_secs(15),
-            "llama-server GPU 检测超时。{}",
-            GPU_SETUP_HINT
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let status = child
+        .wait_within(Duration::from_secs(15))
+        .map_err(|_| anyhow::anyhow!("llama-server GPU 检测超时 / llama-server GPU detection timed out. {}", GPU_SETUP_HINT))?;
     anyhow::ensure!(
         status.success(),
-        "llama-server --list-devices 执行失败，请更新 llama.cpp 并检查驱动。{}",
+        "llama-server --list-devices 执行失败，请更新 llama.cpp 并检查驱动 / llama-server --list-devices failed; update llama.cpp and check the driver. {}",
         GPU_SETUP_HINT
     );
     stdout.rewind()?;
@@ -730,7 +745,7 @@ pub fn gpu_devices(bin: &Path) -> Result<Vec<String>> {
 
 fn parse_gpu_devices(output: &str) -> Result<Vec<String>> {
     let (_, rows) = output.split_once("Available devices:").context(
-        "无法解析 llama-server GPU 列表，请更新 llama.cpp 后运行 llama-server --list-devices 检查",
+        "无法解析 llama-server GPU 列表，请更新 llama.cpp 后运行 llama-server --list-devices 检查 / Cannot parse the llama-server GPU list; update llama.cpp and check with llama-server --list-devices",
     )?;
     Ok(rows
         .lines()
@@ -808,18 +823,9 @@ fn probe_help_text(bin: &Path) -> Option<String> {
         .stdout(out.try_clone().ok()?)
         .stderr(err.try_clone().ok()?);
     let mut child = crate::runtime::ManagedChild::spawn("llama-server", &mut cmd).ok()?;
-    let deadline = Instant::now() + HELP_PROBE_TIMEOUT;
-    loop {
-        if let Some(status) = child.try_wait() {
-            if !status.success() {
-                return None;
-            }
-            break;
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    match child.wait_within(HELP_PROBE_TIMEOUT) {
+        Ok(status) if status.success() => {}
+        _ => return None, // 超时或非零退出：按旧版处理
     }
     out.rewind().ok()?;
     err.rewind().ok()?;
@@ -951,14 +957,9 @@ pub(crate) fn ffmpeg_vad(wav: &Path, max_speech: f32) -> Result<Vec<Seg>> {
         .context("ffmpeg silencedetect")?;
     if !out.status.success() {
         anyhow::bail!(
-            "ffmpeg silencedetect 失败（{}）：{}",
+            "ffmpeg silencedetect 失败（{0}）：{1} / ffmpeg silencedetect failed ({0}): {1}",
             out.status,
-            String::from_utf8_lossy(&out.stderr)
-                .lines()
-                .rev()
-                .take(3)
-                .collect::<Vec<_>>()
-                .join(" | ")
+            crate::error::tail_lines(&String::from_utf8_lossy(&out.stderr), 3)
         );
     }
     let log = String::from_utf8_lossy(&out.stderr);
@@ -1016,25 +1017,71 @@ pub struct Energy {
 }
 
 impl Energy {
+    /// 流式读取 16k 单声道 s16 wav（extract_audio 的固定产物）：
+    /// 分块读入并滑动累计每个 100ms 窗口的平方和，只保留 rms 数组——
+    /// 不再整文件读入 + 全样本 Vec（2h 音频旧实现峰值约 1GB）。
     pub fn load(wav: &Path) -> Result<Self> {
-        // 直接解析 16k 单声道 s16 wav（extract_audio 的固定产物）
-        let data = std::fs::read(wav)
+        use std::io::{BufReader, Read, Seek};
+        let file = std::fs::File::open(wav)
             .with_context(|| format!("无法读取音频 / Could not read audio: {}", wav.display()))?;
-        let (body, _) =
-            find_pcm_body(&data).ok_or_else(|| anyhow::anyhow!("无法解析 wav PCM 数据"))?;
-        let mut samples = Vec::with_capacity(body.len() / 2);
-        for c in body.as_chunks::<2>().0 {
-            samples.push(i16::from_le_bytes(*c));
+        let mut reader = BufReader::new(file);
+        // RIFF 头 + 逐 chunk 头扫描，定位 PCM data 块（流式等价于原 find_pcm_body）
+        let mut header = [0u8; 12];
+        reader
+            .read_exact(&mut header)
+            .ok()
+            .filter(|_| &header[0..4] == b"RIFF" && &header[8..12] == b"WAVE")
+            .ok_or_else(|| anyhow::anyhow!("无法解析 wav PCM 数据 / Cannot parse wav PCM data"))?;
+        let data_size = loop {
+            let mut ch = [0u8; 8];
+            if reader.read_exact(&mut ch).is_err() {
+                anyhow::bail!("无法解析 wav PCM 数据 / Cannot parse wav PCM data");
+            }
+            let size = u32::from_le_bytes([ch[4], ch[5], ch[6], ch[7]]) as u64;
+            if &ch[0..4] == b"data" {
+                break size;
+            }
+            // 跳过其他 chunk（含奇数对齐字节）
+            reader.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
+        };
+        let mut rms = Vec::new();
+        let mut buf = vec![0u8; 128 * 1024];
+        let mut half: Option<u8> = None; // 跨 read 边界的样本低字节
+        let mut sum = 0.0f64;
+        let mut n_in_hop = 0usize;
+        let mut remaining = data_size;
+        while remaining > 0 {
+            let want = remaining.min(buf.len() as u64) as usize;
+            let n = reader.read(&mut buf[..want])?;
+            if n == 0 {
+                break; // data 块声明长度超出文件实际（截断文件）：按实际读到的计
+            }
+            remaining -= n as u64;
+            let mut i = 0;
+            if let Some(lo) = half.take() {
+                rms_accumulate(
+                    i16::from_le_bytes([lo, buf[0]]),
+                    &mut sum,
+                    &mut n_in_hop,
+                    &mut rms,
+                );
+                i = 1;
+            }
+            while i + 1 < n {
+                rms_accumulate(
+                    i16::from_le_bytes([buf[i], buf[i + 1]]),
+                    &mut sum,
+                    &mut n_in_hop,
+                    &mut rms,
+                );
+                i += 2;
+            }
+            if i < n {
+                half = Some(buf[i]);
+            }
         }
-        const HOP: usize = 1600; // 100ms @16k
-        let mut rms = Vec::with_capacity(samples.len() / HOP + 1);
-        for ch in samples.chunks(HOP) {
-            let s: f64 = ch
-                .iter()
-                .map(|&v| (v as f64 / 32768.0).powi(2))
-                .sum::<f64>()
-                / ch.len() as f64;
-            rms.push((s.sqrt()) as f32);
+        if n_in_hop > 0 {
+            rms.push((sum / n_in_hop as f64).sqrt() as f32);
         }
         Ok(Self { hop: 0.1, rms })
     }
@@ -1056,42 +1103,23 @@ impl Energy {
     }
 }
 
-/// 跳过 wav 头，返回 (PCM body, sample_rate)。
-fn find_pcm_body(data: &[u8]) -> Option<(&[u8], u32)> {
-    if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
-        return None;
+/// 累计一个样本进当前 100ms 窗口；窗口满则写入 rms 并归零重开。
+fn rms_accumulate(sample: i16, sum: &mut f64, n_in_hop: &mut usize, rms: &mut Vec<f32>) {
+    const HOP: usize = 1600; // 100ms @16k
+    *sum += (sample as f64 / 32768.0).powi(2);
+    *n_in_hop += 1;
+    if *n_in_hop == HOP {
+        rms.push((*sum / HOP as f64).sqrt() as f32);
+        *sum = 0.0;
+        *n_in_hop = 0;
     }
-    let mut pos = 12;
-    let mut rate = 0;
-    while pos + 8 <= data.len() {
-        let id = &data[pos..pos + 4];
-        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
-            as usize;
-        match id {
-            b"fmt " => {
-                if pos + 8 + 16 <= data.len() {
-                    rate = u32::from_le_bytes([
-                        data[pos + 12],
-                        data[pos + 13],
-                        data[pos + 14],
-                        data[pos + 15],
-                    ]);
-                }
-            }
-            b"data" => {
-                let end = (pos + 8 + size).min(data.len());
-                return Some((&data[pos + 8..end], rate));
-            }
-            _ => {}
-        }
-        pos += 8 + size + (size & 1); // chunk 对齐
-    }
-    None
 }
 
 const PAD: f64 = 0.25; // 切音频时向两侧静音各延展的秒数
 const SPLIT_WINDOW: f64 = 3.0; // 在目标切点 ± 此窗口内寻找静音最低点
 const MIN_PIECE: f64 = 1.0; // 硬切产生的最短片段
+/// 切点距段起点的最小秒数：防止能量异常时切点贴到起点，产生超短 chunk 无限递归
+const MIN_HARD_CUT: f64 = 0.5;
 
 /// VAD 后处理：能量感知切分 + 静音填充。
 /// - 超过 max_speech 的段在 [target-3s, target+3s] 窗口内选能量最低点切（避开词中切断）
@@ -1181,7 +1209,7 @@ fn split_smart(s: f64, e: f64, max: f64, energy: Option<&Energy>, out: &mut Vec<
     let cut = energy
         .and_then(|en| en.quietest(w0.max(s), w1))
         .unwrap_or(target);
-    let cut = cut.clamp(s + 0.5, target);
+    let cut = cut.clamp(s + MIN_HARD_CUT, target);
     out.push((s, cut));
     split_smart(cut, e, max, energy, out);
 }

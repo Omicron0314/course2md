@@ -32,9 +32,14 @@ fn source_url(meta: &VideoMeta) -> String {
 
 /// Existing timestamps and fragments must not mask the requested seek time.
 pub fn ts_url(meta: &VideoMeta, sec: f64) -> String {
-    let source = source_url(meta);
-    let Ok(mut url) = url::Url::parse(&source) else {
-        return source;
+    ts_url_from(&source_url(meta), sec)
+}
+
+/// ts_url 的内核：source 已由调用方解析（canonicalize 每次渲染只算一次，
+/// 不再逐 section 重复）。
+fn ts_url_from(source: &str, sec: f64) -> String {
+    let Ok(mut url) = url::Url::parse(source) else {
+        return source.to_string();
     };
     let seconds = (sec.max(0.0).floor() as u64).to_string();
     if url.scheme() == "file" {
@@ -70,6 +75,8 @@ pub fn render_markdown(meta: &VideoMeta, sections: &[Section]) -> String {
     } else {
         format!("- 作者：{}\n", md_inline(&meta.uploader))
     };
+    // 本地来源的 canonicalize 每次渲染只算一次（原实现经 ts_url 逐节重复）
+    let source = source_url(meta);
     let mut md = String::new();
     // 写 String 不会失败，unwrap 安全
     write!(md, "# {title}\n\n").unwrap();
@@ -78,13 +85,7 @@ pub fn render_markdown(meta: &VideoMeta, sections: &[Section]) -> String {
         writeln!(md, "- 时长：{}", fmt_ts(meta.duration)).unwrap();
     }
     if !meta.webpage_url.is_empty() {
-        writeln!(
-            md,
-            "- 来源：[{}]({})",
-            md_inline(&meta.webpage_url),
-            source_url(meta)
-        )
-        .unwrap();
+        writeln!(md, "- 来源：[{}]({})", md_inline(&meta.webpage_url), source).unwrap();
     }
     writeln!(
         md,
@@ -98,7 +99,13 @@ pub fn render_markdown(meta: &VideoMeta, sections: &[Section]) -> String {
         if meta.webpage_url.is_empty() {
             write!(md, "## {}\n\n", fmt_ts(s.t)).unwrap();
         } else {
-            write!(md, "## [{}]({})\n\n", fmt_ts(s.t), ts_url(meta, s.t)).unwrap();
+            write!(
+                md,
+                "## [{}]({})\n\n",
+                fmt_ts(s.t),
+                ts_url_from(&source, s.t)
+            )
+            .unwrap();
         }
         if !s.image.is_empty() {
             write!(md, "![视频 {} 的截图]({})\n\n", fmt_ts(s.t), s.image).unwrap();
@@ -113,6 +120,8 @@ pub fn render_markdown(meta: &VideoMeta, sections: &[Section]) -> String {
 pub fn render_html(meta: &VideoMeta, sections: &[Section]) -> String {
     let mut body = String::new();
     let mut details = Vec::new();
+    // 本地来源的 canonicalize 每次渲染只算一次
+    let source = source_url(meta);
     if !meta.uploader.is_empty() {
         details.push(format!("作者 {}", esc(&meta.uploader)));
     }
@@ -120,7 +129,7 @@ pub fn render_html(meta: &VideoMeta, sections: &[Section]) -> String {
         details.push(format!("时长 {}", fmt_ts(meta.duration)));
     }
     if !meta.webpage_url.is_empty() {
-        details.push(format!("<a href=\"{}\">源视频</a>", esc(&source_url(meta))));
+        details.push(format!("<a href=\"{}\">源视频</a>", esc(&source)));
     }
     details.push(format!(
         "{} 张截图 / {} 段文字",
@@ -142,7 +151,7 @@ pub fn render_html(meta: &VideoMeta, sections: &[Section]) -> String {
             write!(
                 body,
                 "<a href=\"{}\" target=\"_blank\">{}</a>",
-                esc(&ts_url(meta, s.t)),
+                esc(&ts_url_from(&source, s.t)),
                 esc(&fmt_ts(s.t))
             )
             .unwrap();
@@ -181,10 +190,18 @@ pub fn render_json(meta: &VideoMeta, sections: &[Section]) -> Result<String> {
 }
 
 pub(crate) fn esc(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    // 单趟扫描：四趟 replace 会反复分配与搬移整串
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// 按 formats 集合写文件；summary 非空时插入 md/html（元信息之后）。

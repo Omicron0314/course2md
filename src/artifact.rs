@@ -134,6 +134,57 @@ pub struct CurrentVersion {
     pub manifest: String,
 }
 
+/// 发布/校验阶段的文件 I/O 并行度（复制、fsync、SHA-256）：
+/// 小文件居多，8 路即可吃满磁盘/CPU，又不至于进程风暴。
+const IO_PARALLELISM: usize = 8;
+
+/// std::thread::scope 并行执行 `f`（最多 IO_PARALLELISM 路），结果按原顺序写回。
+/// 多个项失败时返回索引最小的错误（与串行版的首个失败一致，结果可复现）。
+fn parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    f: impl Fn(&T) -> Result<R> + Sync,
+) -> Result<Vec<R>> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<R>>> =
+        items.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let first_err: std::sync::Mutex<Option<(usize, anyhow::Error)>> = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..IO_PARALLELISM.min(items.len()) {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = items.get(i) else { break };
+                    match f(item) {
+                        Ok(r) => {
+                            if let Ok(mut slot) = slots[i].lock() {
+                                *slot = Some(r);
+                            }
+                        }
+                        Err(e) => {
+                            if let Ok(mut g) = first_err.lock()
+                                && g.as_ref().is_none_or(|(j, _)| i < *j)
+                            {
+                                *g = Some((i, e));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    if let Some((_, e)) = first_err.into_inner().unwrap_or_default() {
+        return Err(e);
+    }
+    Ok(slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_default()
+                .expect("无错误时所有槽位均已写入")
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone)]
 pub struct Target {
     pub task_id: String,
@@ -200,11 +251,13 @@ pub fn safe_asset_path(root: &Path, relative: &str) -> Result<PathBuf> {
 }
 
 pub fn validate_version(dir: &Path, manifest: &Manifest) -> Result<()> {
-    for asset in &manifest.assets {
+    let required: Vec<&Asset> = manifest
+        .assets
+        .iter()
         // Optional exports are independent files; their loss never invalidates the body.
-        if asset.path.starts_with("exports/") {
-            continue;
-        }
+        .filter(|asset| !asset.path.starts_with("exports/"))
+        .collect();
+    parallel_map(&required, |asset| {
         let path = safe_asset_path(dir, &asset.path)?;
         anyhow::ensure!(
             std::fs::metadata(&path)?.len() == asset.bytes
@@ -212,7 +265,8 @@ pub fn validate_version(dir: &Path, manifest: &Manifest) -> Result<()> {
             "笔记文件已更改或损坏：{} / Note asset changed",
             asset.path
         );
-    }
+        Ok(())
+    })?;
     let body: Document =
         serde_json::from_slice(&std::fs::read(safe_asset_path(dir, &manifest.document)?)?)?;
     anyhow::ensure!(
@@ -261,17 +315,24 @@ pub async fn publish(
     let mut frames = Vec::new();
     let mut copied = std::collections::HashSet::new();
     for section in sections.iter().filter(|s| !s.image.is_empty()) {
-        let source = safe_asset_path(work_dir, &section.image)?;
-        if copied.insert(section.image.clone()) {
-            let dest = staging.path().join(&section.image);
-            std::fs::create_dir_all(dest.parent().unwrap())?;
-            std::fs::copy(&source, &dest)?;
-        }
+        copied.insert(section.image.clone());
         frames.push(FrameEvent {
             t: section.t,
             image: section.image.clone(),
         });
     }
+    // 截图复制并行（原实现逐张 fs::copy 串行）；目标目录先在主线程建好，
+    // frames 列表仍按 section 顺序生成，产物内容与串行版一致。
+    let images: Vec<&String> = copied.iter().collect();
+    for image in &images {
+        let dest = staging.path().join(image.as_str());
+        std::fs::create_dir_all(dest.parent().unwrap())?;
+    }
+    parallel_map(&images, |image| {
+        let source = safe_asset_path(work_dir, image.as_str())?;
+        std::fs::copy(source, staging.path().join(image.as_str()))?;
+        Ok(())
+    })?;
     let document = Document {
         schema: 1,
         meta: meta.clone(),
@@ -325,25 +386,23 @@ pub async fn publish(
     paths.extend(outputs.iter().cloned());
     paths.sort();
     paths.dedup();
-    let assets = paths
-        .into_iter()
-        .map(|path| -> Result<Asset> {
-            let full = staging.path().join(&path);
-            // Windows FlushFileBuffers requires a writable handle. These are
-            // newly staged assets; opening them must not truncate their contents.
-            std::fs::File::options()
-                .read(true)
-                .write(cfg!(windows))
-                .open(&full)?
-                .sync_all()
-                .with_context(|| format!("无法同步笔记文件 / Could not sync note asset: {path}"))?;
-            Ok(Asset {
-                bytes: std::fs::metadata(&full)?.len(),
-                sha256: execution::file_digest(&full)?,
-                path,
-            })
+    // 逐文件 fsync + SHA-256 并行（原实现串行逐文件 hash），结果按 paths 顺序写回
+    let assets = parallel_map(&paths, |path| {
+        let full = staging.path().join(path);
+        // Windows FlushFileBuffers requires a writable handle. These are
+        // newly staged assets; opening them must not truncate their contents.
+        std::fs::File::options()
+            .read(true)
+            .write(cfg!(windows))
+            .open(&full)?
+            .sync_all()
+            .with_context(|| format!("无法同步笔记文件 / Could not sync note asset: {path}"))?;
+        Ok(Asset {
+            bytes: std::fs::metadata(&full)?.len(),
+            sha256: execution::file_digest(&full)?,
+            path: path.clone(),
         })
-        .collect::<Result<Vec<_>>>()?;
+    })?;
     let revision = if target.course_dir.join("current.json").exists() {
         let current: CurrentVersion =
             serde_json::from_slice(&std::fs::read(target.course_dir.join("current.json"))?)?;

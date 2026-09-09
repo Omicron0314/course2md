@@ -3,7 +3,7 @@ use crate::{
     artifact::{self, Asset, Document, Manifest, Outcome, Outcomes, Status},
     execution,
     fetch::VideoMeta,
-    timeline::{Section, TranscriptEvent},
+    timeline::{Section, TranscriptEvent, parse_timestamp},
 };
 use anyhow::{Context, Result};
 use html5ever::tokenizer::{
@@ -20,6 +20,12 @@ pub const IMPORT_DIR: &str = ".course2md-import";
 const TEXT_LIMIT: u64 = 32 * 1024 * 1024;
 const RESOURCE_LIMIT: u64 = 64 * 1024 * 1024;
 const TOTAL_LIMIT: usize = 256 * 1024 * 1024;
+/// 课程身份取路径摘要的前 32 个十六进制字符（128 bit）：课程数按用户拥有的目录计，
+/// 规模小，128 bit 碰撞余量已足够。
+const COURSE_ID_DIGEST_HEX: usize = 32;
+/// 版本身份取内容指纹的前 40 个十六进制字符（160 bit，与 git 对象 ID 同级）：
+/// 版本按导入全文内容区分，同一课程下版本数远多于课程数，取更长前缀压碰撞概率。
+const VERSION_ID_DIGEST_HEX: usize = 40;
 const CANDIDATES: [&str; 4] = [
     "course.md",
     "course.html",
@@ -112,14 +118,15 @@ pub fn is_candidate(dir: &Path) -> bool {
 }
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     use std::io::Read as _;
+    let meta = std::fs::metadata(path)?;
     anyhow::ensure!(
-        std::fs::metadata(path)?.is_file(),
-        "引用不是普通文件，未读取：{}",
+        meta.is_file(),
+        "引用不是普通文件，未读取 / Reference is not a regular file; not read: {}",
         path.display()
     );
     anyhow::ensure!(
-        std::fs::metadata(path)?.len() <= limit,
-        "旧文件过大，未改动原文件：{}",
+        meta.len() <= limit,
+        "旧文件过大，未改动原文件 / Legacy file too large; original file unchanged: {}",
         path.display()
     );
     let mut bytes = Vec::new();
@@ -128,53 +135,13 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
         .read_to_end(&mut bytes)?;
     anyhow::ensure!(
         bytes.len() as u64 <= limit,
-        "旧文件在读取时发生变化，原文件已保留"
+        "旧文件在读取时发生变化，原文件已保留 / Legacy file changed while reading; original file kept"
     );
     Ok(bytes)
-}
-fn text(bytes: &[u8]) -> Result<String> {
-    if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
-        anyhow::ensure!(bytes.len().is_multiple_of(2), "旧文件的 UTF-16 编码不完整");
-        let little = bytes[0] == 0xff;
-        let units = bytes[2..]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|b| {
-                if little {
-                    u16::from_le_bytes([b[0], b[1]])
-                } else {
-                    u16::from_be_bytes([b[0], b[1]])
-                }
-            })
-            .collect::<Vec<_>>();
-        return String::from_utf16(&units).context("旧文件包含无效 UTF-16 文字");
-    }
-    Ok(
-        std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes))
-            .context("旧文件不是可识别的 UTF-8 或 UTF-16 文字；原文件已保留")?
-            .to_owned(),
-    )
 }
 fn meaningful(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty() && !matches!(value, "(本段无语音)" | "（本段无语音）" | "本段无语音")
-}
-pub fn parse_seconds(value: &str) -> Option<f64> {
-    let value = value.trim().trim_matches(['[', ']']);
-    let parts = value.split(':').collect::<Vec<_>>();
-    if !(2..=3).contains(&parts.len()) {
-        return None;
-    }
-    let mut result = 0.;
-    for (i, part) in parts.iter().enumerate() {
-        let n: f64 = part.parse().ok()?;
-        if !n.is_finite() || n < 0. || (i > 0 && n >= 60.) {
-            return None;
-        }
-        result = result * 60. + n;
-    }
-    Some(result)
 }
 
 #[derive(Default)]
@@ -205,7 +172,7 @@ impl HtmlReader {
                 self.seen_h1 = true;
             }
             self.parsed.blocks.push(Block::Heading {
-                seconds: parse_seconds(&value),
+                seconds: parse_timestamp(&value),
                 text: value,
                 level,
             });
@@ -222,7 +189,7 @@ impl HtmlReader {
                     {
                         self.parsed.author = Some(author.into());
                     }
-                    if let Some(duration) = part.strip_prefix("时长 ").and_then(parse_seconds) {
+                    if let Some(duration) = part.strip_prefix("时长 ").and_then(parse_timestamp) {
                         self.parsed.duration = Some(duration);
                     }
                 }
@@ -290,7 +257,7 @@ impl TokenSink for HtmlReader {
                             if self.parsed.source.is_none()
                                 && (label == "源视频"
                                     || label.contains("来源")
-                                    || parse_seconds(label).is_some())
+                                    || parse_timestamp(label).is_some())
                             {
                                 self.parsed.source = Some(href);
                             }
@@ -348,7 +315,7 @@ fn parse_markdown(value: &str) -> Parsed {
                 }
                 return false;
             }
-            if let Some(duration) = value.strip_prefix("时长：").and_then(parse_seconds) {
+            if let Some(duration) = value.strip_prefix("时长：").and_then(parse_timestamp) {
                 parsed.duration = Some(duration);
                 return false;
             }
@@ -366,7 +333,7 @@ fn parse_json(value: &str) -> Result<Parsed> {
         .and_then(|v| v.as_u64());
     anyhow::ensure!(
         schema.is_none_or(|v| v == 1),
-        "这份 JSON 的结构版本暂不受支持；原文件已保留"
+        "这份 JSON 的结构版本暂不受支持；原文件已保留 / This JSON structure version is not supported yet; original file kept"
     );
     let mut parsed = Parsed {
         meta: value.get("meta").and_then(known_meta),
@@ -396,7 +363,7 @@ fn parse_json(value: &str) -> Result<Parsed> {
     parsed.source = value["source"]["url"].as_str().map(str::to_owned);
     let sections = value["sections"]
         .as_array()
-        .context("JSON 缺少可识别的笔记段落")?;
+        .context("JSON 缺少可识别的笔记段落 / JSON has no recognizable note sections")?;
     parsed.sections = serde_json::from_value::<Vec<Section>>(value["sections"].clone()).ok();
     if let Some(sections) = &parsed.sections {
         for section in sections {
@@ -405,7 +372,7 @@ fn parse_json(value: &str) -> Result<Parsed> {
                     && section.t >= 0.
                     && section.end.is_finite()
                     && section.end >= 0.,
-                "JSON 中的视频时间无效，原文件已保留"
+                "JSON 中的视频时间无效，原文件已保留 / Invalid video timestamps in JSON; original file kept"
             );
             if !section.speech.is_empty() {
                 execution::validate_events(&section.speech)?;
@@ -433,7 +400,7 @@ fn parse_json(value: &str) -> Result<Parsed> {
         }
         let speech = section["speech"]
             .as_array()
-            .context("JSON 段落缺少文字列表")?;
+            .context("JSON 段落缺少文字列表 / JSON section is missing a text list")?;
         for event in speech {
             if let Some(value) = event["text"].as_str().filter(|s| meaningful(s)) {
                 parsed.blocks.push(Block::Paragraph { text: value.into() });
@@ -451,36 +418,36 @@ fn readable(parsed: &Parsed) -> bool {
 fn read_resource(root: &Path, reference: &str) -> Result<(Vec<u8>, Option<String>, String)> {
     use base64::Engine as _;
     if let Some(data) = reference.strip_prefix("data:") {
-        let (header, encoded) = data.split_once(',').context("图片数据地址不完整")?;
+        let (header, encoded) = data.split_once(',').context("图片数据地址不完整 / Incomplete image data URL")?;
         anyhow::ensure!(
             header.ends_with(";base64") && header.starts_with("image/"),
-            "图片数据地址不受支持"
+            "图片数据地址不受支持 / Unsupported image data URL"
         );
         anyhow::ensure!(
             encoded.len() as u64 <= RESOURCE_LIMIT * 2,
-            "图片数据超过读取上限"
+            "图片数据超过读取上限 / Image data exceeds the read limit"
         );
         let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-        let mime = image_mime(&bytes).context("图片格式不受支持")?;
+        let mime = image_mime(&bytes).context("图片格式不受支持 / Unsupported image format")?;
         return Ok((bytes, None, mime.into()));
     }
-    let base = url::Url::from_directory_path(root).map_err(|_| anyhow::anyhow!("资料目录无效"))?;
+    let base = url::Url::from_directory_path(root).map_err(|_| anyhow::anyhow!("资料目录无效 / Invalid archive directory"))?;
     let url = base.join(reference)?;
-    anyhow::ensure!(url.scheme() == "file", "远程图片未下载");
+    anyhow::ensure!(url.scheme() == "file", "远程图片未下载 / Remote image not downloaded");
     let path = url
         .to_file_path()
-        .map_err(|_| anyhow::anyhow!("图片文件地址无效"))?;
+        .map_err(|_| anyhow::anyhow!("图片文件地址无效 / Invalid image file URL"))?;
     let canonical = path.canonicalize()?;
     anyhow::ensure!(
         canonical.starts_with(root),
-        "图片位于此资料目录之外，未读取"
+        "图片位于此资料目录之外，未读取 / Image is outside this archive directory; not read"
     );
     let relative = canonical
         .strip_prefix(root)?
         .to_string_lossy()
         .replace('\\', "/");
     let bytes = read_bounded(&canonical, RESOURCE_LIMIT)?;
-    let mime = image_mime(&bytes).context("图片格式不受支持")?;
+    let mime = image_mime(&bytes).context("图片格式不受支持 / Unsupported image format")?;
     Ok((bytes, Some(relative), mime.into()))
 }
 pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
@@ -608,7 +575,7 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
         }
         let result = (|| -> Result<(Parsed, String)> {
             let bytes = read_bounded(&artifact::safe_asset_path(&root, name)?, TEXT_LIMIT)?;
-            let content = text(&bytes);
+            let content = crate::subtitle::decode_text_with_bom(&bytes);
             originals.push(Original {
                 name: name.to_string(),
                 path: format!("original/{name}"),
@@ -646,7 +613,7 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
                     ));
                 }
             }
-            Err(error) => warnings.push(format!("{name} 无法读取：{error:#}")),
+            Err(error) => warnings.push(format!("{name} 无法读取 / Cannot read {name}: {error:#}")),
         }
     }
     candidates.sort_by_key(|(modified, priority, ..)| (*modified, *priority));
@@ -656,7 +623,7 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
     };
     if !candidates.is_empty() {
         warnings.push(format!(
-            "正在读取最近修改的 {primary}；其他旧文稿已原样保留。"
+            "正在读取最近修改的 {primary}；其他旧文稿已原样保留。 / Reading the most recently modified {primary}; other legacy documents are kept as-is."
         ));
     }
     let mut meta = parsed
@@ -706,7 +673,7 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
         meta.extractor = "local".into();
     }
     if meta.webpage_url.is_empty() {
-        warnings.push("旧资料没有记录视频来源；可以阅读和导出，不会自动重新处理。".into());
+        warnings.push("旧资料没有记录视频来源；可以阅读和导出，不会自动重新处理。 / The legacy archive has no recorded video source; it can be read and exported, but will not be reprocessed automatically.".into());
     }
     for name in ["meta.json", "run.json"] {
         let path = root.join(name);
@@ -725,7 +692,7 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
         .get("original/run.json")
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
     if !run.is_some_and(|v| v["success"].as_bool() == Some(true)) {
-        warnings.push("旧处理记录缺失或未完成；本次仅导入已存在的正文。".into());
+        warnings.push("旧处理记录缺失或未完成；本次仅导入已存在的正文。 / The legacy run record is missing or incomplete; only the existing document is imported this time.".into());
     }
     let mut resources = BTreeMap::new();
     all_images.sort();
@@ -751,9 +718,9 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
                 );
             }
             Err(error) => warnings.push(format!(
-                "旧图片未包含（{}）：{error:#}",
+                "旧图片未包含（{0}） / Legacy image not included ({0}): {error:#}",
                 if reference.starts_with("data:") {
-                    "内嵌图片"
+                    "内嵌图片 / embedded image"
                 } else {
                     &reference
                 }
@@ -761,7 +728,7 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
         }
         anyhow::ensure!(
             files.values().map(Vec::len).sum::<usize>() <= TOTAL_LIMIT,
-            "旧资料及图片超过本次导入上限；原文件已保留"
+            "旧资料及图片超过本次导入上限；原文件已保留 / Legacy archive and images exceed the import limit; original files kept"
         );
     }
     let has_html = primary == "course.md"
@@ -773,7 +740,7 @@ pub fn read(dir: &Path) -> Result<Option<Note>> {
         });
     if has_html {
         warnings
-            .push("原稿包含 HTML 标记；阅读和新导出采用文字与图片结构，原稿已原样保留。".into());
+            .push("原稿包含 HTML 标记；阅读和新导出采用文字与图片结构，原稿已原样保留。 / The original contains HTML markup; reading and new exports use the text-and-image structure, and the original is kept as-is.".into());
     }
     let markdown = if primary == "course.md" && !has_html {
         rewrite_markdown(&content, &resources)
@@ -886,7 +853,7 @@ pub fn provenance(version: &Path) -> Result<Option<Provenance>> {
         version,
         "legacy.json",
     )?)?)?;
-    anyhow::ensure!(value.schema == 1, "旧资料导入记录版本不受支持");
+    anyhow::ensure!(value.schema == 1, "旧资料导入记录版本不受支持 / Unsupported legacy import record version");
     Ok(Some(value))
 }
 pub fn import(dir: &Path) -> Result<Option<Imported>> {
@@ -902,22 +869,22 @@ pub fn import_note(dir: &Path, note: Note) -> Result<Imported> {
     let course_id = if store.exists() {
         anyhow::ensure!(
             !std::fs::symlink_metadata(&store)?.file_type().is_symlink(),
-            "旧资料导入位置是符号链接，未写入"
+            "旧资料导入位置是符号链接，未写入 / Legacy import destination is a symlink; not written"
         );
         let owner: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(&owner_path).context("导入位置已有其他文件，未覆盖")?,
+            &std::fs::read(&owner_path).context("导入位置已有其他文件，未覆盖 / Another file already exists at the import destination; not overwritten")?,
         )?;
         anyhow::ensure!(
             owner["schema"] == 1 && owner["kind"] == "legacy_import",
-            "导入位置无法验证归属，未写入"
+            "导入位置无法验证归属，未写入 / Cannot verify ownership of the import destination; not written"
         );
-        let id = owner["course_id"].as_str().context("旧资料导入身份缺失")?;
-        anyhow::ensure!(execution::valid_id(id), "旧资料导入身份无效");
+        let id = owner["course_id"].as_str().context("旧资料导入身份缺失 / Legacy import identity missing")?;
+        anyhow::ensure!(execution::valid_id(id), "旧资料导入身份无效 / Invalid legacy import identity");
         id.to_owned()
     } else {
         let id = format!(
             "legacy-{}",
-            &execution::digest(root.to_string_lossy().as_bytes())[..32]
+            &execution::digest(root.to_string_lossy().as_bytes())[..COURSE_ID_DIGEST_HEX]
         );
         let staging = tempfile::Builder::new()
             .prefix(".legacy-init-")
@@ -933,7 +900,7 @@ pub fn import_note(dir: &Path, note: Note) -> Result<Imported> {
         id
     };
     let _lock = crate::runtime::lock_file(&store.join(".import.lock"))?;
-    let version_id = format!("import-{}", &note.fingerprint[..40]);
+    let version_id = format!("import-{}", &note.fingerprint[..VERSION_ID_DIGEST_HEX]);
     let versions = store.join("versions");
     std::fs::create_dir_all(&versions)?;
     let version = versions.join(&version_id);

@@ -128,9 +128,11 @@ fn ensure_metallib() -> Result<()> {
         }
     }
     anyhow::bail!(
-        "缺少 MLX Metal 库（{}），CoreML 推理不可用。\n\
+        "缺少 MLX Metal 库（{0}），CoreML 推理不可用。\n\
          从源码构建：把 native/apple-asr/.build/out/Products/Release/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib \
-         复制为二进制同目录的 mlx.metallib；预编译安装：重跑 install.sh。",
+         复制为二进制同目录的 mlx.metallib；预编译安装：重跑 install.sh。 / Missing the MLX Metal library ({0}); CoreML inference is unavailable. \
+         From source: copy native/apple-asr/.build/out/Products/Release/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib \
+         to mlx.metallib next to the binary; for prebuilt installs, rerun install.sh.",
         dir.join("mlx.metallib").display()
     )
 }
@@ -187,7 +189,7 @@ fn migrate_marker(marker: &Path, model: &str) {
     })() {
         Ok(()) => {
             let _ = std::fs::remove_file(marker);
-            tracing::info!("已将模型选择从 asr_model marker 迁移到 config.toml");
+            tracing::info!("已将模型选择从 asr_model marker 迁移到 config.toml / Migrated the model selection from the asr_model marker to config.toml");
         }
         Err(e) => tracing::warn!(
             "无法更新旧模型配置，已保留原设置 / Could not update legacy model settings; original settings kept: {e:#}"
@@ -205,7 +207,7 @@ fn prompt_model_choice() -> Result<String> {
         || !std::io::stderr().is_terminal()
     {
         tracing::info!(
-            "非交互环境，默认使用 Qwen3-ASR 1.7B 模型（--asr-model qwen3-0.6b/whisper 可切换）"
+            "非交互环境，默认使用 Qwen3-ASR 1.7B 模型（--asr-model qwen3-0.6b/whisper 可切换） / Non-interactive environment; defaulting to the Qwen3-ASR 1.7B model (switch with --asr-model qwen3-0.6b/whisper)"
         );
         return Ok("qwen3-1.7b".into());
     }
@@ -319,7 +321,7 @@ pub fn prepare_cache(model: &str) -> Result<()> {
             "{}",
             CStr::from_bytes_until_nul(&error)
                 .map(|error| error.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "Apple 模型缓存准备失败".into())
+                .unwrap_or_else(|_| "Apple 模型缓存准备失败 / Apple model cache preparation failed".into())
         );
     }
     Ok(())
@@ -359,7 +361,7 @@ pub fn run_coreml(
     ensure_metallib()?;
     tracing::info!(model, "loading cached Apple native ASR");
     crate::progress::stage("model/apple", "start");
-    let asr = CoremlAsr::load(model).context("CoreML 模型加载失败")?;
+    let asr = CoremlAsr::load(model).context("CoreML 模型加载失败 / CoreML model loading failed")?;
     crate::progress::stage("model/apple", "done");
     tracing::info!(
         secs = format_args!("{:.1}", t0.elapsed().as_secs_f64()),

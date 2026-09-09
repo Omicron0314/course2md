@@ -57,6 +57,7 @@ pub fn stage(name: &str, status: &str) {
                 "加载识别模型（首次可能需要下载）/ Loading speech model (first use may download files)"
             }
             "fetch" => "读取视频信息 / Reading video information",
+            "subtitle" => "查找字幕 / Looking for subtitles",
             "download" => "下载视频 / Downloading video",
             "scenes" => "提取截图 / Extracting slides",
             "scenes/scan" => "扫描画面 / Scanning video frames",
@@ -64,7 +65,7 @@ pub fn stage(name: &str, status: &str) {
             "audio" => "提取音频 / Extracting audio",
             "transcribe" | "asr" => "识别语音 / Transcribing speech",
             "llm" => "润色文字 / Proofreading transcript",
-            "summarize" => "生成总结 / Generating summary",
+            "summary" | "summarize" => "生成总结 / Generating summary",
             "render" => "生成笔记 / Writing notes",
             name if name.starts_with("model/") => "下载识别模型 / Downloading speech model",
             _ => return,

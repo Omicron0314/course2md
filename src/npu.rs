@@ -192,16 +192,8 @@ pub fn run_npu(
 
     stop_model_worker(&mut child, &base);
 
-    let events = r.map_err(|e| {
-        let tail = stderr_tail.tail();
-        if tail.is_empty() {
-            e
-        } else {
-            e.context(format!(
-                "NPU 识别错误详情 / NPU transcription error details:\n{tail}"
-            ))
-        }
-    })?;
+    let events =
+        r.map_err(|e| stderr_tail.attach(e, "NPU 识别错误详情 / NPU transcription error details"))?;
     tracing::info!(
         n = events.len(),
         secs = format_args!("{:.1}", t0.elapsed().as_secs_f64()),
@@ -241,7 +233,7 @@ fn start_model_worker(
         Some("\"status\":\"ok\""),
     ) {
         return Err(e.context(format!(
-            "Intel NPU 服务启动失败/超时（首次模型编译可能需要更多时间），其 stderr 尾部：\n{}",
+            "Intel NPU 服务启动失败/超时（首次模型编译可能需要更多时间） / Intel NPU service failed to start or timed out (the first model compilation may take longer); stderr tail:\n{}",
             stderr_tail.tail()
         )));
     }
@@ -281,18 +273,9 @@ pub fn prepare_npu_model(model_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// 非阻塞轮询等待子进程退出；true = 已在 timeout 内退出。
+/// 等待子进程退出（内部轮询由 ManagedChild::wait_within 实现）；true = 已在 timeout 内退出。
 fn wait_exit(child: &mut crate::runtime::ManagedChild, timeout: Duration) -> bool {
-    let t0 = Instant::now();
-    loop {
-        if child.try_wait().is_some() {
-            return true;
-        }
-        if t0.elapsed() >= timeout {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    child.wait_within(timeout).is_ok()
 }
 
 fn spawn_npu_worker(script: &Path, model: &str, port: u16) -> Result<crate::runtime::ManagedChild> {
@@ -343,19 +326,6 @@ mod tests {
     /// 整个 NPU 后端无法启动（SyntaxError 在编译期拦截，任何路径都跑不到）。
     /// 无 python3 的环境下跳过。
     #[test]
-    fn custom_repository_case_is_preserved_and_aliases_are_shared() {
-        assert_eq!(
-            resolve_npu_model(Some("MyOrg/MyModel-INT8")),
-            "MyOrg/MyModel-INT8"
-        );
-        assert_eq!(
-            resolve_npu_model(Some("WHISPER-LARGE")),
-            resolve_npu_model(Some("whisper"))
-        );
-        assert!(npu_model_alias("whisper-large").is_some());
-    }
-
-    #[test]
     fn worker_script_is_valid_python() {
         let Some(py) = crate::runtime::which("python3") else {
             eprintln!("skip: python3 not found");
@@ -393,5 +363,15 @@ mod tests {
             resolve_npu_model(Some("org/custom-model")),
             "org/custom-model"
         );
+        // 别名大小写不敏感；自定义仓库名原样透传，大小写保持不变
+        assert_eq!(
+            resolve_npu_model(Some("WHISPER-LARGE")),
+            resolve_npu_model(Some("whisper"))
+        );
+        assert_eq!(
+            resolve_npu_model(Some("MyOrg/MyModel-INT8")),
+            "MyOrg/MyModel-INT8"
+        );
+        assert!(npu_model_alias("whisper-large").is_some());
     }
 }

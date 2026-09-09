@@ -25,6 +25,18 @@ pub const DEFAULT_OUT_DIR: &str = "out";
 /// 因此不设平台差异化默认——Linux+AMD 只做风险警告（pipeline.rs），由用户手动降载。
 pub const DEFAULT_GPU_LAYERS: u32 = 99;
 
+/// 校验服务地址为完整的 HTTP(S) URL（llm base_url 与 asr_api 共用同一判定）。
+pub fn ensure_http_url(raw: &str) -> AnyhowResult<url::Url> {
+    let url = url::Url::parse(raw.trim()).context(
+        "服务地址无效，请使用完整的 HTTP(S) URL。 / Invalid service URL; use a complete HTTP(S) URL.",
+    )?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+        "服务地址无效，请使用完整的 HTTP(S) URL。 / Invalid service URL; use a complete HTTP(S) URL."
+    );
+    Ok(url)
+}
+
 /// Accept a service root or its exact supported endpoint, never double-append paths.
 pub fn asr_endpoint(api: &crate::settings::AsrApi) -> AnyhowResult<String> {
     let base = api.base_url.trim().trim_end_matches('/');
@@ -319,7 +331,7 @@ impl PipelineConfig {
         );
         anyhow::ensure!(
             self.gpu_layers <= 99,
-            "gpu_layers 必须在 0..=99（收到 {}）",
+            "gpu_layers 必须在 0..=99（收到 {0}）/ gpu_layers must be in 0..=99 (got {0})",
             self.gpu_layers
         );
 
@@ -387,13 +399,7 @@ impl PipelineConfig {
 
         // api 后端：key 缺失时立即报错，而不是切完音频才发现
         if self.provider == AsrProvider::Api {
-            let endpoint = url::Url::parse(&asr_endpoint(&self.asr_api)?).context(
-                "请输入包含 http:// 或 https:// 的语音服务地址 / Invalid speech service URL",
-            )?;
-            anyhow::ensure!(
-                matches!(endpoint.scheme(), "http" | "https") && endpoint.host_str().is_some(),
-                "请输入包含 http:// 或 https:// 的语音服务地址 / Invalid speech service URL"
-            );
+            ensure_http_url(&asr_endpoint(&self.asr_api)?)?;
             anyhow::ensure!(
                 !self.asr_api.model.trim().is_empty(),
                 "请输入语音服务提供的模型 ID / Speech model ID is required"
@@ -646,6 +652,10 @@ fn youtube_id(s: &str) -> Option<String> {
     None
 }
 
+/// 路径组件的字符数上限（净化后的标题/平台名）：防止超长标题撑出超过
+/// 文件系统限制的路径。
+const MAX_COMPONENT_CHARS: usize = 80;
+
 /// 保留中文等标题字符，去掉路径非法符。
 pub fn sanitize_component(s: &str) -> String {
     let mut out = String::new();
@@ -664,7 +674,7 @@ pub fn sanitize_component(s: &str) -> String {
         }
     }
     let out = out.trim_matches(['-', '.', ' ']).to_string();
-    let out: String = out.chars().take(80).collect();
+    let out: String = out.chars().take(MAX_COMPONENT_CHARS).collect();
     if out.is_empty() {
         "untitled".into()
     } else {

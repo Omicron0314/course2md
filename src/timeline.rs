@@ -40,6 +40,29 @@ const PARAGRAPH_GAP_SECS: f64 = 3.5;
 /// 段落组织：单段最大字符数（超过则强制分段）。
 const MAX_PARAGRAPH_CHARS: usize = 420;
 
+/// 宽容的时间戳解析（字幕 cue、旧导出标题、LLM 大纲时间共用，取三者超集语义）：
+/// `HH:MM:SS` / `MM:SS` / 裸秒数，小数分隔符 `.` 或 `,`，容忍首尾空白、
+/// `[...]` 包裹（旧导出标题）与秒后缀 `s`（LLM 常见的 "120s" 输出）。
+/// 分/秒位 >= 60、负数或非有限数值一律拒绝（下游排序/二分不接受异常值）。
+pub(crate) fn parse_timestamp(value: &str) -> Option<f64> {
+    let value = value.trim().trim_matches(['[', ']']).trim();
+    let value = value.strip_suffix('s').unwrap_or(value);
+    let value = value.replace(',', ".");
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let mut result = 0.0;
+    for (i, part) in parts.iter().enumerate() {
+        let n: f64 = part.trim().parse().ok()?;
+        if !n.is_finite() || n < 0.0 || (i > 0 && n >= 60.0) {
+            return None;
+        }
+        result = result * 60.0 + n;
+    }
+    Some(result)
+}
+
 /// timeline.jsonl 的一行。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -213,8 +236,7 @@ pub fn coalesce_sections(sections: &mut [Section]) {
 fn append_text(paragraph: &mut String, next: &str) {
     let latin_word = |c: char| {
         c.is_ascii_alphanumeric()
-            || (c.is_alphabetic()
-                && matches!(c, '\u{00c0}'..='\u{024f}' | '\u{1e00}'..='\u{1eff}'))
+            || (c.is_alphabetic() && matches!(c, '\u{00c0}'..='\u{024f}' | '\u{1e00}'..='\u{1eff}'))
     };
     let previous_is_word = paragraph
         .trim_end_matches(['.', ',', '!', '?', ':', ';', ')', ']', '}', '»', '”', '"'])
@@ -511,7 +533,11 @@ mod tests {
     #[test]
     fn subtitle_boundaries_preserve_latin_sentences_without_separating_cjk_or_apostrophes() {
         for (left, right, expected) in [
-            ("Le risque est limité.", "La suite.", "Le risque est limité. La suite."),
+            (
+                "Le risque est limité.",
+                "La suite.",
+                "Le risque est limité. La suite.",
+            ),
             ("café", "économique", "café économique"),
             ("A risk?", "Yes.", "A risk? Yes."),
             ("a word", ", next", "a word, next"),

@@ -144,8 +144,21 @@ pub fn save(cfg: &ConfigFile) -> Result<PathBuf> {
     Ok(p)
 }
 
-/// `config init` 写入的带注释模板。
-pub const TEMPLATE: &str = r#"# course2md 配置 / Configuration
+/// `config init` 写入的带注释模板。输出格式默认值由 [`crate::options::default_formats`]
+/// 渲染，模板注释不会与内置默认脱节。
+pub fn template() -> String {
+    let formats = crate::options::default_formats()
+        .iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    TEMPLATE.replace(
+        "#formats = [DEFAULT_FORMATS]",
+        &format!("#formats = [{formats}]"),
+    )
+}
+
+const TEMPLATE: &str = r#"# course2md 配置 / Configuration
 # 优先级：命令行 > 本文件 > 内置默认 / Priority: CLI > this file > built-in defaults
 # 取消注释以设置默认值 / Uncomment values to set defaults
 # 查看当前设置：course2md config show / View settings: course2md config show
@@ -187,7 +200,7 @@ pub const TEMPLATE: &str = r#"# course2md 配置 / Configuration
 # 每段语音最长秒数 (1–600) / Maximum speech segment length in seconds (1–600)
 #max_speech = 20.0
 # 输出格式 / Output formats: md, html, json
-#formats = ["md", "html"]
+#formats = [DEFAULT_FORMATS]
 # gpu/cpu 模型目录；默认使用系统缓存 / gpu/cpu model directory; platform cache by default
 #model_dir = "~/.cache/course2md/models"
 # 成功后保留下载的视频 / Keep downloaded video after success
@@ -285,17 +298,16 @@ pub fn print_effective(cfg: &ConfigFile) {
         "  max_speech     : {}",
         d.max_speech.unwrap_or(c::DEFAULT_MAX_SPEECH)
     );
-    println!(
-        "  formats        : {}",
-        d.formats
+    let formats = |formats: &Option<Vec<c::OutputFormat>>| {
+        formats
             .clone()
-            .map(|f| f
-                .iter()
-                .map(|x| x.to_string())
-                .collect::<Vec<_>>()
-                .join(","))
-            .unwrap_or_else(|| "md,html".into())
-    );
+            .unwrap_or_else(crate::options::default_formats)
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    println!("  formats        : {}", formats(&d.formats));
     println!(
         "  model_dir      : {}",
         d.model_dir

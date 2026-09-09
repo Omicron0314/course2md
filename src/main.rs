@@ -107,7 +107,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     if cli.login.is_some() {
         anyhow::ensure!(
             cli.source.as_deref().is_none_or(config::looks_like_source),
-            "--login bilibili 后只能跟视频链接或本地视频路径"
+            "--login bilibili 后只能跟视频链接或本地视频路径 / After --login bilibili, provide only a video URL or local file path"
         );
         course2md::auth::login_bilibili()?;
         if cli.source.is_none() {
@@ -130,7 +130,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 init_logging(0, false, json);
                 let root = config::model_dir_from(dir.as_deref());
                 let status = models::status::inspect(provider, &model, &root)?;
-                println!("{}", serde_json::to_string(&status)?);
+                if json {
+                    println!("{}", serde_json::to_string(&status)?);
+                } else {
+                    print_model_status(&status);
+                }
                 Ok(())
             }
             ModelsCmd::Prepare {
@@ -147,7 +151,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     serde_json::json!({"type":"done", "out_dir":root, "title":model, "slides":0, "segments":0, "model_status":status}),
                 );
                 if !json {
-                    println!("模型准备完成：{}", serde_json::to_string(&status)?);
+                    println!("模型准备完成 / Model preparation finished.");
+                    print_model_status(&status);
                 }
                 Ok(())
             }
@@ -233,7 +238,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     if let Some(dir) = path.parent() {
                         std::fs::create_dir_all(dir)?;
                     }
-                    std::fs::write(&path, settings::TEMPLATE)?;
+                    std::fs::write(&path, settings::template())?;
                     println!(
                         "已生成配置模板 / Configuration template created: {}",
                         path.display()
@@ -248,7 +253,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Some(Command::Summarize(args)) => {
-            init_logging(0, false, false);
+            init_logging(0, args.quiet, false);
+            progress::set_quiet(args.quiet);
             let file = settings::load()?;
             llm::validate(&file.llm)?;
             let rt = tokio::runtime::Runtime::new()?;
@@ -346,7 +352,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             if !std::path::Path::new(&source).is_file() {
                 course2md::error::require_cmd("yt-dlp")?;
             }
-            // 首次使用向导：无配置文件 + 交互终端时引导配置并写盘（非交互原样返回）；
+            // 首次使用向导：未配置转写方式 + 交互终端时引导配置并写盘（非交互原样返回）；
             // json 模式显式跳过——stdout 必须保持纯 NDJSON，不能混进交互提示
             let file = if cli.opts.json || cli.opts.quiet {
                 file
@@ -371,7 +377,12 @@ fn collect_targets(
         let current: course2md::artifact::CurrentVersion =
             serde_json::from_slice(&std::fs::read(dir.join("current.json"))?)?;
         let manifest = course2md::artifact::safe_asset_path(dir, &current.manifest)?;
-        out.push(manifest.parent().context("笔记清单位置无效")?.to_path_buf());
+        out.push(
+            manifest
+                .parent()
+                .context("笔记清单位置无效 / Invalid note manifest location")?
+                .to_path_buf(),
+        );
         return Ok(());
     }
     if dir.join("timeline.jsonl").is_file() || dir.join("manifest.json").is_file() {
@@ -403,10 +414,12 @@ fn summarize_version(
     let document: artifact::Document =
         serde_json::from_slice(&std::fs::read(dir.join(&base.document))?)?;
     if document.summary.is_some() && !force {
-        println!(
-            "已有摘要，笔记保持不变 / Summary already exists: {}",
-            dir.display()
-        );
+        if !progress::is_quiet() {
+            println!(
+                "已有摘要，笔记保持不变 / Summary already exists: {}",
+                dir.display()
+            );
+        }
         return Ok(());
     }
     let mut settings = file.llm.clone();
@@ -428,7 +441,7 @@ fn summarize_version(
     let course_dir = dir
         .parent()
         .and_then(|p| p.parent())
-        .context("笔记版本位置无效")?
+        .context("笔记版本位置无效 / Invalid note version location")?
         .to_path_buf();
     let work = course_dir.join(".work").join(&task_id);
     execution::bind_work_dir(
@@ -445,17 +458,15 @@ fn summarize_version(
         course_dir,
     };
     if artifact::published(&target)?.is_some() {
-        println!(
-            "摘要已保存 / Summary already saved: {}",
-            target.version_dir().display()
-        );
+        if !progress::is_quiet() {
+            println!(
+                "摘要已保存 / Summary already saved: {}",
+                target.version_dir().display()
+            );
+        }
         return Ok(());
     }
-    let speech = document
-        .sections
-        .iter()
-        .flat_map(|section| section.speech.clone())
-        .collect::<Vec<_>>();
+    let speech = pipeline::all_speech(&document.sections);
     let summary = rt.block_on(course2md::summarize::summarize(
         &file.llm,
         &speech,
@@ -481,10 +492,12 @@ fn summarize_version(
         ));
         course2md::portable::export(&target.version_dir(), config::OutputFormat::Html, &file)?;
     }
-    println!(
-        "摘要已作为新版笔记保存 / Summary saved as a new note version: {}",
-        target.version_dir().display()
-    );
+    if !progress::is_quiet() {
+        println!(
+            "摘要已作为新版笔记保存 / Summary saved as a new note version: {}",
+            target.version_dir().display()
+        );
+    }
     Ok(())
 }
 
@@ -526,10 +539,12 @@ fn summarize_dir(
         let has_html = html_path.is_file()
             && course2md::summarize::contains_html_summary(&std::fs::read_to_string(&html_path)?);
         if has_md && has_html {
-            println!(
-                "已有总结，跳过 / Summary exists; skipped: {}. 使用 --force 替换 / Use --force to replace.",
-                dir.display()
-            );
+            if !progress::is_quiet() {
+                println!(
+                    "已有总结，跳过 / Summary exists; skipped: {}. 使用 --force 替换 / Use --force to replace.",
+                    dir.display()
+                );
+            }
             return Ok(());
         }
     }
@@ -573,7 +588,7 @@ fn summarize_dir(
             .parent()
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "视频".into());
+            .unwrap_or_else(|| "视频 / Video".into());
         let fname = format!(
             "{}.summary.md",
             course2md::summarize::sanitize_filename(&title)
@@ -583,15 +598,63 @@ fn summarize_dir(
             &target,
             course2md::summarize::render_standalone_md(&title, &sm),
         )?;
-        println!("已导出总结 / Summary exported: {}", target.display());
+        if !progress::is_quiet() {
+            println!("已导出总结 / Summary exported: {}", target.display());
+        }
     }
-    println!(
-        "已写入总结 / Summary saved ({} key points / {} outline sections): {}",
-        sm.key_points.len(),
-        sm.outline.len(),
-        dir.display()
-    );
+    if !progress::is_quiet() {
+        println!(
+            "已写入总结 / Summary saved ({} key points / {} outline sections): {}",
+            sm.key_points.len(),
+            sm.outline.len(),
+            dir.display()
+        );
+    }
     Ok(())
+}
+
+/// `models inspect/prepare` 的人类可读摘要；--json 时仍输出完整状态 JSON。
+fn print_model_status(status: &models::status::LocalModelStatus) {
+    use models::status::CacheState;
+    let state = match status.state {
+        CacheState::Missing => "缺失 / Missing",
+        CacheState::Partial => "不完整 / Incomplete",
+        CacheState::Cached => "已缓存（未验证加载）/ Cached (load not verified)",
+        CacheState::Loaded => "已就绪 / Ready",
+        CacheState::Unsupported => "不支持 / Unsupported",
+    };
+    println!(
+        "模型 / Model: {} · {} · {}",
+        status.model, status.provider, state
+    );
+    println!("占用空间 / Disk usage: {}", format_size(status.bytes));
+    for part in &status.parts {
+        println!("  {}: {}", part.name, part.path.display());
+        for file in &part.missing {
+            println!("    缺失 / Missing: {file}");
+        }
+    }
+    match status.state {
+        CacheState::Cached | CacheState::Loaded => {}
+        CacheState::Unsupported => println!(
+            "该后端不支持此模型 / This backend does not support the model; 可用模型见 / See: course2md models list"
+        ),
+        _ if status.can_prepare => println!(
+            "下载或修复 / Download or repair: course2md models prepare --provider {} --model {}",
+            status.provider, status.model
+        ),
+        _ => {}
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    const GB: u64 = 1 << 30;
+    const MB: u64 = 1 << 20;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else {
+        format!("{:.0} MB", bytes as f64 / MB as f64)
+    }
 }
 
 /// Accept existing files and normalize URLs pasted without a scheme.

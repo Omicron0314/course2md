@@ -91,14 +91,14 @@ impl Failure {
 
 fn rejection_message(status: u16) -> String {
     match status {
-        401 => "服务未接受此任务保存的凭据，请检查对应服务的 API Key。".into(),
-        403 => "此任务使用的凭据没有访问该服务或模型的权限。".into(),
-        404 => "服务未找到此任务指定的接口或模型，请检查服务地址和模型。".into(),
-        429 => "服务请求次数达到限制，请稍后重试。".into(),
+        401 => "服务未接受此任务保存的凭据，请检查对应服务的 API Key。 / The service rejected the saved credentials; check the API key for that service.".into(),
+        403 => "此任务使用的凭据没有访问该服务或模型的权限。 / The credentials used by this task cannot access that service or model.".into(),
+        404 => "服务未找到此任务指定的接口或模型，请检查服务地址和模型。 / The service does not have the endpoint or model this task names; check the base URL and model.".into(),
+        429 => "服务请求次数达到限制，请稍后重试。 / The service rate limit was reached; try again later.".into(),
         400 | 422 => {
-            format!("服务拒绝了请求参数（HTTP {status}），请检查此任务使用的模型与服务设置。")
+            format!("服务拒绝了请求参数（HTTP {status}），请检查此任务使用的模型与服务设置。 / The service rejected the request parameters (HTTP {status}); check the model and service settings for this task.")
         }
-        _ => format!("服务未完成此请求（HTTP {status}）。"),
+        _ => format!("服务未完成此请求（HTTP {status}）。 / The service did not complete this request (HTTP {status})."),
     }
 }
 
@@ -188,7 +188,7 @@ pub fn install(
     let mut current = ACTIVE
         .get_or_init(|| Mutex::new(None))
         .lock()
-        .map_err(|_| anyhow::anyhow!("任务请求状态锁不可用"))?;
+        .map_err(|_| anyhow::anyhow!("任务请求状态锁不可用 / Task request ledger lock unavailable"))?;
     anyhow::ensure!(
         current.is_none(),
         "同一进程不能同时执行两个任务 / Another task is already active"

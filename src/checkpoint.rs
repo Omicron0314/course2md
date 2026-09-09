@@ -102,10 +102,10 @@ impl Checkpoint {
                 match stored {
                     Some(old) => tracing::info!(
                         old = ?old, new = ?identity,
-                        "asr checkpoint 身份不匹配（模型/后端/版本已变化），旧进度作废重算"
+                        "asr checkpoint 身份不匹配（模型/后端/版本已变化），旧进度作废重算 / asr checkpoint identity mismatch (model/backend/version changed); old progress discarded and recomputed"
                     ),
                     None => tracing::info!(
-                        "asr checkpoint 无身份标记（1.0 前的旧格式），旧进度作废重算"
+                        "asr checkpoint 无身份标记（1.0 前的旧格式），旧进度作废重算 / asr checkpoint has no identity marker (pre-1.0 legacy format); old progress discarded and recomputed"
                     ),
                 }
             }
@@ -141,7 +141,7 @@ impl Checkpoint {
                     // 保留既有内容（partial resume），显式不 truncate
                     .truncate(false)
                     .open(&path)
-                    .with_context(|| format!("打开 checkpoint {}", path.display()))?;
+                    .with_context(|| format!("打开 checkpoint {0} / Failed to open checkpoint {0}", path.display()))?;
                 let file_len = f.metadata().map(|m| m.len()).unwrap_or(0);
                 if loaded.valid_len < file_len {
                     // 打开写入句柄前把文件截断到最后一个完整行：
@@ -150,13 +150,13 @@ impl Checkpoint {
                     // 注意：不能用 append-only 句柄做 set_len——Windows 上
                     // FILE_APPEND_DATA 不含写长度权限，会 Access denied。
                     f.set_len(loaded.valid_len)
-                        .with_context(|| format!("截断 checkpoint 残行 {}", path.display()))?;
+                        .with_context(|| format!("截断 checkpoint 残行 {0} / Failed to truncate checkpoint partial line {0}", path.display()))?;
                 } else if loaded.needs_newline {
                     // 末行是合法 JSON 但缺尾换行（手改文件）：先补换行再追加
                     use std::io::Seek as _;
                     f.seek(std::io::SeekFrom::End(0))?;
                     f.write_all(b"\n")
-                        .with_context(|| format!("补换行 {}", path.display()))?;
+                        .with_context(|| format!("补换行 {0} / Failed to append newline to {0}", path.display()))?;
                 }
                 // 非 append 句柄：后续 record 前定位到文件尾（单写者进程，一次即可）
                 use std::io::Seek as _;
@@ -177,9 +177,9 @@ impl Checkpoint {
             return Ok(None);
         }
         let s =
-            std::fs::read_to_string(path).with_context(|| format!("读取 {}", path.display()))?;
+            std::fs::read_to_string(path).with_context(|| format!("读取 {0} / Failed to read {0}", path.display()))?;
         Ok(Some(
-            serde_json::from_str(&s).context("checkpoint 身份文件损坏")?,
+            serde_json::from_str(&s).context("checkpoint 身份文件损坏 / checkpoint identity file is corrupted")?,
         ))
     }
 
@@ -202,7 +202,7 @@ impl Checkpoint {
             .keep();
         for file in old {
             std::fs::rename(file, archive.join(file.file_name().unwrap()))
-                .with_context(|| format!("无法保留旧识别进度 {}", file.display()))?;
+                .with_context(|| format!("无法保留旧识别进度 {0} / Cannot preserve previous transcription progress {0}", file.display()))?;
         }
         Ok(())
     }
@@ -218,7 +218,7 @@ impl Checkpoint {
             });
         }
         let content =
-            std::fs::read_to_string(path).with_context(|| format!("读取 {}", path.display()))?;
+            std::fs::read_to_string(path).with_context(|| format!("读取 {0} / Failed to read {0}", path.display()))?;
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
         let last_idx = lines.len().saturating_sub(1);
         let mut out: Vec<TranscriptEvent> = vec![];
@@ -242,7 +242,7 @@ impl Checkpoint {
                         tracing::debug!("checkpoint 末行解析失败（按崩溃残留忽略）：{e}");
                     } else {
                         anyhow::bail!(
-                            "checkpoint {} 第 {} 行损坏（非末行，不能静默跳过，否则转写内容缺失）：{e}",
+                            "checkpoint {0} 第 {1} 行损坏（非末行，不能静默跳过，否则转写内容缺失） / checkpoint {0} line {1} is corrupted (not the last line; it cannot be skipped silently, otherwise transcript content would be lost): {e}",
                             path.display(),
                             i + 1
                         );
@@ -278,6 +278,13 @@ impl Checkpoint {
         &self.events
     }
 
+    /// events() 的按 start 升序排序副本（历史 + 本次混合时顺序不保证）。
+    pub fn sorted_events(&self) -> Vec<TranscriptEvent> {
+        let mut all = self.events.clone();
+        all.sort_by(|a, b| a.start.total_cmp(&b.start));
+        all
+    }
+
     /// 记录一个完成的 chunk（append + flush）。写盘失败返回 Err 且不标记完成。
     /// `text` 允许为空串：表示「成功识别且确认无语音」。
     pub fn record(&mut self, start: f64, end: f64, text: &str) -> Result<()> {
@@ -290,20 +297,20 @@ impl Checkpoint {
         if self.file.is_none() {
             if let Some(dir) = self.path.parent() {
                 std::fs::create_dir_all(dir)
-                    .with_context(|| format!("创建 checkpoint 目录 {}", dir.display()))?;
+                    .with_context(|| format!("创建 checkpoint 目录 {0} / Failed to create checkpoint directory {0}", dir.display()))?;
             }
             self.file = Some(
                 std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&self.path)
-                    .with_context(|| format!("打开 checkpoint {}", self.path.display()))?,
+                    .with_context(|| format!("打开 checkpoint {0} / Failed to open checkpoint {0}", self.path.display()))?,
             );
         }
         let line = serde_json::to_string(&ev)?;
         if let Some(f) = &mut self.file {
             writeln!(f, "{line}")
-                .with_context(|| format!("写 checkpoint {}", self.path.display()))?;
+                .with_context(|| format!("写 checkpoint {0} / Failed to write checkpoint {0}", self.path.display()))?;
             f.flush()
                 .with_context(|| format!("flush checkpoint {}", self.path.display()))?;
         }
@@ -331,13 +338,13 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).with_context(|| format!("创建目录 {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("创建目录 {0} / Failed to create directory {0}", dir.display()))?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(bytes)
-        .with_context(|| format!("写 {}", path.display()))?;
+        .with_context(|| format!("写 {0} / Failed to write {0}", path.display()))?;
     tmp.as_file().sync_all()?;
     tmp.persist(path)
-        .with_context(|| format!("替换 {}", path.display()))?;
+        .with_context(|| format!("替换 {0} / Failed to replace {0}", path.display()))?;
     Ok(())
 }
 
@@ -368,18 +375,6 @@ mod tests {
         assert_eq!(events[1].text, "second");
         assert_eq!(std::fs::read(path).unwrap(), bytes);
         assert!(!dir.path().join(".asr_done").exists());
-    }
-
-    #[test]
-    fn first_truncated_record_is_repaired_before_append() {
-        let dir = tempfile::tempdir().unwrap();
-        Checkpoint::open(dir.path(), true, &identity("qwen3")).unwrap();
-        std::fs::write(dir.path().join("asr.jsonl"), b"{\"start\":").unwrap();
-        let mut cp = Checkpoint::open(dir.path(), true, &identity("qwen3")).unwrap();
-        cp.record(1.0, 2.0, "recovered").unwrap();
-        drop(cp);
-        let cp = Checkpoint::open(dir.path(), true, &identity("qwen3")).unwrap();
-        assert_eq!(cp.events()[0].text, "recovered");
     }
 
     #[test]
@@ -486,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn middle_corruption_is_hard_error_but_truncated_tail_recovers() {
+    fn middle_corruption_is_hard_error() {
         let ev = |s: f64, t: &str| {
             serde_json::to_string(&TranscriptEvent {
                 start: s,
@@ -497,30 +492,15 @@ mod tests {
             .unwrap()
         };
         // 先建立身份（模拟一次正常 open），再植入损坏内容
-        let establish = |d: &Path| Checkpoint::open(d, true, &identity("qwen3")).unwrap();
-
-        // 中间损坏 → 硬错误
         let d = tmpdir("mid");
-        establish(&d);
+        Checkpoint::open(&d, true, &identity("qwen3")).unwrap();
         std::fs::write(
             d.join("asr.jsonl"),
             format!("{}\n garbage \n{}\n", ev(0.0, "a"), ev(1.0, "b")),
         )
         .unwrap();
+        // 中间损坏 → 硬错误（与之相对：末行半截可恢复，见下方截断测试）
         assert!(Checkpoint::open(&d, true, &identity("qwen3")).is_err());
-        let _ = std::fs::remove_dir_all(&d);
-
-        // 末行半截 → 容忍并恢复前面的记录
-        let d = tmpdir("tail");
-        establish(&d);
-        std::fs::write(
-            d.join("asr.jsonl"),
-            format!("{}\n{{\"start\":1.", ev(0.0, "a")),
-        )
-        .unwrap();
-        let cp = Checkpoint::open(&d, true, &identity("qwen3")).unwrap();
-        assert_eq!(cp.events().len(), 1);
-        assert!(!cp.is_done(1.0, 2.0), "末行半截不应被计入完成");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -547,6 +527,7 @@ mod tests {
 
         let mut cp = Checkpoint::open(&d, true, &identity("qwen3")).unwrap();
         assert_eq!(cp.events().len(), 1);
+        assert!(!cp.is_done(1.0, 2.0), "末行半截不应被计入完成");
         cp.record(2.0, 3.0, "新记录").unwrap();
         drop(cp);
 
@@ -556,6 +537,19 @@ mod tests {
         assert_eq!(cp.events()[0].text, "a");
         assert_eq!(cp.events()[1].text, "新记录");
         assert!(cp.is_done(2.0, 3.0));
+        let _ = std::fs::remove_dir_all(&d);
+
+        // 变体：残行就是第一条记录（文件内没有任何完整行），同样先截断再追加
+        let d = tmpdir("tailfirst");
+        Checkpoint::open(&d, true, &identity("qwen3")).unwrap(); // 建立身份
+        std::fs::write(d.join("asr.jsonl"), b"{\"start\":").unwrap();
+        let mut cp = Checkpoint::open(&d, true, &identity("qwen3")).unwrap();
+        assert!(cp.events().is_empty());
+        cp.record(1.0, 2.0, "recovered").unwrap();
+        drop(cp);
+        let cp = Checkpoint::open(&d, true, &identity("qwen3")).unwrap();
+        assert_eq!(cp.events().len(), 1);
+        assert_eq!(cp.events()[0].text, "recovered");
         let _ = std::fs::remove_dir_all(&d);
     }
 

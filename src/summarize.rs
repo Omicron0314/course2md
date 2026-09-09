@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 const DIRECT_CHAR_LIMIT: usize = 25_000;
 /// map-reduce 每个分块的字符上限。
 const CHUNK_CHAR_LIMIT: usize = 25_000;
+/// 每个字幕事件在 prompt 里的非文本开销（"[mm:ss] " 时间戳前缀 + 换行符）。
+const PER_EVENT_OVERHEAD: usize = 16;
 /// map-reduce 分段总结的并发上限：LLM 端点普遍限流，取保守的 4 路。
 const SUMMARIZE_CONCURRENCY: usize = 4;
 
@@ -70,31 +72,11 @@ fn parse_time(v: Option<&serde_json::Value>) -> f64 {
     if let Some(n) = v.and_then(|x| x.as_f64()) {
         return n;
     }
-    if let Some(s) = v.and_then(|x| x.as_str()) {
-        let s = s.trim().trim_start_matches('[').trim_end_matches(']');
-        // 容忍 "120s" 纯秒格式（map-reduce 合并输入按 [{:.0}s] 标注时间）
-        let s = s.strip_suffix('s').unwrap_or(s);
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() == 1
-            && let Ok(sec) = parts[0].parse::<f64>()
-        {
-            return sec;
-        }
-        if parts.len() == 2
-            && let (Ok(m), Ok(sec)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>())
-        {
-            return m * 60.0 + sec;
-        } else if parts.len() == 3
-            && let (Ok(h), Ok(m), Ok(sec)) = (
-                parts[0].parse::<f64>(),
-                parts[1].parse::<f64>(),
-                parts[2].parse::<f64>(),
-            )
-        {
-            return h * 3600.0 + m * 60.0 + sec;
-        }
-    }
-    0.0
+    // 字符串形式（"01:30" / "120s" / "[90s]" 等）走共享的宽容解析；
+    // 解析失败按 0.0 处理（outline 条目缺时间不至于丢弃整条总结）
+    v.and_then(|x| x.as_str())
+        .and_then(crate::timeline::parse_timestamp)
+        .unwrap_or(0.0)
 }
 
 pub(crate) fn parse_summary(content: &str) -> Option<Summary> {
@@ -155,16 +137,33 @@ pub(crate) fn parse_summary(content: &str) -> Option<Summary> {
     })
 }
 
-fn chat_once(s: &LlmSettings, sys: &str, user: &str, description: &str) -> Result<String> {
+fn chat_once(
+    agent: &ureq::Agent,
+    s: &LlmSettings,
+    sys: &str,
+    user: &str,
+    description: &str,
+) -> Result<String> {
     let body = llm::chat_body(&s.model, sys, user, llm::CHAT_MAX_TOKENS);
-    llm::send_chat_described(s, &body, "summary", description)
+    llm::send_chat_described(agent, s, &body, "summary", description)
         .map_err(|f| f.err)
-        .context("LLM 总结请求失败")
+        .context("LLM 总结请求失败 / LLM summary request failed")
 }
 
 /// One requested summary scope. A protocol failure is retained, never hidden by another paid request.
-fn summarize_text(s: &LlmSettings, transcript: &str, description: &str) -> Result<Summary> {
-    let content = chat_once(s, SYSTEM_PROMPT, &user_prompt(transcript), description)?;
+fn summarize_text(
+    agent: &ureq::Agent,
+    s: &LlmSettings,
+    transcript: &str,
+    description: &str,
+) -> Result<Summary> {
+    let content = chat_once(
+        agent,
+        s,
+        SYSTEM_PROMPT,
+        &user_prompt(transcript),
+        description,
+    )?;
     parse_summary(&content).context("服务返回的摘要结构无效 / Invalid summary response")
 }
 
@@ -188,7 +187,7 @@ fn split_chunks(events: &[TranscriptEvent], char_limit: usize) -> Vec<Vec<Transc
     let mut cur: Vec<TranscriptEvent> = vec![];
     let mut cur_chars = 0usize;
     for e in events {
-        let c = e.text.chars().count() + 16;
+        let c = e.text.chars().count() + PER_EVENT_OVERHEAD;
         if !cur.is_empty() && cur_chars + c > char_limit {
             chunks.push(std::mem::take(&mut cur));
             cur_chars = 0;
@@ -221,25 +220,30 @@ pub async fn summarize(
     events: &[TranscriptEvent],
     meta: &VideoMeta,
 ) -> Result<Summary> {
-    let total_chars: usize = events.iter().map(|e| e.text.chars().count() + 16).sum();
+    let total_chars: usize = events
+        .iter()
+        .map(|e| e.text.chars().count() + PER_EVENT_OVERHEAD)
+        .sum();
     // 空转写直接报错：发给模型只会得到编造内容或报错，浪费请求
     if events.is_empty() || total_chars == 0 {
-        bail!("转写为空，无法总结");
+        bail!("转写为空，无法总结 / Transcript is empty; cannot summarize");
     }
     llm::validate(s)?;
     let ctx = meta_context(meta);
     let transcript = format!("{ctx}{}", build_transcript(events));
+    // 整个总结任务共享一个 agent（clone 共享连接池），map-reduce 各段复用 TCP+TLS
+    let agent = llm::chat_agent();
     if total_chars <= DIRECT_CHAR_LIMIT {
         let t = transcript;
         let s2 = s.clone();
         let description = format!(
-            "生成整篇摘要（{}–{}）",
+            "生成整篇摘要（{0}–{1}） / Generate the full summary ({0}–{1})",
             crate::render::fmt_ts(events.first().unwrap().start),
             crate::render::fmt_ts(events.last().unwrap().end)
         );
-        return tokio::task::spawn_blocking(move || summarize_text(&s2, &t, &description))
+        return tokio::task::spawn_blocking(move || summarize_text(&agent, &s2, &t, &description))
             .await
-            .context("总结线程 join 失败")?;
+            .context("总结线程 join 失败 / Summary thread join failed")?;
     }
     // ---- map-reduce：分段按 SUMMARIZE_CONCURRENCY 分批并发 ----
     let chunks = split_chunks(events, CHUNK_CHAR_LIMIT);
@@ -254,21 +258,22 @@ pub async fn summarize(
         for (offset, chunk) in batch.iter().enumerate() {
             let t = format!("{ctx}{}", build_transcript(chunk));
             let s2 = s.clone();
+            let agent = agent.clone();
             let description = format!(
-                "生成第 {}/{} 部分摘要（{}–{}）",
+                "生成第 {0}/{1} 部分摘要（{2}–{3}） / Generate summary part {0}/{1} ({2}–{3})",
                 partials.len() + offset + 1,
                 chunks.len(),
                 crate::render::fmt_ts(chunk.first().unwrap().start),
                 crate::render::fmt_ts(chunk.last().unwrap().end)
             );
             handles.push(tokio::task::spawn_blocking(move || {
-                summarize_text(&s2, &t, &description)
+                summarize_text(&agent, &s2, &t, &description)
             }));
         }
         let mut failure = None;
         // Join every started request so its confirmed result is saved, even if a peer failed.
         for handle in handles {
-            match handle.await.context("摘要工作进程中断")? {
+            match handle.await.context("摘要工作进程中断 / Summary worker interrupted")? {
                 Ok(summary) => partials.push(summary),
                 Err(error) => {
                     if failure.is_none() {
@@ -302,6 +307,7 @@ pub async fn summarize(
     let s2 = s.clone();
     let combined = tokio::task::spawn_blocking(move || {
         chat_once(
+            &agent,
             &s2,
             SYSTEM_PROMPT,
             &format!(
@@ -310,11 +316,11 @@ pub async fn summarize(
 \"key_points\": [整个视频的3-8条要点], \
 \"outline\": [{{\"t\":秒,\"title\":\"章节标题\",\"detail\":\"简述\"}}]}}"
             ),
-            "将全部分段摘要合并为整篇摘要",
+            "将全部分段摘要合并为整篇摘要 / Merge all partial summaries into the full summary",
         )
     })
     .await
-    .context("合并线程 join 失败")?;
+    .context("合并线程 join 失败 / Merge thread join failed")?;
     let combined = combined?;
     parse_summary(&combined).context(
         "摘要合并未完成，已保存各段已确认结果 / Summary merge failed; completed parts retained",
@@ -417,20 +423,25 @@ pub fn insert_into_html(html: &str, sm: &Summary) -> String {
     out
 }
 
-/// 原地替换哨兵之间的总结区块；缺闭合哨兵时保守不改（告警）。
-/// 调用方需先经 contains_summary / contains_html_summary 确认起始哨兵存在。
-fn replace_sentinel_block(doc: &str, block: &str) -> String {
-    let Some(start) = doc.find(SUMMARY_BEGIN) else {
-        return doc.to_string();
-    };
+/// 哨兵块（含首尾哨兵）的字节范围；起始哨兵存在但缺闭合哨兵时告警并返回 None。
+fn sentinel_range(doc: &str) -> Option<std::ops::Range<usize>> {
+    let start = doc.find(SUMMARY_BEGIN)?;
     let Some(end_rel) = doc[start..].find(SUMMARY_END) else {
         tracing::warn!(
             "已有总结的格式不完整，保留原文 / Existing summary markup is incomplete; original text kept"
         );
+        return None;
+    };
+    Some(start..start + end_rel + SUMMARY_END.len())
+}
+
+/// 原地替换哨兵之间的总结区块；缺闭合哨兵时保守不改（告警）。
+/// 调用方需先经 contains_summary / contains_html_summary 确认起始哨兵存在。
+fn replace_sentinel_block(doc: &str, block: &str) -> String {
+    let Some(range) = sentinel_range(doc) else {
         return doc.to_string();
     };
-    let end = start + end_rel + SUMMARY_END.len();
-    format!("{}{block}{}", &doc[..start], &doc[end..])
+    format!("{}{block}{}", &doc[..range.start], &doc[range.end..])
 }
 
 /// 生成独立总结文件（markdown），用于 -o 导出。
@@ -472,17 +483,10 @@ pub fn contains_html_summary(html: &str) -> bool {
 
 /// 删除哨兵之间的总结区块；只有起始哨兵没有闭合哨兵时保守不删（告警）。
 fn strip_sentinel_block(doc: &str) -> String {
-    let Some(start) = doc.find(SUMMARY_BEGIN) else {
+    let Some(range) = sentinel_range(doc) else {
         return doc.to_string();
     };
-    let Some(end_rel) = doc[start..].find(SUMMARY_END) else {
-        tracing::warn!(
-            "已有总结的格式不完整，保留原文 / Existing summary markup is incomplete; original text kept"
-        );
-        return doc.to_string();
-    };
-    let end = start + end_rel + SUMMARY_END.len();
-    format!("{}{}", &doc[..start], &doc[end..])
+    format!("{}{}", &doc[..range.start], &doc[range.end..])
 }
 
 /// 从 markdown 中移除已有总结区块（--force 重写时使用）。

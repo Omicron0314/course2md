@@ -2,6 +2,11 @@
 use crate::cli::RunOpts;
 use crate::{config, llm, settings};
 
+/// 内置默认输出格式。settings 的展示与配置模板也由它渲染，避免第二份真相。
+pub fn default_formats() -> Vec<config::OutputFormat> {
+    vec![config::OutputFormat::Md, config::OutputFormat::Html]
+}
+
 /// 配置文件 + CLI 覆盖 -> 生效 LLM 设置。
 fn resolve_llm(opts: &RunOpts, file: &settings::ConfigFile) -> llm::LlmSettings {
     let mut s = file.llm.clone();
@@ -40,7 +45,7 @@ pub fn resolve(
     file: &settings::ConfigFile,
 ) -> anyhow::Result<config::PipelineConfig> {
     let d = &file.defaults;
-    use config::{OutputFormat, SlideMode};
+    use config::SlideMode;
     let out_root = opts
         .out
         .clone()
@@ -99,7 +104,7 @@ pub fn resolve(
             .formats
             .clone()
             .or_else(|| d.formats.clone())
-            .unwrap_or_else(|| vec![OutputFormat::Md, OutputFormat::Html]),
+            .unwrap_or_else(default_formats),
         model_dir: config::model_dir_from(opts.model_dir.as_deref().or(d.model_dir.as_deref())),
         keep_video: !opts.no_keep_video && (opts.keep_video || d.keep_video.unwrap_or(false)),
         no_download: opts.no_download || d.no_download.unwrap_or(false),

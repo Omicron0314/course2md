@@ -47,7 +47,7 @@ pub async fn ensure_cache(
     let status = status::inspect(provider, model, root)?;
     anyhow::ensure!(
         status.can_prepare,
-        "当前识别方式不支持这个模型，原任务参数已保留"
+        "当前识别方式不支持这个模型，原任务参数已保留 / The current transcription backend does not support this model; task settings kept"
     );
     if matches!(
         status.state,
@@ -63,18 +63,18 @@ pub async fn ensure_cache(
                 let model = model.to_owned();
                 tokio::task::spawn_blocking(move || crate::apple::prepare_cache(&model))
                     .await
-                    .context("模型缓存准备未完成")?
+                    .context("模型缓存准备未完成 / Model cache preparation did not complete")?
             }
             #[cfg(not(apple_native))]
             {
-                Err(anyhow::anyhow!("此程序未包含 Apple 原生识别运行时"))
+                Err(anyhow::anyhow!("此程序未包含 Apple 原生识别运行时 / This build does not include the Apple native transcription runtime"))
             }
         }
         AsrProvider::Npu => {
             let model = crate::npu::resolve_npu_model(Some(model));
             tokio::task::spawn_blocking(move || crate::npu::prepare_npu_model(&model))
                 .await
-                .context("NPU 模型准备未完成")?
+                .context("NPU 模型准备未完成 / NPU model preparation did not complete")?
         }
         AsrProvider::Api => Ok(()),
     }
@@ -90,7 +90,7 @@ pub async fn prepare(
     let before = status::inspect(provider, model, root)?;
     anyhow::ensure!(
         before.can_prepare,
-        "这种识别方式不支持所选模型，请明确选择其他模型"
+        "这种识别方式不支持所选模型，请明确选择其他模型 / This transcription backend does not support the selected model; explicitly choose another model"
     );
     crate::progress::stage("model/prepare", "start");
     let result = match provider {
@@ -110,18 +110,18 @@ pub async fn prepare(
                     crate::apple::prepare_model(&model)
                 })
                 .await
-                .context("模型准备进程未完成")?
+                .context("模型准备进程未完成 / Model preparation process did not complete")?
             }
             #[cfg(not(apple_native))]
             {
-                Err(anyhow::anyhow!("此转换程序未包含 Apple 原生识别运行时"))
+                Err(anyhow::anyhow!("此转换程序未包含 Apple 原生识别运行时 / This build does not include the Apple native transcription runtime"))
             }
         }
         AsrProvider::Npu => {
             let model = crate::npu::resolve_npu_model(Some(model));
             tokio::task::spawn_blocking(move || crate::npu::prepare_npu_model(&model))
                 .await
-                .context("NPU 模型准备进程未完成")?
+                .context("NPU 模型准备进程未完成 / NPU model preparation process did not complete")?
         }
         AsrProvider::Api => unreachable!(),
     };
@@ -129,7 +129,7 @@ pub async fn prepare(
     let loaded = result.is_ok() && matches!(provider, AsrProvider::Coreml | AsrProvider::Npu);
     let error = result.as_ref().err().map(|error| format!("{error:#}"));
     if let Err(error) = status::record_result(&after, loaded, error) {
-        tracing::warn!("模型检查结果暂时无法保存：{error:#}");
+        tracing::warn!("模型检查结果暂时无法保存 / Could not save the model check result: {error:#}");
     }
     result?;
     crate::progress::stage("model/prepare", "done");
@@ -265,7 +265,7 @@ pub async fn download_models(root: &Path) -> Result<()> {
     projector.with_context(mirror_hint)?;
     anyhow::ensure!(
         llama_ready(root),
-        "下载文件不是完整的 GGUF 模型，已有文件已保留，可以重试准备"
+        "下载文件不是完整的 GGUF 模型，已有文件已保留，可以重试准备 / The downloaded file is not a complete GGUF model; existing files kept, preparation can be retried"
     );
     tracing::info!(path = %root.display(), "models ready");
     Ok(())
@@ -539,11 +539,13 @@ mod tests {
 
     #[test]
     fn identity_matches_dir_slug() {
-        assert_eq!(llama_gguf_identity(), format!("{LLAMA_MODEL_SLUG}-gguf"));
+        // LLAMA_MODEL_SLUG 与 LLAMA_GGUF_IDENTITY 是两个独立字面量（concat! 不接受
+        // 常量，无法互相派生），这里用字面量期望值锁定两者的对应关系，防止改名时只改一处。
+        assert_eq!(llama_gguf_identity(), "qwen3-1.7b-gguf");
         assert!(
             llama_paths(Path::new("/x"))
                 .model
-                .starts_with(format!("/x/llama-{LLAMA_MODEL_SLUG}"))
+                .starts_with("/x/llama-qwen3-1.7b")
         );
     }
 

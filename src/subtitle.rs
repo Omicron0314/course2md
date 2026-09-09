@@ -130,7 +130,7 @@ impl std::fmt::Display for SubtitleReadError {
             Self::Failed { message }
             | Self::NoReadableText { message }
             | Self::Unsupported { message } => f.write_str(message),
-            Self::Cancelled => f.write_str("已取消读取字幕"),
+            Self::Cancelled => f.write_str("已取消读取字幕 / Subtitle reading cancelled"),
         }
     }
 }
@@ -268,17 +268,24 @@ pub fn read_subtitle_text(path: &Path) -> Result<String> {
     use std::io::Read;
     const MAX_BYTES: usize = 32 * 1024 * 1024;
     let file = std::fs::File::open(path)
-        .with_context(|| format!("无法读取字幕文件 {}", path.display()))?;
+        .with_context(|| format!("无法读取字幕文件 {0} / Cannot read subtitle file {0}", path.display()))?;
     let mut bytes = Vec::new();
     file.take((MAX_BYTES + 1) as u64).read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() <= MAX_BYTES,
-        "字幕文件超过 32 MB，请选择较小的 SRT 或 VTT 文件"
+        "字幕文件超过 32 MB，请选择较小的 SRT 或 VTT 文件 / Subtitle file exceeds 32 MB; choose a smaller SRT or VTT file"
     );
+    decode_text_with_bom(&bytes)
+}
+
+/// 解码 UTF-8 / UTF-16（按 BOM 判端序）文本：UTF-8 BOM 与 UTF-16 BOM 都会剥掉，
+/// 无 BOM 按 UTF-8 处理。拒绝不完整的 UTF-16 与非法编码，不做有损替换。
+/// （subtitle 侧车与 legacy 旧稿导入共用）
+pub(crate) fn decode_text_with_bom(bytes: &[u8]) -> Result<String> {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         ensure!(
-            (bytes.len() - 2) % 2 == 0,
-            "字幕文件的 UTF-16 编码不完整，请重新导出为 UTF-8"
+            (bytes.len() - 2).is_multiple_of(2),
+            "文件的 UTF-16 编码不完整，请重新导出为 UTF-8 / The file's UTF-16 encoding is incomplete; re-export as UTF-8"
         );
         let little = bytes[0] == 0xff;
         let words: Vec<u16> = bytes[2..]
@@ -293,12 +300,10 @@ pub fn read_subtitle_text(path: &Path) -> Result<String> {
                 }
             })
             .collect();
-        return String::from_utf16(&words)
-            .context("字幕文件的字符编码无法读取，请重新导出为 UTF-8");
+        return String::from_utf16(&words).context("文件的字符编码无法读取，请重新导出为 UTF-8 / The file's character encoding is unreadable; re-export as UTF-8");
     }
-    String::from_utf8(bytes)
-        .map(|text| text.trim_start_matches('\u{feff}').to_owned())
-        .context("字幕文件的字符编码无法读取，请重新导出为 UTF-8")
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    String::from_utf8(bytes.to_vec()).context("文件的字符编码无法读取，请重新导出为 UTF-8 / The file's character encoding is unreadable; re-export as UTF-8")
 }
 
 pub fn to_srt(events: &[TranscriptEvent]) -> String {
@@ -446,37 +451,10 @@ fn parse_cue_header(line: &str) -> Option<(f64, f64)> {
     let (a, b) = line.split_once("-->")?;
     // VTT cue header 可能带 "line:0" 等设置
     let end = b.split_whitespace().next()?;
-    Some((parse_ts(a)?, parse_ts(end)?))
-}
-
-fn parse_ts(s: &str) -> Option<f64> {
-    let s = s.trim();
-    let (main, frac) = match s.split_once([',', '.']) {
-        Some((m, f)) => (m, f),
-        None => (s, ""),
-    };
-    let parts: Vec<u64> = main
-        .split(':')
-        .map(|p| p.trim().parse().ok())
-        .collect::<Option<Vec<_>>>()?;
-    let (h, m, sec) = match parts.as_slice() {
-        [h, m, s] => (*h, *m, *s),
-        [m, s] => (0, *m, *s),
-        [s] => (0, 0, *s),
-        _ => return None,
-    };
-    if (parts.len() >= 2 && sec >= 60) || (parts.len() == 3 && m >= 60) {
-        return None;
-    }
-    let ms = if frac.is_empty() {
-        0.0
-    } else {
-        if !frac.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        format!("0.{frac}").parse::<f64>().ok()?
-    };
-    Some(h as f64 * 3600.0 + m as f64 * 60.0 + sec as f64 + ms)
+    Some((
+        crate::timeline::parse_timestamp(a)?,
+        crate::timeline::parse_timestamp(end)?,
+    ))
 }
 
 /// 去掉 `<...>` 标签并还原常见实体。
@@ -696,9 +674,9 @@ mod tests {
         );
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].end, 2.0);
-        assert!(parse_ts("00:00:01.bad").is_none());
-        assert!(parse_ts("00:99:01.000").is_none());
         assert!(parse_subtitle("00:00:02,000 --> 00:00:01,000\nbackwards\n").is_empty());
+        assert!(crate::timeline::parse_timestamp("00:00:01.bad").is_none());
+        assert!(crate::timeline::parse_timestamp("00:99:01.000").is_none());
     }
 
     #[test]

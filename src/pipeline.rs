@@ -15,6 +15,13 @@ use std::{
     time::Instant,
 };
 
+/// Stable digest prefix kept when a fresh run appends a timestamp to its task id.
+const TASK_ID_PREFIX_LEN: usize = 24;
+/// Local-file titles are truncated so directory names stay usable.
+const STEM_MAX_CHARS: usize = 40;
+/// Screenshot checkpoint files are digest-verified across this many parallel lanes.
+const FRAME_DIGEST_LANES: usize = 4;
+
 /// Traditional CLI entry. Its generated task directory is stable for compatible recovery.
 /// New settings or --no-resume use another work directory and never overwrite old notes.
 pub async fn run(cfg: &PipelineConfig) -> Result<()> {
@@ -26,7 +33,14 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
         crate::error::require_cmd("yt-dlp")?;
     }
     progress::stage("fetch", "start");
-    let meta = if is_local {
+    let probed = if is_local {
+        None
+    } else {
+        Some(Box::new(fetch::probe_video(&cfg.url).await?))
+    };
+    let meta = if let Some(video) = &probed {
+        video.meta.clone()
+    } else {
         VideoMeta {
             title: sanitize_stem(local),
             uploader: String::new(),
@@ -35,8 +49,6 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
             extractor: "local".into(),
             id: execution::file_digest(local)?,
         }
-    } else {
-        fetch::fetch_meta(&cfg.url).await?
     };
     progress::stage("fetch", "done");
     let platform = config::platform_from(&cfg.url, &meta.extractor);
@@ -64,7 +76,7 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
     if !cfg.resume {
         task_id = format!(
             "{}-{}",
-            &task_id[..24],
+            &task_id[..TASK_ID_PREFIX_LEN],
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos()
@@ -95,7 +107,7 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
         &meta,
         &target,
         is_local,
-        SubtitleInput::Discover,
+        SubtitleInput::Discover(probed),
         false,
         false,
         started,
@@ -201,7 +213,7 @@ async fn reprocess(
             .and_then(|path| execution::file_digest(&path))
             .is_ok_and(|digest| digest == markdown.sha256);
         if !unchanged {
-            tracing::info!("原版 Markdown 已有改动；本次补做使用软件保存的正文，原文件保留");
+            tracing::info!("原版 Markdown 已有改动；本次补做使用软件保存的正文，原文件保留 / The original Markdown has been modified; this reprocessing uses the software-saved document, and the original file is kept");
         }
     }
     anyhow::ensure!(
@@ -244,8 +256,9 @@ async fn reprocess(
                 &serde_json::json!({"schema":1,"outputs":outputs,"outcomes":exports}),
             )?,
         )?;
+        let (segments, chars) = done_stats(&document.sections);
         progress::emit(
-            serde_json::json!({"type":"done","operation":"exports","task_id":request.task_id,"course_id":base.course_id,"version_id":base.version_id,"out_dir":base_dir,"manifest":base_dir.join("manifest.json"),"title":document.meta.title,"slides":base.frames.len(),"segments":document.sections.iter().map(|s|s.speech.len()).sum::<usize>(),"chars":document.sections.iter().flat_map(|s|&s.speech).map(|e|e.text.chars().count()).sum::<usize>(),"outputs":outputs,"partial":partial,"outcomes":{"exports":exports},"elapsed_secs":started.elapsed().as_secs_f64()}),
+            serde_json::json!({"type":"done","operation":"exports","task_id":request.task_id,"course_id":base.course_id,"version_id":base.version_id,"out_dir":base_dir,"manifest":base_dir.join("manifest.json"),"title":document.meta.title,"slides":base.frames.len(),"segments":segments,"chars":chars,"outputs":outputs,"partial":partial,"outcomes":{"exports":exports},"elapsed_secs":started.elapsed().as_secs_f64()}),
         );
         return Ok(());
     }
@@ -350,11 +363,7 @@ async fn reprocess(
         };
         match cached_frames(cfg, &media_path).await {
             Ok(frames) if !frames.is_empty() => {
-                let speech = document
-                    .sections
-                    .iter()
-                    .flat_map(|section| section.speech.clone())
-                    .collect();
+                let speech = all_speech(&document.sections);
                 document.sections = timeline::merge(frames, speech, document.meta.duration);
                 outcomes.screenshots = Outcome::succeeded();
             }
@@ -418,60 +427,15 @@ async fn reprocess(
                 }
             }
         }
-        let original = document.sections.clone();
-        let llm = cfg.llm.clone();
-        let root = cfg.out_dir.clone();
-        let mut sections = document.sections;
-        let (sections, report) = tokio::task::spawn_blocking(move || {
-            let report = crate::llm::polish_sections_report(&mut sections, &root, &llm);
-            (sections, report)
-        })
-        .await?;
-        document.sections = if artifact::has_readable_body(&sections) {
-            sections
-        } else {
-            original
-        };
-        outcomes.proofreading = Outcome {
-            status: if report.failed == 0 {
-                Status::Succeeded
-            } else if report.succeeded > 0 {
-                Status::Partial
-            } else {
-                Status::Failed
-            },
-            message: if report.failed > 0 {
-                Some(
-                    "校对未全部完成，原文已保留 / Proofreading incomplete; original text retained"
-                        .into(),
-                )
-            } else {
-                None
-            },
-            completed: Some(report.succeeded),
-            total: Some(report.attempted),
-        };
+        let (sections, report) =
+            polish_with_rollback(std::mem::take(&mut document.sections), cfg).await?;
+        document.sections = sections;
+        outcomes.proofreading = Outcome::from_report(&report);
         progress::stage("llm", "done");
     }
     if has("summary") {
-        crate::dispatch::check_control()?;
-        progress::stage("summary", "start");
-        let events = document
-            .sections
-            .iter()
-            .flat_map(|section| section.speech.clone())
-            .collect::<Vec<_>>();
-        match crate::summarize::summarize(&cfg.llm, &events, &document.meta).await {
-            Ok(summary) => {
-                document.summary = Some(summary);
-                outcomes.summary = Outcome::succeeded();
-                progress::stage("summary", "done");
-            }
-            Err(error) => {
-                tracing::warn!(error = %format!("{error:#}"), "生成摘要未完成");
-                outcomes.summary = Outcome::failed(crate::summarize::failure_message(&error));
-            }
-        }
+        document.summary =
+            summarize_step(cfg, &document.sections, &document.meta, &mut outcomes).await?;
     }
     crate::dispatch::check_control()?;
     let formats = if has("exports") {
@@ -531,7 +495,8 @@ fn export_for_task(
 }
 
 enum SubtitleInput {
-    Discover,
+    /// CLI path: the video probed once at fetch time; `None` for local files.
+    Discover(Option<Box<fetch::OnlineVideo>>),
     Selected(Option<Vec<timeline::TranscriptEvent>>),
 }
 
@@ -540,24 +505,28 @@ async fn subtitles(
     local: bool,
     input: SubtitleInput,
 ) -> Result<Option<(Vec<timeline::TranscriptEvent>, String)>> {
-    if let SubtitleInput::Selected(selected) = input {
-        if let Some(events) = selected {
-            execution::validate_events(&events)?;
-            return Ok(Some((events, "selected-subtitle".into())));
+    let probed = match input {
+        SubtitleInput::Selected(selected) => {
+            if let Some(events) = selected {
+                execution::validate_events(&events)?;
+                return Ok(Some((events, "selected-subtitle".into())));
+            }
+            anyhow::ensure!(
+                cfg.transcript_source != config::TranscriptSource::Subtitle,
+                "任务缺少已选字幕 / Selected subtitles are missing from this task"
+            );
+            return Ok(None);
         }
-        anyhow::ensure!(
-            cfg.transcript_source != config::TranscriptSource::Subtitle,
-            "任务缺少已选字幕 / Selected subtitles are missing from this task"
-        );
-        return Ok(None);
-    }
+        SubtitleInput::Discover(probed) => probed,
+    };
     if cfg.transcript_source == config::TranscriptSource::Asr {
         return Ok(None);
     }
     let found = if local {
         fetch::sidecar_subtitle(Path::new(&cfg.url))
     } else {
-        fetch::fetch_subtitle(&cfg.url, &cfg.out_dir)
+        let video = probed.context("缺少视频信息，请重新读取 / Missing video info; please probe again")?;
+        fetch::fetch_subtitle(&video, &cfg.out_dir)
             .await
             .context("读取视频字幕失败 / Could not read video subtitles")?
     };
@@ -603,7 +572,6 @@ async fn run_prepared(
     started: Instant,
 ) -> Result<()> {
     asr::reset_llama_spawn_args();
-    cfg.validate()?;
     crate::dispatch::check_control()?;
     if let Some(manifest) = artifact::published(target)? {
         // Also finish a publication interrupted between the directory and pointer commits.
@@ -786,59 +754,14 @@ async fn run_prepared(
     crate::dispatch::check_control()?;
     if cfg.llm.enabled {
         progress::stage("llm", "start");
-        let original_sections = sections.clone();
-        let llm = cfg.llm.clone();
-        let root = cfg.out_dir.clone();
-        let joined = tokio::task::spawn_blocking(move || {
-            let report = crate::llm::polish_sections_report(&mut sections, &root, &llm);
-            (sections, report)
-        })
-        .await
-        .context("AI 校对工作进程中断 / Proofreading worker interrupted")?;
-        sections = joined.0;
-        let mut report = joined.1;
-        if !artifact::has_readable_body(&sections) {
-            sections = original_sections;
-            report.succeeded = 0;
-            report.failed = report.attempted;
-        }
-        outcomes.proofreading = Outcome {
-            status: if report.failed == 0 {
-                Status::Succeeded
-            } else if report.succeeded > 0 {
-                Status::Partial
-            } else {
-                Status::Failed
-            },
-            message: if report.failed > 0 {
-                Some("部分校对未完成，原始文字已保留 / Some proofreading failed; original text retained".into())
-            } else {
-                None
-            },
-            completed: Some(report.succeeded),
-            total: Some(report.attempted),
-        };
+        let (polished, report) = polish_with_rollback(sections, cfg).await?;
+        sections = polished;
+        outcomes.proofreading = Outcome::from_report(&report);
         progress::stage("llm", "done");
     }
     crate::dispatch::check_control()?;
     let summary = if cfg.llm.summarize {
-        progress::stage("summary", "start");
-        let speech = sections
-            .iter()
-            .flat_map(|s| s.speech.iter().cloned())
-            .collect::<Vec<_>>();
-        match crate::summarize::summarize(&cfg.llm, &speech, meta).await {
-            Ok(summary) => {
-                outcomes.summary = Outcome::succeeded();
-                progress::stage("summary", "done");
-                Some(summary)
-            }
-            Err(error) => {
-                tracing::warn!(error = %format!("{error:#}"), "生成摘要未完成");
-                outcomes.summary = Outcome::failed(crate::summarize::failure_message(&error));
-                None
-            }
-        }
+        summarize_step(cfg, &sections, meta, &mut outcomes).await?
     } else {
         None
     };
@@ -876,6 +799,11 @@ async fn run_prepared(
             },
             target.version_dir().display()
         );
+        if !cfg.llm.enabled && !cfg.llm.disable_hint {
+            eprintln!(
+                "提示：可运行 course2md llm setup 开启 AI 润色与总结；--no-llm-hint 可关闭此提示。 / Tip: run course2md llm setup to enable AI proofreading and summaries; use --no-llm-hint to hide this tip."
+            );
+        }
     }
     Ok(())
 }
@@ -905,12 +833,7 @@ async fn cached_frames(cfg: &PipelineConfig, media: &Path) -> Result<Vec<timelin
     if cache_path.is_file() {
         let cache: FramesCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
             .context("截图进度损坏，原文件已保留 / Screenshot checkpoint is damaged")?;
-        let valid = cache.files.iter().all(|(path, digest)| {
-            artifact::safe_asset_path(&cfg.out_dir, path)
-                .and_then(|p| execution::file_digest(&p))
-                .is_ok_and(|actual| actual == *digest)
-        });
-        if valid && !cache.frames.is_empty() {
+        if verified_cache_files(&cfg.out_dir, &cache.files) && !cache.frames.is_empty() {
             return Ok(cache.frames);
         }
     }
@@ -977,9 +900,125 @@ fn emit_done(
     sections: &[timeline::Section],
     started: Instant,
 ) {
+    let (segments, chars) = done_stats(sections);
     progress::emit(
-        serde_json::json!({"type":"done","task_id":target.task_id,"course_id":target.course_id,"version_id":target.version_id,"out_dir":target.version_dir(),"manifest":target.version_dir().join("manifest.json"),"title":manifest.title,"slides":manifest.frames.len(),"segments":sections.iter().map(|s|s.speech.len()).sum::<usize>(),"chars":sections.iter().flat_map(|s|&s.speech).map(|e|e.text.chars().count()).sum::<usize>(),"outputs":manifest.outputs,"partial":manifest.partial,"outcomes":manifest.outcomes,"elapsed_secs":started.elapsed().as_secs_f64()}),
+        serde_json::json!({"type":"done","task_id":target.task_id,"course_id":target.course_id,"version_id":target.version_id,"out_dir":target.version_dir(),"manifest":target.version_dir().join("manifest.json"),"title":manifest.title,"slides":manifest.frames.len(),"segments":segments,"chars":chars,"outputs":manifest.outputs,"partial":manifest.partial,"outcomes":manifest.outcomes,"elapsed_secs":started.elapsed().as_secs_f64()}),
     );
+}
+
+/// Every transcript event in document order.
+pub fn all_speech(sections: &[timeline::Section]) -> Vec<timeline::TranscriptEvent> {
+    sections
+        .iter()
+        .flat_map(|section| section.speech.iter().cloned())
+        .collect()
+}
+
+/// Transcript scale shared by every "done" event.
+fn done_stats(sections: &[timeline::Section]) -> (usize, usize) {
+    (
+        sections.iter().map(|section| section.speech.len()).sum(),
+        sections
+            .iter()
+            .flat_map(|section| &section.speech)
+            .map(|event| event.text.chars().count())
+            .sum(),
+    )
+}
+
+/// Polish off-thread. If the polished body is unreadable, roll back to the
+/// originals and report the whole attempt as failed: nothing was kept.
+async fn polish_with_rollback(
+    mut sections: Vec<timeline::Section>,
+    cfg: &PipelineConfig,
+) -> Result<(Vec<timeline::Section>, crate::llm::PolishReport)> {
+    let original = sections.clone();
+    let llm = cfg.llm.clone();
+    let root = cfg.out_dir.clone();
+    let (mut sections, mut report) = tokio::task::spawn_blocking(move || {
+        let report = crate::llm::polish_sections_report(&mut sections, &root, &llm);
+        (sections, report)
+    })
+    .await
+    .context("AI 校对工作进程中断 / Proofreading worker interrupted")?;
+    if !artifact::has_readable_body(&sections) {
+        sections = original;
+        report.succeeded = 0;
+        report.failed = report.attempted;
+    }
+    Ok((sections, report))
+}
+
+impl Outcome {
+    /// Map a polish run onto the version outcome. The impl lives next to its
+    /// only callers; the type itself belongs to the version manifest.
+    pub fn from_report(report: &crate::llm::PolishReport) -> Self {
+        Self {
+            status: if report.failed == 0 {
+                Status::Succeeded
+            } else if report.succeeded > 0 {
+                Status::Partial
+            } else {
+                Status::Failed
+            },
+            message: (report.failed > 0).then(|| {
+                "校对未全部完成，原文已保留 / Proofreading incomplete; original text retained"
+                    .into()
+            }),
+            completed: Some(report.succeeded),
+            total: Some(report.attempted),
+        }
+    }
+}
+
+async fn summarize_step(
+    cfg: &PipelineConfig,
+    sections: &[timeline::Section],
+    meta: &VideoMeta,
+    outcomes: &mut Outcomes,
+) -> Result<Option<crate::summarize::Summary>> {
+    crate::dispatch::check_control()?;
+    progress::stage("summary", "start");
+    let speech = all_speech(sections);
+    match crate::summarize::summarize(&cfg.llm, &speech, meta).await {
+        Ok(summary) => {
+            outcomes.summary = Outcome::succeeded();
+            progress::stage("summary", "done");
+            Ok(Some(summary))
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "生成摘要未完成 / Summary generation incomplete"
+            );
+            outcomes.summary = Outcome::failed(crate::summarize::failure_message(&error));
+            Ok(None)
+        }
+    }
+}
+
+/// Screenshot checkpoints are verified by full-content digests. Spread the files
+/// over parallel lanes so resuming a large cache is not a serial wait.
+fn verified_cache_files(out_dir: &Path, files: &[(String, String)]) -> bool {
+    if files.is_empty() {
+        return true;
+    }
+    let lanes = FRAME_DIGEST_LANES.min(files.len());
+    let chunk_size = files.len().div_ceil(lanes);
+    std::thread::scope(|scope| {
+        files
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk.iter().all(|(path, digest)| {
+                        artifact::safe_asset_path(out_dir, path)
+                            .and_then(|p| execution::file_digest(&p))
+                            .is_ok_and(|actual| actual == *digest)
+                    })
+                })
+            })
+            .all(|handle| handle.join().unwrap_or(false))
+    })
 }
 
 /// 失败诊断 run.json（issue #12 复测：只有成功才写 run.json 是诊断缺口）。
@@ -1016,10 +1055,10 @@ fn write_failure_run_json(
             if let Err(e) =
                 crate::checkpoint::atomic_write(&cfg.out_dir.join("run.json"), s.as_bytes())
             {
-                tracing::warn!("写失败诊断 run.json 失败：{e:#}");
+                tracing::warn!("写失败诊断 run.json 失败 / Failed to write failure diagnostics run.json: {e:#}");
             }
         }
-        Err(e) => tracing::warn!("序列化失败诊断 run.json 失败：{e:#}"),
+        Err(e) => tracing::warn!("序列化失败诊断 run.json 失败 / Failed to serialize failure diagnostics run.json: {e:#}"),
     }
 }
 
@@ -1028,7 +1067,7 @@ fn sanitize_stem(p: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("local")
         .chars()
-        .take(40)
+        .take(STEM_MAX_CHARS)
         .collect()
 }
 

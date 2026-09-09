@@ -43,6 +43,24 @@ impl ManagedChild {
         self.child.try_wait().ok().flatten()
     }
 
+    /// 轮询等待进程退出，最多 `timeout`；Err = 超时（进程仍由 Drop 兜底 kill+wait）。
+    /// 收拢此前 asr.rs / npu.rs 各自手写的「try_wait 轮询 + 截止时间」。
+    pub fn wait_within(&mut self, timeout: Duration) -> Result<ExitStatus> {
+        let t0 = Instant::now();
+        loop {
+            if let Some(status) = self.try_wait() {
+                return Ok(status);
+            }
+            anyhow::ensure!(
+                t0.elapsed() < timeout,
+                "{} 未在 {:.1}s 内退出 / did not exit within the time limit",
+                self.name,
+                timeout.as_secs_f64()
+            );
+            std::thread::sleep(WAIT_POLL_INTERVAL);
+        }
+    }
+
     pub fn kill(&mut self) {
         let _ = self.child.kill();
     }
@@ -69,10 +87,23 @@ pub struct StderrTail {
 }
 
 const STDERR_TAIL_MAX: usize = 100;
+/// wait_within 的轮询间隔：50ms 足够及时，又不至于空转 CPU
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 impl StderrTail {
     pub fn tail(&self) -> String {
         self.lines.lock().map(|v| v.join("\n")).unwrap_or_default()
+    }
+
+    /// 给错误附上 stderr 尾部作为 context（尾部为空则原样返回）。
+    /// 收拢 asr.rs / npu.rs 同构的「失败时附加子进程 stderr 尾部」骨架。
+    pub fn attach(&self, e: anyhow::Error, label: &str) -> anyhow::Error {
+        let tail = self.tail();
+        if tail.is_empty() {
+            e
+        } else {
+            e.context(format!("{label}:\n{tail}"))
+        }
     }
 }
 

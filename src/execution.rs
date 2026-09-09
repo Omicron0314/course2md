@@ -282,7 +282,7 @@ pub fn digest(bytes: &[u8]) -> String {
 pub fn file_digest(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut file =
-        std::fs::File::open(path).with_context(|| format!("无法读取 {}", path.display()))?;
+        std::fs::File::open(path).with_context(|| format!("无法读取 {0} / Cannot read {0}", path.display()))?;
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 128 * 1024];
     loop {

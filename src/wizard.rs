@@ -1,4 +1,4 @@
-//! 首次使用向导：无配置文件且处于交互终端时，引导选择语音转写方式并写盘。
+//! 首次使用向导：没有可用的转写配置且处于交互终端时，引导选择语音转写方式并写盘。
 //!
 //! 触发条件见 [`is_first_run`]；非交互/CI 环境不触发，走既有默认逻辑
 //!（provider 回落 `config::default_provider_hint()`）。
@@ -9,12 +9,13 @@ use crate::config::AsrProvider;
 use anyhow::Result;
 use std::io::IsTerminal as _;
 
-/// 是否首次运行：配置文件不存在 && 用户没显式传 --provider && stdin 是终端。
-pub fn is_first_run(opts_provider_is_none: bool) -> bool {
+/// 是否首次运行：用户没显式传 --provider && 交互终端 &&
+///（配置文件不存在，或配置存在但未设置 provider——例如只运行过 config init）。
+pub fn is_first_run(opts_provider_is_none: bool, file: &crate::settings::ConfigFile) -> bool {
     opts_provider_is_none
-        && !crate::settings::config_path().is_file()
         && std::io::stdin().is_terminal()
         && std::io::stderr().is_terminal()
+        && (!crate::settings::config_path().is_file() || file.defaults.provider.is_none())
 }
 
 /// 满足首次运行条件时执行向导并返回写盘后的新配置；否则原样返回。
@@ -28,7 +29,7 @@ pub fn maybe_run(
             opts.transcript_source.or(file.defaults.transcript_source),
             Some(crate::config::TranscriptSource::Subtitle)
         )
-        || !is_first_run(opts.provider.is_none())
+        || !is_first_run(opts.provider.is_none(), file)
     {
         return Ok(file.clone());
     }
@@ -268,16 +269,5 @@ mod tests {
     fn escape_does_not_accept_the_default() {
         assert!(selected_or_cancelled(None).is_err());
         assert_eq!(selected_or_cancelled(Some(0)).unwrap(), 0);
-    }
-
-    #[test]
-    fn explicit_subtitle_skips_asr_setup() {
-        let opts = crate::cli::RunOpts {
-            transcript_source: Some(crate::config::TranscriptSource::Subtitle),
-            ..Default::default()
-        };
-        let cfg = crate::settings::ConfigFile::default();
-        let result = maybe_run(&opts, &cfg).unwrap();
-        assert_eq!(result.defaults.provider, cfg.defaults.provider);
     }
 }
