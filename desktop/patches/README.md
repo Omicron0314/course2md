@@ -32,6 +32,12 @@ Developer checkouts are never patched.
 - `component-tooltip-lifecycle.patch` dismisses a window's managed tooltip
   before mouse or keyboard navigation can remove its trigger. It also cancels
   delayed tooltips, while preserving normal hovering and other windows.
+- `component-switch-geometry.patch` adds an optional absolute or rem track
+  height. The track width, thumb, inset and radius keep their existing
+  proportions, and the existing switch owns input, focus and thumb motion.
+  Without an override, its original pixel sizes are unchanged. The app's
+  shared switch adapter opts into 20/14 rem, preserving 36×20 at 100% and
+  scaling to 72×40 at 200%.
 - `zed-metal-frame-lifetime.patch` scopes Metal drawing to one autorelease pool
   per frame. `CAMetalLayer::nextDrawable` returns an autoreleased object from a
   finite pool; keeping it alive across successive display callbacks can delay

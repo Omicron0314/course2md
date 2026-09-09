@@ -1673,17 +1673,19 @@ impl Desktop {
                         .child(field_label(format!("setup-ai-{id}-label"), label).min_w_0())
                         .child(crate::focus_scroll::FocusRing::new(
                             format!("setup-ai-{id}-focus"),
-                            Switch::new(format!("setup-ai-{id}"))
-                                .checked(checked)
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, enabled, _, cx| {
-                                    if id == "proofread" {
-                                        this.onboarding.ai_proofread = *enabled;
-                                    } else {
-                                        this.onboarding.ai_summary = *enabled;
-                                    }
-                                    cx.notify();
-                                })),
+                            coral_switch(
+                                Switch::new(format!("setup-ai-{id}"))
+                                    .checked(checked)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, enabled, _, cx| {
+                                        if id == "proofread" {
+                                            this.onboarding.ai_proofread = *enabled;
+                                        } else {
+                                            this.onboarding.ai_summary = *enabled;
+                                        }
+                                        cx.notify();
+                                    })),
+                            ),
                         )),
                 );
             }

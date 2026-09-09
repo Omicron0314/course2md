@@ -667,9 +667,11 @@ pub fn badge(kind: BadgeKind) -> gpui::Div {
         .child(icon.small())
 }
 
-/// Preference switches use the same semantic accent as other selected controls.
+/// Preference switches share the accent and scale their geometry with UI text.
 pub fn coral_switch(switch: gpui_component::switch::Switch) -> gpui_component::switch::Switch {
-    switch.color(color(ACCENT_STRONG))
+    switch
+        .color(color(ACCENT_STRONG))
+        .track_height(rems(20. / 14.))
 }
 
 /// GPUI Component's Root resets rem size from Theme on every render. Update that

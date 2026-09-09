@@ -1,0 +1,68 @@
+--- a/crates/component/src/switch.rs
++++ b/crates/component/src/switch.rs
+@@ -2,9 +2,9 @@
+     ActiveTheme, Disableable, Side, Sizable, Size, StyledExt, text::Text, tooltip::ComponentTooltip,
+ };
+ use gpui::{
+-    App, Background, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement as _,
+-    RenderOnce, SharedString, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
+-    px,
++    AbsoluteLength, App, Background, ElementId, Hsla, InteractiveElement, IntoElement,
++    ParentElement as _, RenderOnce, SharedString, StyleRefinement, Styled, Window, div,
++    prelude::FluentBuilder as _, px,
+ };
+ use gpui_base::{Switch as BaseSwitch, SwitchThumb, SwitchTrack, spring};
+ use std::rc::Rc;
+@@ -22,6 +22,7 @@
+     label_side: Side,
+     on_click: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+     size: Size,
++    track_height: Option<AbsoluteLength>,
+     color: Option<Hsla>,
+     tooltip: ComponentTooltip,
+ }
+@@ -40,6 +41,7 @@
+             on_click: None,
+             label_side: Side::Right,
+             size: Size::Medium,
++            track_height: None,
+             color: None,
+             tooltip: ComponentTooltip::default(),
+         }
+@@ -81,6 +83,15 @@
+     /// Defaults to `cx.theme().primary`.
+     pub fn color(mut self, color: impl Into<Hsla>) -> Self {
+         self.color = Some(color.into());
++        self
++    }
++
++    /// Set a track height while preserving the track and thumb proportions.
++    ///
++    /// Rem lengths are resolved against the current window at render time.
++    /// Without an override, the selected size keeps its default pixel geometry.
++    pub fn track_height(mut self, height: impl Into<AbsoluteLength>) -> Self {
++        self.track_height = Some(height.into());
+         self
+     }
+ 
+@@ -141,11 +152,18 @@
+             Size::XSmall | Size::Small => px(12.),
+             _ => px(16.),
+         };
+-        let inset = px(2.);
++        let geometry_scale = self
++            .track_height
++            .map(|height| height.to_pixels(window.rem_size()) / bg_height)
++            .unwrap_or(1.);
++        let bg_width = bg_width * geometry_scale;
++        let bg_height = bg_height * geometry_scale;
++        let bar_width = bar_width * geometry_scale;
++        let inset = px(2.) * geometry_scale;
+         let radius = if cx.theme().radius >= px(4.) {
+             bg_height
+         } else {
+-            cx.theme().radius
++            cx.theme().radius * geometry_scale
+         };
+ 
+         // The thumb's position is geometry, not a semantic state style: a
