@@ -66,6 +66,9 @@ pub struct Draft {
     pub library_id: String,
     pub folder: Option<u64>,
     pub options: ConversionOptions,
+    /// Remember the local branch when temporarily choosing a speech service.
+    #[serde(default)]
+    pub local_provider: Option<usize>,
     #[serde(default)]
     pub overrides: BTreeSet<Override>,
     #[serde(default)]
@@ -97,6 +100,7 @@ impl Draft {
             custom_title: false,
             library_id,
             folder: None,
+            local_provider: (defaults.provider != 5).then_some(defaults.provider),
             options: defaults,
             overrides: BTreeSet::new(),
             subtitle: None,
@@ -326,6 +330,94 @@ pub struct TaskRecord {
     pub resend: Vec<String>,
 }
 
+impl TaskRecord {
+    pub fn exports_only(&self) -> bool {
+        matches!(
+            &self.plan.operation,
+            course2md::execution::Operation::Reprocess { components, .. }
+                if !components.is_empty() && components.iter().all(|part| part == "exports")
+        )
+    }
+}
+
+/// Export publication has two destinations. Derive them from the frozen task
+/// and current library location, so moving a library needs no new path record.
+fn task_export_directory(task: &TaskRecord, location: &LibraryLocation) -> Option<PathBuf> {
+    if task.plan.library_id != location.id {
+        return None;
+    }
+    if task.exports_only() {
+        let course = format!(
+            "course-{}",
+            &course2md::execution::digest(task.plan.source_id.as_bytes())[..32]
+        );
+        let course2md::execution::Operation::Reprocess {
+            base_version_dir, ..
+        } = &task.plan.operation
+        else {
+            return None;
+        };
+        Some(
+            location
+                .root
+                .join(course)
+                .join("exports")
+                .join(base_version_dir.file_name()?)
+                .join(&task.id),
+        )
+    } else {
+        task.artifact
+            .as_ref()
+            .map(|version| version.join("exports"))
+    }
+}
+
+/// No filesystem access: rendering can offer the exact successful outputs from
+/// the durable outcome record. Existence is checked when the user opens them.
+pub(crate) fn task_export_files(task: &TaskRecord, location: &LibraryLocation) -> Vec<PathBuf> {
+    if task.artifact.is_none()
+        || matches!(
+            task.state,
+            TaskState::Queued | TaskState::Running | TaskState::Pausing
+        )
+    {
+        return Vec::new();
+    }
+    let Some(exports) = task
+        .outcomes
+        .as_ref()
+        .and_then(|outcomes| outcomes.get("exports"))
+        .and_then(|exports| exports.as_object())
+    else {
+        return Vec::new();
+    };
+    let Some(directory) = task_export_directory(task, location) else {
+        return Vec::new();
+    };
+    use course2md::config::OutputFormat;
+    [OutputFormat::Md, OutputFormat::Html, OutputFormat::Json]
+        .into_iter()
+        .filter(|format| {
+            exports
+                .get(&format.to_string())
+                .and_then(|outcome| outcome.get("status"))
+                .and_then(|status| status.as_str())
+                == Some("succeeded")
+        })
+        .map(|format| directory.join(course2md::portable::file_name(format)))
+        .collect()
+}
+
+pub(crate) fn available_task_export(
+    task: &TaskRecord,
+    location: &LibraryLocation,
+) -> Result<PathBuf> {
+    task_export_files(task, location)
+        .into_iter()
+        .find(|path| path.is_file())
+        .context("导出文件已移动或无法读取，可打开笔记后从“导出”菜单重新保存。")
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BlockedRequest {
     pub reason: String,
@@ -472,6 +564,7 @@ impl State {
         input.asr_service = previous.asr_service.clone();
         input.ai_service = previous.ai_service.clone();
         input.base_config = previous.base_config.clone();
+        input.local_provider = previous.local_provider;
         self.replace_input(input);
     }
 
@@ -735,8 +828,20 @@ impl State {
     pub fn reprocess(
         &mut self,
         id: &str,
+        components: Vec<String>,
+        resend: Vec<String>,
+    ) -> Result<String> {
+        self.reprocess_with_service(id, components, resend, None)
+    }
+
+    /// Repair creates a new attempt with an explicitly chosen service. The
+    /// original task and the unrelated current input remain unchanged.
+    pub fn reprocess_with_service(
+        &mut self,
+        id: &str,
         mut components: Vec<String>,
         resend: Vec<String>,
+        ai_service: Option<(String, ConfigFile)>,
     ) -> Result<String> {
         let mut original = self.task(id).context("任务不存在")?.clone();
         if let Some(next) = &original.handled_by {
@@ -824,6 +929,16 @@ impl State {
             );
         }
         let mut plan = original.plan;
+        if let Some((service, config)) = ai_service {
+            ensure!(
+                components
+                    .iter()
+                    .all(|part| matches!(part.as_str(), "proofreading" | "summary")),
+                "服务修复只能用于未完成的校对或摘要"
+            );
+            plan.ai_service = Some(service);
+            plan.config.llm = config.llm;
+        }
         let only_exports = components.iter().all(|component| component == "exports");
         plan.config.llm.enabled = components
             .iter()
@@ -1094,7 +1209,20 @@ fn upgrade_library_markers(state: &mut State) -> Vec<String> {
 }
 
 fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Result<()> {
-    if task.artifact.is_some() {
+    if task.artifact.is_some() && !task.exports_only() {
+        if task.outcomes.is_none()
+            && let Some(manifest) = task
+                .artifact
+                .as_ref()
+                .and_then(|version| {
+                    course2md::artifact::read_manifest(&version.join("manifest.json")).ok()
+                })
+                .filter(|manifest| {
+                    manifest.task_id == task.id && manifest.source_id == task.plan.source_id
+                })
+        {
+            task.outcomes = Some(serde_json::to_value(&manifest.outcomes)?);
+        }
         return Ok(());
     }
     let course = format!(
@@ -1136,6 +1264,8 @@ fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Resu
             .context("导出结果记录不完整")?;
         ensure!(!outcomes.is_empty(), "导出结果记录为空");
         let mut outcomes = outcomes.clone();
+        let export_directory =
+            task_export_directory(task, location).context("导出位置与任务记录不匹配")?;
         for (format, outcome) in &mut outcomes {
             if outcome.get("status").and_then(|v| v.as_str()) == Some("succeeded") {
                 let format = match format.as_str() {
@@ -1144,13 +1274,7 @@ fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Resu
                     "json" => course2md::config::OutputFormat::Json,
                     _ => continue,
                 };
-                let expected = location
-                    .root
-                    .join(&course)
-                    .join("exports")
-                    .join(base_version_dir.file_name().context("笔记版本位置不完整")?)
-                    .join(&task.id)
-                    .join(course2md::portable::file_name(format));
+                let expected = export_directory.join(course2md::portable::file_name(format));
                 if !expected.is_file() {
                     *outcome = serde_json::to_value(course2md::artifact::Outcome::failed(
                         "导出文件已移动或无法读取，可以重新导出",
@@ -1159,14 +1283,17 @@ fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Resu
             }
         }
         let partial = outcomes.values().any(failed_outcome);
-        task.artifact = Some(base_version_dir.clone());
-        task.outcomes = Some(serde_json::json!({"exports":outcomes}));
-        task.state = if partial {
+        let next_outcomes = Some(serde_json::json!({"exports":outcomes}));
+        let next_state = if partial {
             TaskState::Partial
         } else {
             TaskState::Complete
         };
-        task.unread = true;
+        task.unread |=
+            task.artifact.is_none() || task.outcomes != next_outcomes || task.state != next_state;
+        task.artifact = Some(base_version_dir.clone());
+        task.outcomes = next_outcomes;
+        task.state = next_state;
     }
     Ok(())
 }
@@ -2411,6 +2538,15 @@ mod tests {
         task_id: &str,
         outcomes: course2md::artifact::Outcomes,
     ) -> PathBuf {
+        publish_note_with_exports(state, task_id, outcomes, &[])
+    }
+
+    fn publish_note_with_exports(
+        state: &State,
+        task_id: &str,
+        outcomes: course2md::artifact::Outcomes,
+        formats: &[course2md::config::OutputFormat],
+    ) -> PathBuf {
         use course2md::{artifact, timeline};
         let task = state.task(task_id).unwrap();
         let course_id = format!(
@@ -2453,7 +2589,7 @@ mod tests {
             &meta,
             &sections,
             None,
-            &[],
+            formats,
             outcomes,
         ))
         .unwrap();
@@ -2740,6 +2876,80 @@ mod tests {
     }
 
     #[test]
+    fn service_repair_creates_a_scoped_attempt_and_preserves_the_old_plan_and_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let mut snapshot = plan(&ws.state.default_library);
+        snapshot.ai_service = Some("old-ai-version".into());
+        snapshot.config.llm.base_url = "https://old.example.test/v1".into();
+        snapshot.config.llm.model = "old-model".into();
+        let id = ws.state.enqueue(snapshot.clone(), None).unwrap().0;
+        let version = publish_note(&ws.state, &id, true);
+        let original = ws.state.task_mut(&id).unwrap();
+        original.state = TaskState::Partial;
+        original.artifact = Some(version.clone());
+        ws.state
+            .draft_mut()
+            .unwrap()
+            .change_source("another-video.mp4".into());
+        let input = ws.state.draft().unwrap().clone();
+        let mut repaired = ConfigFile::default();
+        repaired.llm.base_url = "https://repaired.example.test/v1".into();
+        repaired.llm.model = "repaired-model".into();
+        // A service repair cannot silently rerun successful work or non-AI stages.
+        assert!(
+            ws.state
+                .reprocess_with_service(
+                    &id,
+                    vec!["screenshots".into()],
+                    vec![],
+                    Some(("new-ai-version".into(), repaired.clone()))
+                )
+                .is_err()
+        );
+        let followup = ws
+            .state
+            .reprocess_with_service(
+                &id,
+                vec!["proofreading".into()],
+                vec![],
+                Some(("new-ai-version".into(), repaired.clone())),
+            )
+            .unwrap();
+        assert!(ws.state.task(&id).unwrap().plan == snapshot);
+        assert_eq!(
+            ws.state.task(&id).unwrap().artifact.as_ref(),
+            Some(&version)
+        );
+        assert!(ws.state.draft().unwrap() == &input);
+        let child = ws.state.task(&followup).unwrap();
+        assert_eq!(child.plan.ai_service.as_deref(), Some("new-ai-version"));
+        assert_eq!(child.plan.config.llm.model, "repaired-model");
+        assert_eq!(
+            child.plan.config.llm.base_url,
+            "https://repaired.example.test/v1"
+        );
+        assert!(child.plan.config.llm.enabled);
+        assert!(!child.plan.config.llm.summarize);
+        assert!(matches!(
+            &child.plan.operation,
+            course2md::execution::Operation::Reprocess { base_version_dir, components, .. }
+                if base_version_dir == &version && components == &["proofreading"]
+        ));
+        let again = ws
+            .state
+            .reprocess_with_service(
+                &id,
+                vec!["proofreading".into()],
+                vec![],
+                Some(("new-ai-version".into(), repaired)),
+            )
+            .unwrap();
+        assert_eq!(again, followup);
+        assert_eq!(ws.state.tasks.len(), 2);
+    }
+
+    #[test]
     fn damaged_primary_and_backup_are_preserved_before_paused_mirror_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         let mut ws = test_workspace(dir.path());
@@ -2929,6 +3139,159 @@ mod tests {
         };
         let needed = refs.required_for(&child.plan.config);
         assert!(needed.asr.is_none() && needed.llm.is_none());
+    }
+
+    #[test]
+    fn published_exports_remain_reachable_after_a_lost_completion_event() {
+        use course2md::{artifact, config::OutputFormat, portable};
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        ws.state.task_mut(&id).unwrap().state = TaskState::Running;
+        ws.save().unwrap();
+        let mut outcomes = artifact::Outcomes::default();
+        outcomes.transcript = artifact::Outcome::succeeded();
+        let version = publish_note_with_exports(
+            &ws.state,
+            &id,
+            outcomes,
+            &[OutputFormat::Md, OutputFormat::Html],
+        );
+        let mut restored = test_workspace(dir.path());
+        assert_eq!(restored.state.task(&id).unwrap().state, TaskState::Complete);
+        // Older desktop records did not always retain the done event's outcomes.
+        restored.state.task_mut(&id).unwrap().outcomes = None;
+        restored.save().unwrap();
+        let restored = test_workspace(dir.path());
+        let task = restored.state.task(&id).unwrap();
+        let location = restored.state.library(&task.plan.library_id).unwrap();
+        let markdown = version
+            .join("exports")
+            .join(portable::file_name(OutputFormat::Md));
+        let html = version
+            .join("exports")
+            .join(portable::file_name(OutputFormat::Html));
+        assert_eq!(task.state, TaskState::Complete);
+        assert_eq!(
+            task_export_files(task, location),
+            vec![markdown.clone(), html.clone()]
+        );
+        assert_eq!(available_task_export(task, location).unwrap(), markdown);
+        assert!(restored.state.next_task().is_none());
+
+        // A missing first format must not hide another successful output, and
+        // the readable body's directory is never substituted for missing exports.
+        std::fs::remove_file(&markdown).unwrap();
+        assert_eq!(available_task_export(task, location).unwrap(), html);
+        std::fs::remove_file(&html).unwrap();
+        assert!(available_task_export(task, location).is_err());
+        assert!(version.join("course.md").is_file());
+        assert!(task.plan == ws.state.task(&id).unwrap().plan);
+    }
+
+    #[test]
+    fn export_only_completion_reopens_its_own_files_and_recovers_missing_outputs() {
+        use course2md::{artifact, config::OutputFormat, portable};
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let mut outcomes = artifact::Outcomes::default();
+        outcomes.transcript = artifact::Outcome::succeeded();
+        outcomes
+            .exports
+            .insert("html".into(), artifact::Outcome::failed("disk full"));
+        let base = publish_note_with_exports(&ws.state, &id, outcomes, &[OutputFormat::Md]);
+        let manifest = artifact::read_manifest(&base.join("manifest.json")).unwrap();
+        let original = ws.state.task_mut(&id).unwrap();
+        original.state = TaskState::Partial;
+        original.artifact = Some(base.clone());
+        original.outcomes = Some(serde_json::to_value(&manifest.outcomes).unwrap());
+        let original_plan = original.plan.clone();
+        let old_markdown = base
+            .join("exports")
+            .join(portable::file_name(OutputFormat::Md));
+        let old_bytes = std::fs::read(&old_markdown).unwrap();
+        let manifest_bytes = std::fs::read(base.join("manifest.json")).unwrap();
+        let next = ws
+            .state
+            .reprocess(&id, vec!["exports".into()], vec![])
+            .unwrap();
+        ws.state.task_mut(&next).unwrap().state = TaskState::Running;
+        ws.save().unwrap();
+        let child = ws.state.task(&next).unwrap();
+        let next_plan = child.plan.clone();
+        let location = ws.state.library(&child.plan.library_id).unwrap();
+        let output = task_export_directory(child, location)
+            .unwrap()
+            .join(portable::file_name(OutputFormat::Html));
+        portable::export(&base, OutputFormat::Html, &output).unwrap();
+        std::fs::write(
+            child.work_dir.join("export-result.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1,
+                "outputs": [output],
+                "outcomes": {"html": {"status": "succeeded"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut restored = test_workspace(dir.path());
+        let task = restored.state.task(&next).unwrap();
+        let location = restored.state.library(&task.plan.library_id).unwrap();
+        assert_eq!(task.state, TaskState::Complete);
+        assert_eq!(task.artifact.as_ref(), Some(&base));
+        assert_eq!(task_export_files(task, location), vec![output.clone()]);
+        assert_eq!(available_task_export(task, location).unwrap(), output);
+        assert!(!output.starts_with(&base));
+        assert!(task.plan == next_plan);
+        assert!(restored.state.task(&id).unwrap().plan == original_plan);
+        assert!(restored.state.next_task().is_none());
+        restored.state.task_mut(&next).unwrap().unread = false;
+        restored.save().unwrap();
+
+        // Opening the app does not announce a previously read result again.
+        let reopened = test_workspace(dir.path());
+        let task = reopened.state.task(&next).unwrap();
+        assert!(!task.unread);
+        assert_eq!(
+            available_task_export(task, reopened.state.library(&task.plan.library_id).unwrap())
+                .unwrap(),
+            output
+        );
+
+        std::fs::remove_file(&output).unwrap();
+        let mut missing = test_workspace(dir.path());
+        let task = missing.state.task(&next).unwrap();
+        let location = missing.state.library(&task.plan.library_id).unwrap();
+        assert_eq!(task.state, TaskState::Partial);
+        assert!(task.unread && task_export_files(task, location).is_empty());
+        assert!(available_task_export(task, location).is_err());
+        let retry = missing
+            .state
+            .reprocess(&next, vec!["exports".into()], vec![])
+            .unwrap();
+        let retry = missing.state.task(&retry).unwrap();
+        assert!(retry.exports_only());
+        assert_eq!(
+            retry.plan.config.defaults.formats,
+            Some(vec![OutputFormat::Html])
+        );
+        assert_eq!(std::fs::read(old_markdown).unwrap(), old_bytes);
+        assert_eq!(
+            std::fs::read(base.join("manifest.json")).unwrap(),
+            manifest_bytes
+        );
+        assert!(missing.state.task(&next).unwrap().plan == next_plan);
+        assert!(missing.state.task(&id).unwrap().plan == original_plan);
     }
 
     #[test]

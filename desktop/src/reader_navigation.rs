@@ -7,33 +7,46 @@ use std::{
 
 /// Content coordinates keyed by document block (or frame), regardless of layout nesting.
 #[derive(Default)]
-pub struct ReadingLayout(BTreeMap<usize, (f32, f32)>);
+pub struct ReadingLayout {
+    blocks: BTreeMap<usize, (f32, f32)>,
+    search_lines: BTreeMap<(usize, usize), (f32, f32)>,
+}
 
 impl ReadingLayout {
     pub fn record(&mut self, index: usize, top: f32, height: f32) {
-        self.0.insert(index, (top, height));
+        self.blocks.insert(index, (top, height));
+    }
+
+    pub fn record_search_line(&mut self, block: usize, byte: usize, top: f32, height: f32) {
+        self.search_lines.insert((block, byte), (top, height));
+    }
+
+    /// A found line lands below one line of context, never midway through its glyphs.
+    pub fn search_offset(&self, block: usize, byte: usize) -> Option<f32> {
+        let &(top, line_height) = self.search_lines.get(&(block, byte))?;
+        Some((-top + line_height).min(0.))
     }
 
     pub fn top_item(&self, offset: f32) -> Option<(usize, f32, f32)> {
         let top = -offset;
         let covering = self
-            .0
+            .blocks
             .iter()
             .filter(|(_, (y, height))| *y <= top && *y + *height > top)
             .max_by(|a, b| a.1.0.total_cmp(&b.1.0).then_with(|| b.0.cmp(a.0)));
         let next = || {
-            self.0
+            self.blocks
                 .iter()
                 .filter(|(_, (y, _))| *y > top)
                 .min_by(|a, b| a.1.0.total_cmp(&b.1.0).then_with(|| a.0.cmp(b.0)))
         };
-        let last = || self.0.iter().max_by(|a, b| a.1.0.total_cmp(&b.1.0));
+        let last = || self.blocks.iter().max_by(|a, b| a.1.0.total_cmp(&b.1.0));
         let (&index, &(y, height)) = covering.or_else(next).or_else(last)?;
         Some((index, (y - top).min(0.), height))
     }
 
     pub fn restore(&self, index: usize, fraction: Option<f32>, within: f32) -> Option<f32> {
-        let &(top, height) = self.0.get(&index)?;
+        let &(top, height) = self.blocks.get(&index)?;
         Some(-top + restore_within(fraction, within, height))
     }
 }
@@ -172,6 +185,45 @@ pub fn text_matches(text: &str, query: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
+/// A contents list describes topics. Frame boundaries remain in the article,
+/// but a timestamp alone does not become a chapter in the reading rail.
+pub fn content_outline(
+    headings: &[(usize, String, Option<f64>)],
+    topics: &[(f64, String)],
+) -> Vec<(usize, String, Option<f64>)> {
+    let mut named = BTreeMap::new();
+    for (index, label, seconds) in headings {
+        if !label.trim().is_empty()
+            && !seconds.is_some_and(|seconds| course2md::render::fmt_ts(seconds) == *label)
+        {
+            named.insert(*index, (label.clone(), *seconds));
+        }
+    }
+    for (seconds, title) in topics.iter().filter(|(_, title)| !title.trim().is_empty()) {
+        if let Some((index, _)) = nearest_time(
+            headings
+                .iter()
+                .map(|(index, _, seconds)| (*index, *seconds)),
+            *seconds,
+        ) {
+            // The entry opens this section, whose displayed time may differ
+            // slightly from the summary's proposed topic boundary.
+            let displayed_time = headings
+                .iter()
+                .find(|(heading, _, _)| *heading == index)
+                .and_then(|(_, _, seconds)| *seconds);
+            named.insert(index, (title.clone(), displayed_time));
+        }
+    }
+    if named.len() < 2 {
+        return Vec::new();
+    }
+    named
+        .into_iter()
+        .map(|(index, (label, seconds))| (index, label, seconds))
+        .collect()
+}
+
 /// Display an immutable UTC instant using the system timezone's rules for that
 /// date, rather than applying today's offset to every historical timestamp.
 pub fn timestamp_local(milliseconds: u64) -> String {
@@ -225,6 +277,31 @@ pub fn timestamp_utc(milliseconds: u64) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn contents_use_real_topics_instead_of_every_frame_timestamp() {
+        let headings = vec![
+            (0, "摘要".into(), None),
+            (2, "00:06".into(), Some(6.)),
+            (5, "00:16".into(), Some(16.)),
+            (8, "00:27".into(), Some(27.)),
+            (11, "00:40".into(), Some(40.)),
+        ];
+        assert!(content_outline(&headings, &[]).is_empty());
+        assert_eq!(
+            content_outline(
+                &headings,
+                &[(6., "问题由来".into()), (39., "讨论与回应".into())]
+            ),
+            vec![
+                (0, "摘要".into(), None),
+                (2, "问题由来".into(), Some(6.)),
+                (11, "讨论与回应".into(), Some(40.)),
+            ]
+        );
+        let authored = vec![(0, "第一章".into(), None), (5, "第二章".into(), None)];
+        assert_eq!(content_outline(&authored, &[]), authored);
+    }
+
+    #[test]
     fn nested_summary_blocks_and_wrapped_frames_use_their_own_coordinates() {
         let mut body = ReadingLayout::default();
         body.record(1, 20., 40.); // Summary card paragraphs are nested, not scroll children.
@@ -243,6 +320,17 @@ mod tests {
         assert_eq!(grid.restore(3, None, 0.), Some(-216.));
         grid.record(2, 432., 200.); // The same frame moves after a window resize.
         assert_eq!(grid.restore(2, Some(0.12), 0.), Some(-456.));
+    }
+
+    #[test]
+    fn search_uses_the_shaped_line_and_leaves_context_above_it() {
+        let mut layout = ReadingLayout::default();
+        layout.record(1, 20., 320.);
+        layout.record_search_line(1, 130, 84., 32.);
+        assert_eq!(layout.search_offset(1, 130), Some(-52.));
+        layout.record_search_line(1, 0, 20., 32.);
+        assert_eq!(layout.search_offset(1, 0), Some(0.));
+        assert_eq!(layout.search_offset(1, 42), None);
     }
     #[test]
     fn source_links_do_not_invent_local_or_unknown_seek_support() {

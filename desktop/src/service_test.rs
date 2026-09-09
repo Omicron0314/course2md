@@ -62,6 +62,34 @@ impl TestKind {
     }
 }
 
+/// A recorded, explicit configuration refusal can stop a repair from immediately
+/// resending course data. It is not a prerequisite for saving a service or for
+/// trying an untested configuration. Authentication applies to the connection;
+/// model refusals remain scoped to the capabilities being repaired.
+pub fn blocks_reprocessing(
+    evidence: &ServiceTestEvidence,
+    config: &ServiceConfiguration,
+    required_contracts: &[&str],
+) -> bool {
+    if evidence.fingerprint != config.fingerprint(&evidence.contract) {
+        return false;
+    }
+    // Older stored tests classified model-shaped errors before HTTP status.
+    if evidence.details.iter().any(|detail| {
+        detail
+            .strip_prefix("HTTP ")
+            .and_then(|status| status.parse::<u16>().ok())
+            .is_some_and(|status| status == 429 || status >= 500)
+    }) {
+        return false;
+    }
+    match evidence.outcome {
+        TestOutcome::AuthenticationRefused => true,
+        TestOutcome::ModelRefused => required_contracts.contains(&evidence.contract.as_str()),
+        _ => false,
+    }
+}
+
 /// Suitable for a GPUI background task or any async executor. Dropping the future cannot
 /// promise to retract a request already sent; keep the result receiver alive when closing
 /// the editor and only attach evidence if its configuration fingerprint still matches.
@@ -254,19 +282,21 @@ fn run_test(
             "model_not_supported",
         ]
         .contains(&code.as_str());
-        evidence.outcome = if model_error {
-            TestOutcome::ModelRefused
-        } else if response.status >= 500 {
+        evidence.outcome = if response.status >= 500 {
             TestOutcome::OutcomeUnknown
+        } else if response.status == 429 {
+            TestOutcome::ContractMismatch
+        } else if model_error {
+            TestOutcome::ModelRefused
         } else {
             TestOutcome::ContractMismatch
         };
-        evidence.message = if model_error {
-            "服务不接受所选模型，请检查模型 ID 和使用权限"
-        } else if response.status >= 500 {
+        evidence.message = if response.status >= 500 {
             "服务返回错误，未收到确定结果，测试可能已产生费用"
         } else if response.status == 429 {
             "服务暂时无法接受测试请求，请查看服务的额度或速率限制"
+        } else if model_error {
+            "服务不接受所选模型，请检查模型 ID 和使用权限"
         } else if (300..400).contains(&response.status) {
             "服务要求跳转到其他地址；尚未向新地址发送请求，请核对服务地址"
         } else {
@@ -643,6 +673,91 @@ mod tests {
             run(&transport(404, json!({"error":{"code":"model_not_found"}}))).outcome,
             TestOutcome::ModelRefused
         );
+    }
+
+    #[test]
+    fn repair_blocks_only_matching_explicit_configuration_refusals() {
+        let original = config();
+        let required = [TestKind::Proofread.contract()];
+        let refusal = run(&transport(
+            401,
+            json!({"error": {"code": "invalid_api_key"}}),
+        ));
+        assert!(blocks_reprocessing(&refusal, &original, &required));
+        let mut renamed = original.clone();
+        renamed.name = "Renamed service".into();
+        assert!(blocks_reprocessing(&refusal, &renamed, &required));
+        for changed in [
+            ServiceConfiguration {
+                endpoint: "https://other.test/v1/chat/completions".into(),
+                ..original.clone()
+            },
+            ServiceConfiguration {
+                model: "another-model".into(),
+                ..original.clone()
+            },
+            ServiceConfiguration {
+                authentication: Authentication::ApiKey,
+                credential: Some("credential-new".into()),
+                ..original.clone()
+            },
+        ] {
+            assert!(!blocks_reprocessing(&refusal, &changed, &required));
+        }
+        let model_refusal = run(&transport(
+            404,
+            json!({"error": {"code": "model_not_found"}}),
+        ));
+        assert!(blocks_reprocessing(&model_refusal, &original, &required));
+        assert!(!blocks_reprocessing(
+            &model_refusal,
+            &original,
+            &[TestKind::Summary.contract()]
+        ));
+        for outcome in [
+            TestOutcome::Passed,
+            TestOutcome::NotSent,
+            TestOutcome::OutcomeUnknown,
+            TestOutcome::ContractMismatch,
+            TestOutcome::SampleMismatch,
+        ] {
+            let mut evidence = refusal.clone();
+            evidence.outcome = outcome;
+            assert!(!blocks_reprocessing(&evidence, &original, &required));
+        }
+    }
+
+    #[test]
+    fn retryable_http_status_is_not_a_configuration_refusal() {
+        for status in [429, 500, 503] {
+            let evidence = run(&transport(
+                status,
+                json!({"error": {"code": "model_not_found"}}),
+            ));
+            assert!(!matches!(
+                evidence.outcome,
+                TestOutcome::AuthenticationRefused | TestOutcome::ModelRefused
+            ));
+            assert!(!blocks_reprocessing(
+                &evidence,
+                &config(),
+                &[TestKind::Proofread.contract()]
+            ));
+            // The guard also tolerates persisted results written before this fix.
+            let mut older = evidence;
+            older.outcome = TestOutcome::ModelRefused;
+            assert!(!blocks_reprocessing(
+                &older,
+                &config(),
+                &[TestKind::Proofread.contract()]
+            ));
+        }
+        let forbidden = run(&transport(403, json!({"error": {"code": "forbidden"}})));
+        assert!(blocks_reprocessing(
+            &forbidden,
+            &config(),
+            &[TestKind::Proofread.contract()]
+        ));
     }
 
     #[test]

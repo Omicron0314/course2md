@@ -34,11 +34,15 @@ impl Course {
         if self.warning.is_some() && self.manifest.is_none() {
             return "已有笔记 · 正在只读原稿".into();
         }
-        let counts = format!("{} 段笔记 · {} 张截图", self.segments, self.slides);
-        if self.manifest.as_ref().is_some_and(|m| m.partial) {
-            format!("{counts} · 部分处理未完成")
+        let content = if self.slides > 0 {
+            format!("含 {} 张截图", self.slides)
         } else {
-            counts
+            "文字笔记".to_owned()
+        };
+        if self.manifest.as_ref().is_some_and(has_incomplete_content) {
+            format!("{content} · 部分内容待补全")
+        } else {
+            content
         }
     }
     pub fn storage_dir(&self) -> PathBuf {
@@ -61,6 +65,11 @@ impl Course {
             self.dir.clone()
         }
     }
+}
+/// Optional file exports describe a task's output, not the completeness of its note.
+/// Published manifests stay immutable when a later task successfully repairs exports.
+pub(crate) fn has_incomplete_content(manifest: &course2md::artifact::Manifest) -> bool {
+    !processing_issues(manifest).is_empty()
 }
 pub struct LibraryScan {
     pub courses: Vec<Course>,
@@ -573,6 +582,31 @@ pub fn without_image_references(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optional_export_failure_does_not_describe_readable_content_as_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("structured.json"),
+            include_str!("../../tests/fixtures/legacy/json/structured.json"),
+        )
+        .unwrap();
+        let mut course = scan_library(root.path()).unwrap().courses.remove(0);
+        let manifest = course.manifest.as_mut().unwrap();
+        manifest.partial = true;
+        manifest.outcomes.transcript = course2md::artifact::Outcome::succeeded();
+        manifest.outcomes.screenshots = course2md::artifact::Outcome::succeeded();
+        manifest.outcomes.proofreading = course2md::artifact::Outcome::succeeded();
+        manifest.outcomes.summary = course2md::artifact::Outcome::succeeded();
+        manifest.outcomes.exports.insert(
+            "html".into(),
+            course2md::artifact::Outcome::failed("destination unavailable"),
+        );
+        assert!(!has_incomplete_content(manifest));
+        assert!(!course.description().contains("待补全"));
+        course.manifest.as_mut().unwrap().outcomes.summary =
+            course2md::artifact::Outcome::failed("service unavailable");
+        assert!(course.description().contains("待补全"));
+    }
     #[test]
     fn library_discovers_json_body_without_run_and_keeps_failure_materials_separate() {
         let root = tempfile::tempdir().unwrap();

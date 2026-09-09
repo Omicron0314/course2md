@@ -162,6 +162,9 @@ pub struct GenerationPreferences {
     /// Durable editor text is not an active processing rule until explicitly applied.
     pub prompt_draft: Option<String>,
     pub local_model_draft: Option<String>,
+    /// Returning from an online service restores the last local engine choice.
+    /// None means that local engine selection is automatic.
+    pub last_local_provider: Option<AsrProvider>,
     pub subtitle_languages_draft: Option<String>,
     pub ai_concurrency: usize,
     pub preferred_subtitle_languages: Vec<String>,
@@ -182,6 +185,7 @@ impl Default for GenerationPreferences {
             prompt: None,
             prompt_draft: None,
             local_model_draft: None,
+            last_local_provider: None,
             subtitle_languages_draft: None,
             ai_concurrency: 2,
             preferred_subtitle_languages: Vec::new(),
@@ -205,6 +209,10 @@ impl GenerationPreferences {
             prompt: config.llm.prompt.clone(),
             prompt_draft: None,
             local_model_draft: None,
+            last_local_provider: config
+                .defaults
+                .provider
+                .filter(|provider| *provider != AsrProvider::Api),
             subtitle_languages_draft: None,
             ai_concurrency: config.llm.concurrency.max(1),
             preferred_subtitle_languages: Vec::new(),
@@ -213,6 +221,29 @@ impl GenerationPreferences {
 
     pub fn needs_ai(&self) -> bool {
         self.ai_proofread || self.ai_summary
+    }
+
+    pub fn select_provider(&mut self, provider: Option<AsrProvider>) {
+        if provider == Some(AsrProvider::Api) {
+            if self.options.provider != Some(AsrProvider::Api) {
+                self.last_local_provider = self.options.provider;
+            }
+        } else {
+            self.last_local_provider = provider;
+        }
+        self.options.provider = provider;
+    }
+
+    pub fn select_recognition_location(&mut self, online: bool) {
+        let provider = if online {
+            Some(AsrProvider::Api)
+        } else if self.options.provider == Some(AsrProvider::Api) {
+            self.last_local_provider
+                .filter(|provider| *provider != AsrProvider::Api)
+        } else {
+            self.options.provider
+        };
+        self.select_provider(provider);
     }
 
     pub fn effective_vision(&self) -> bool {
@@ -1679,6 +1710,62 @@ mod tests {
         store
             .save_service_draft(draft, Some(Secret::new("test-only-secret")))
             .unwrap()
+    }
+
+    #[test]
+    fn local_engine_choice_survives_online_service_and_restart() {
+        for provider in [
+            None,
+            Some(AsrProvider::Cpu),
+            Some(AsrProvider::Gpu),
+            Some(AsrProvider::Coreml),
+        ] {
+            let (directory, mut store) = isolated();
+            let mut preferences = store.generation().clone();
+            // Existing preference files have only the active provider. The
+            // first switch must capture it even without an earlier memory value.
+            preferences.options.provider = provider;
+            preferences.options.asr_model = Some("qwen3-1.7b".into());
+            preferences.select_recognition_location(true);
+            store.save_generation(preferences).unwrap();
+
+            let reopened = Store::open(directory.path(), store.vault());
+            let mut restored = reopened.generation().clone();
+            assert_eq!(restored.options.provider, Some(AsrProvider::Api));
+            restored.select_recognition_location(false);
+            assert_eq!(restored.options.provider, provider);
+            assert_eq!(restored.options.asr_model.as_deref(), Some("qwen3-1.7b"));
+        }
+    }
+
+    #[test]
+    fn explicit_test_refusal_still_allows_save_only_without_changing_defaults() {
+        let (_directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "fixture-model");
+        let config = draft.configuration().unwrap();
+        let contract = crate::service_test::TestKind::Proofread.contract();
+        let evidence = ServiceTestEvidence {
+            fingerprint: config.fingerprint(contract),
+            contract: contract.into(),
+            tested_at: 1,
+            outcome: TestOutcome::AuthenticationRefused,
+            message: "服务拒绝凭据".into(),
+            details: vec!["HTTP 401".into()],
+        };
+        store.record_test(evidence).unwrap();
+        let version = store
+            .publish_service(&draft.id, BindingScope::CurrentTask)
+            .unwrap();
+        assert_eq!(version.config, config);
+        assert!(store.default_refs().llm.is_none());
+        assert!(store.default_refs().asr.is_none());
+        assert_eq!(
+            store
+                .test_evidence(&version.config, contract)
+                .unwrap()
+                .outcome,
+            TestOutcome::AuthenticationRefused
+        );
     }
 
     #[test]
