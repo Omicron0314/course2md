@@ -1,2 +1,0 @@
-There has been no change in the accessibility tree for Window: "course2md".
-The focused UI element is 15 radio button (selected, settable, boolean) 无需认证, Value: on

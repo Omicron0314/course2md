@@ -771,8 +771,8 @@ impl Desktop {
             })
     }
 
-    /// Compact folder assignment for library rows and card footers, mirroring
-    /// docs/ux-mock: one-line truncated label capped by `max_w`, or icon-only
+    /// Compact folder assignment for library rows and card footers:
+    /// one-line truncated label capped by `max_w`, or icon-only
     /// when the content column is narrow.
     pub fn folder_chip(
         &self,

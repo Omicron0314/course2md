@@ -1,2 +1,0 @@
-# Preserve original tool output, including diff context markers and final blank lines.
-*.log -whitespace

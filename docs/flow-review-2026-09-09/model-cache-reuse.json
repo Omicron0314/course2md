@@ -1,9 +1,0 @@
-{
-  "reason": "Real partial download, resume and pause tested first; cloned existing public-model cache for loading and ASR validation.",
-  "bytes_before_cache_reuse": 1651038183,
-  "models": [
-    "Qwen3-ASR-CoreML",
-    "Qwen3-ASR-0.6B-MLX-4bit",
-    "Silero-VAD-v6.2.1-CoreML"
-  ]
-}

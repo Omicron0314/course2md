@@ -1363,7 +1363,7 @@ impl Desktop {
         )
     }
 
-    /// Note collections, mirroring docs/ux-mock `noteRow`/`noteCard`: white SURFACE
+    /// Note collections: white SURFACE
     /// cards with a CARD_LINE hairline and RADIUS_CARD corners; covers render only
     /// when real thumbnail data exists (no placeholder block). `show_chip` is off in
     /// the grouped view, where the group header already names the folder.

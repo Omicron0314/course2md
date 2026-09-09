@@ -133,7 +133,7 @@
   gpt-4o-audio-preview、Gemini、Qwen2-Audio 等支持音频的多模态 LLM 转录；
   `base_url` 自定义端点用法补充进用户文档
 
-### 修复（全面代码审查，详见 docs/REVIEW.md）
+### 修复（全面代码审查）
 
 - **checkpoint 崩溃恢复自我污染**：resume 打开 append 前先把 asr.jsonl 截断到
   最后一个完整行，避免半截末行与新记录拼成中间损坏行导致整档作废

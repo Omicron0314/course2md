@@ -1,2 +1,0 @@
-There has been no change in the accessibility tree for Window: "course2md".
-The focused UI element is 12 text field (settable) 视频链接, Value: https://www.bilibili.com/video/BV1UXCOLLECTIONFINAL

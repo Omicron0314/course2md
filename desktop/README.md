@@ -61,10 +61,7 @@ cargo test --features integration
 cargo test --manifest-path desktop/Cargo.toml
 ```
 
-实际操作记录与已知边界见 [工作区验收](../docs/DESKTOP-WORKSPACE-ACCEPTANCE.md)。所有桌面界面修改必须遵循 [项目设计 skill](../.agents/skills/course2md-design/SKILL.md)；旧网页原型只作历史参考。开发验收使用独立 `XDG_CONFIG_HOME`，不修改个人 API 配置。
-
-首次使用流程、能力检测与对比度验收见 [首次设置引导](../docs/DESKTOP-FIRST-RUN.md)。
-
+实际操作验证以真实运行的应用为准。所有桌面界面修改必须遵循 [项目设计 skill](../.agents/skills/course2md-design/SKILL.md)。开发验收使用独立 `XDG_CONFIG_HOME`，不修改个人 API 配置。
 
 ## 界面与操作
 
@@ -88,4 +85,4 @@ cargo test --manifest-path desktop/Cargo.toml
 复选框、展开箭头、密码可见性和窗口控制也使用同套资源。
 来源、版本和 Apache-2.0 许可证见 [图标资源](assets/material/README.md)。YouTube 与 Bilibili 使用独立的 [原品牌标识](assets/brands/SOURCES.md)；主题与品牌资源的许可证随应用打包。
 
-设置与首次引导的独立子代理实机复审见 [验收记录](../docs/DESKTOP-SETTINGS-REVIEW.md)。关于页及应用菜单可查看版本与构建提交。
+关于页及应用菜单可查看版本与构建提交。

@@ -42,4 +42,4 @@ User documentation is maintained in the [GitHub Wiki](https://github.com/mizorew
 git clone git@github.com:mizorewww/course2md.wiki.git
 ```
 
-Keep the Chinese and English guides and the wiki sidebar aligned. README links must point to published Wiki pages. The main repository keeps development and historical acceptance records under `docs/`; it does not keep a second copy of the user guides.
+Keep the Chinese and English guides and the wiki sidebar aligned. README links must point to published Wiki pages. The main repository keeps development records under `docs/`; it does not keep a second copy of the user guides.
