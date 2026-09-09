@@ -332,6 +332,9 @@ const ICONS: &[(&str, &[u8])] = &[
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if path == "images/course2md.png" {
+            return Ok(Some(Cow::Borrowed(include_bytes!("../assets/128x128@2x.png"))));
+        }
         if let Some((_, bytes)) = ICONS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }

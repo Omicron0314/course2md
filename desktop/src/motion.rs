@@ -30,6 +30,30 @@ pub fn enter<E: IntoElement + Styled + 'static>(
     .into_any_element()
 }
 
+/// A change of task state settles into place, so the new title and available
+/// action read as a consequence of the user's previous action.
+pub fn state_enter<E: IntoElement + Styled + 'static>(
+    id: impl Into<ElementId>,
+    view: E,
+    _cx: &App,
+) -> AnyElement {
+    let id = id.into();
+    #[cfg(feature = "performance")]
+    let trace_id = id.clone();
+    view.with_animation(
+        id,
+        Animation::new(Duration::from_millis(240))
+            .with_easing(ease_out)
+            .with_max_fps(60.),
+        move |view, t| {
+            #[cfg(feature = "performance")]
+            crate::performance::record_motion(trace_id.clone(), 1., t);
+            view.relative().top(px(8. * (1. - t))).opacity(t)
+        },
+    )
+    .into_any_element()
+}
+
 pub fn spinner(id: impl Into<ElementId>, cx: &App) -> AnyElement {
     let icon = Icon::default()
         .path("icons/loader-circle.svg")

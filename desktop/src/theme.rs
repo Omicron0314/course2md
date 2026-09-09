@@ -272,6 +272,105 @@ pub fn accessible_text(
         .child(value)
 }
 
+/// Primary interface labels have one icon column and one text column. The
+/// slot also accepts a live spinner, keeping state changes on the same axis.
+pub fn semantic_label(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    icon: impl gpui::IntoElement,
+) -> gpui::Div {
+    use gpui::{prelude::*, *};
+    div()
+        .flex()
+        .items_center()
+        .min_w_0()
+        .gap(rems(8. / 14.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(rems(20. / 14.))
+                .flex_shrink_0()
+                .child(icon),
+        )
+        .child(
+            accessible_text(id, label)
+                .min_w_0()
+                .whitespace_normal()
+                .text_size(TEXT_BODY)
+                .font_weight(FontWeight::SEMIBOLD),
+        )
+}
+
+/// Supporting guidance is grouped separately from the label and action.
+pub fn info_callout(
+    id: impl Into<gpui::ElementId>,
+    text: impl Into<gpui::SharedString>,
+) -> gpui::Div {
+    use gpui::{prelude::*, *};
+    div()
+        .flex()
+        .w_full()
+        .min_w_0()
+        .items_start()
+        .gap(rems(10. / 14.))
+        .p(rems(12. / 14.))
+        .rounded(RADIUS_SMALL)
+        .bg(color(SURFACE))
+        .border_1()
+        .border_color(color(HAIRLINE))
+        .child(
+            crate::icons::info()
+                .size(rems(18. / 14.))
+                .mt(rems(1. / 14.))
+                .flex_shrink_0()
+                .text_color(color(GRAY)),
+        )
+        .child(
+            accessible_text(id, text)
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .text_size(TEXT_AUX)
+                .line_height(rems(18. / 14.))
+                .text_color(color(GRAY)),
+        )
+}
+
+/// Related facts share a bounded label column and a stable value start.
+pub fn detail_row(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    icon: impl gpui::IntoElement,
+    value: impl gpui::IntoElement,
+) -> gpui::Div {
+    use gpui::{prelude::*, *};
+    div()
+        .flex()
+        .w_full()
+        .min_w_0()
+        .min_h(rems(32. / 14.))
+        .items_center()
+        .flex_wrap()
+        .gap(rems(12. / 14.))
+        .child(
+            semantic_label(id, label, icon)
+                .w(rems(160. / 14.))
+                .max_w_full()
+                .flex_shrink_0(),
+        )
+        .child(
+            div()
+                .flex_1()
+                .flex_basis(rems(200. / 14.))
+                .min_w_0()
+                .max_w_full()
+                .font_weight(FontWeight::NORMAL)
+                .child(value),
+        )
+}
+
 pub fn init(cx: &mut App) {
     choice_group::init(cx);
     Theme::change(ThemeMode::Light, None, cx);
@@ -305,6 +404,7 @@ pub fn control(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button
         .py_0()
         .flex_shrink_0()
         .text_size(rems(1.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
 }
 
 /// A framed single-line field. Multiline editors and embedded find text use
@@ -366,25 +466,78 @@ pub fn described_choice(
 ) -> gpui_base::Button {
     use gpui::{prelude::*, *};
     let id = id.into();
-    let amount = crate::motion::selection_value(SharedString::from(format!("choice-card-{id:?}")), if selected { 1. } else { 0. }, window, cx);
+    let amount = crate::motion::selection_value(
+        SharedString::from(format!("choice-card-{id:?}")),
+        if selected { 1. } else { 0. },
+        window,
+        cx,
+    );
     let title = title.into();
     selection_card(id, selected, amount)
         .accessibility_label(title.clone())
         .w_full()
+        .h_full()
+        .justify_start()
+        .items_stretch()
         .p(rems(12. / 14.))
         .gap(rems(8. / 14.))
         .bg(blend(color(SURFACE), color(ACCENT_SOFT), amount))
         .text_color(color(INK))
-        .child(div().flex().w_full().min_w_0().items_center().gap(rems(8. / 14.))
-            .child(icon.size(rems(20. / 14.)).flex_shrink_0().text_color(color(if selected { ACCENT } else { GRAY })))
-            .child(div().flex_1().min_w_0().text_size(TEXT_BODY).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().flex_shrink_0().size(rems(18. / 14.)).rounded_full().border_1()
-                .border_color(color(if selected { ACCENT } else { CONTROL }))
-                .bg(if selected { color(ACCENT) } else { color(SURFACE) })
-                .flex().items_center().justify_center()
-                .when(selected, |v| v.child(crate::icons::check().size(rems(14. / 14.)).text_color(color(ON_PRIMARY))))))
-        .child(div().w_full().min_w_0().whitespace_normal().text_size(TEXT_AUX)
-            .text_color(color(GRAY)).child(description.into()))
+        .child(
+            div()
+                .flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap(rems(8. / 14.))
+                .child(
+                    icon.size(rems(20. / 14.))
+                        .flex_shrink_0()
+                        .text_color(color(if selected { ACCENT } else { GRAY })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(TEXT_BODY)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .size(rems(18. / 14.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(color(if selected { ACCENT } else { CONTROL }))
+                        .bg(if selected {
+                            color(ACCENT)
+                        } else {
+                            color(SURFACE)
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(selected, |v| {
+                            v.child(
+                                crate::icons::check()
+                                    .size(rems(14. / 14.))
+                                    .text_color(color(ON_PRIMARY)),
+                            )
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .pl(rems(28. / 14.))
+                .whitespace_normal()
+                .text_size(TEXT_AUX)
+                .line_height(rems(18. / 14.))
+                .text_color(color(GRAY))
+                .child(description.into()),
+        )
 }
 
 /// Compact forms use a leading label above the field. Padding belongs to the
@@ -396,10 +549,28 @@ pub fn stacked_field(
     field: impl gpui::IntoElement,
 ) -> gpui::Div {
     use gpui::{prelude::*, *};
-    div().flex().flex_col().w_full().min_w_0().gap(rems(8. / 14.))
-        .child(div().flex().items_center().gap(rems(8. / 14.))
-            .child(icon.size(rems(18. / 14.)).flex_shrink_0().text_color(color(GRAY)))
-            .child(accessible_text(id, label).text_size(TEXT_BODY).font_weight(FontWeight::MEDIUM)))
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .gap(rems(8. / 14.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(rems(8. / 14.))
+                .child(
+                    icon.size(rems(18. / 14.))
+                        .flex_shrink_0()
+                        .text_color(color(GRAY)),
+                )
+                .child(
+                    accessible_text(id, label)
+                        .text_size(TEXT_BODY)
+                        .font_weight(FontWeight::SEMIBOLD),
+                ),
+        )
         .child(field)
 }
 
