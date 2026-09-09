@@ -16,6 +16,12 @@ Choose useful defaults before adding a setting or an explanation. Configure reus
 
 Use first-use guidance to help people reach value with real content. It can combine a concise introduction, relevant capability choices and contextual help; choose the form from the actual task. Allow skipping, retain completed choices, and provide a way to revisit guidance without repeating it on every launch. Download or account setup should be relevant to the chosen capability, with truthful status and an opportunity to stop. An existing working configuration should not be erased or subjected to another compulsory setup flow.
 
+Present primary choices at the level of the user's outcome or processing location. Recommend a supported default and explain what an automatic choice will actually use. Put implementation choices beneath the relevant route rather than presenting automatic policy, hardware backends and external services as equal decisions. Keep an existing explicit choice visible and authoritative. Model alternatives need concise, supported quality/resource tradeoffs; names and parameter counts alone do not explain which to choose, and unmeasured speed or quality claims are not guidance.
+
+Give a short guide a content-appropriate panel, with a consistent starting position for its heading and progression within the same window. Let content take its natural height and scroll when needed; do not vertically recenter every different-height step or use spare window height to separate related content from its actions. Keep the action group adjacent to the task. An optional step's action should make clear when it proceeds without completing that setup.
+
+Keep a material consequence, such as sending a test request to an external service, with the action that initiates it. It must remain visible when that action is available, including when the form body scrolls. Explanatory text elsewhere in the step does not establish that relationship.
+
 ## Continue, interrupt and return
 
 An accepted request remains an intent while the app checks its prerequisites. Normal completion of a check should advance that intent. Keep cancellation, source replacement and late asynchronous responses tied to the correct input and request; a stale response must not resume abandoned work.

@@ -1,6 +1,6 @@
 # Shared design system
 
-This is the maintained course2md adaptation, reviewed 2026-09-09. The aim is a coherent desktop tool, not a collage of components from unrelated kits. The seven rejected screens are regression evidence; they do not substitute for judging a complete new composition.
+This is the maintained course2md adaptation, reviewed 2026-09-09. The aim is a coherent desktop tool, not a collage of components from unrelated kits. Rejected native screens are regression evidence; they do not substitute for judging a complete new composition.
 
 ## Primary guidance and deliberate choices
 
@@ -26,6 +26,12 @@ This is the maintained course2md adaptation, reviewed 2026-09-09. The aim is a c
 | Status | Icon and short text together; adjacent to the thing described | `badge` |
 
 The 40px control baseline, 28/18/14/12px type scale, spacing steps, preview geometry and transition durations are project decisions. Do not present them as exact official requirements. Sizes scale with the type; radii and decorative borders do not determine text measurement.
+
+## Theme roles and painted bounds
+
+Map each source palette into application roles before sharing it with pages and component internals. Body and supporting text establish the reading hierarchy; accent distinguishes actions and selection; status colors identify status. A terminal or editor theme's foreground may need a documented adaptation for a document interface. Correct a failed role mapping centrally, preserve the stored palette identity and light/dark choices, and record retained upstream colors versus application adaptations in `desktop/assets/themes/SOURCES.md`. Previews use that same mapping.
+
+A shared control's geometry includes its rendered label, icon, internal padding and the paint added by selection, hover, press and focus. Matching outer heights alone does not establish a common control. In a clipped or scrolling container, reserve room for outward paint or use a consistent inset treatment so the complete state remains visible at the content edges. Fix this contract in the shared control/container relationship, not by hiding focus or adding an exception around each affected field. Review edge controls in their actual native states as well as the resting layout.
 
 ## Whole-screen comparisons
 
