@@ -47,8 +47,19 @@ pub(super) struct State {
     entries: BTreeMap<String, Entry>,
     preparing: Option<Request>,
     result: Option<(String, bool)>,
+    cancelled: bool,
     details: bool,
     cache_details: std::collections::BTreeSet<String>,
+}
+
+/// A read-only view for setup. Checks and downloads keep the same ownership as Settings.
+pub(crate) struct ModelSetupSnapshot {
+    pub(crate) checking: bool,
+    pub(crate) result: Option<Result<LocalModelStatus, String>>,
+    pub(crate) device_issue: Option<String>,
+    pub(crate) preparing: bool,
+    pub(crate) notice: Option<(String, bool)>,
+    pub(crate) cancelled: bool,
 }
 fn bytes(value: u64) -> String {
     if value >= 1024 * 1024 * 1024 {
@@ -69,6 +80,39 @@ fn provider_name(provider: AsrProvider) -> &'static str {
     }
 }
 impl Desktop {
+    pub(crate) fn setup_model_snapshot(
+        &self,
+        provider: AsrProvider,
+        model: Option<&str>,
+        root: &Path,
+    ) -> ModelSetupSnapshot {
+        let request = Request::new(provider, model, root);
+        let state = &self.settings_ui.model_diagnostics;
+        let entry = state.entries.get(&request.key());
+        let matching = state
+            .preparing
+            .as_ref()
+            .is_some_and(|active| active.key() == request.key());
+        ModelSetupSnapshot {
+            checking: entry.is_none_or(|entry| entry.checking),
+            result: entry.and_then(|entry| entry.result.clone()),
+            device_issue: self.model_device_issue(provider),
+            preparing: matching && self.kind == Kind::Models && self.job.is_some(),
+            notice: matching.then(|| state.result.clone()).flatten(),
+            cancelled: matching && state.cancelled,
+        }
+    }
+
+    pub(crate) fn prepare_setup_model(
+        &mut self,
+        provider: AsrProvider,
+        model: Option<&str>,
+        root: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_model_preparation(Request::new(provider, model, root), cx);
+    }
+
     fn default_model_request(&self) -> Request {
         let defaults = &self.preferences.generation().options;
         Request::new(
@@ -192,6 +236,7 @@ impl Desktop {
         }
         self.settings_ui.model_diagnostics.preparing = Some(request);
         self.settings_ui.model_diagnostics.result = None;
+        self.settings_ui.model_diagnostics.cancelled = false;
         self.settings_ui.model_diagnostics.details = false;
         self.start(Kind::Models, cx);
     }
@@ -201,6 +246,7 @@ impl Desktop {
         cancelled: bool,
         cx: &mut Context<Self>,
     ) {
+        self.settings_ui.model_diagnostics.cancelled = cancelled && !success;
         let request = self
             .settings_ui
             .model_diagnostics
@@ -228,7 +274,7 @@ impl Desktop {
                         .unwrap_or("转换程序没有返回成功结果")
                 )
             },
-            !success,
+            !success && !cancelled,
         ));
         self.refresh_model_diagnostics(cx);
         cx.notify();
@@ -566,7 +612,11 @@ impl Desktop {
             for (index, (stage, progress)) in self
                 .progress
                 .iter()
-                .filter(|(stage, _)| stage.starts_with("model") || stage.contains("download"))
+                .filter(|(stage, progress)| {
+                    (stage.starts_with("model") || stage.contains("download"))
+                        && progress.has_samples()
+                        && !progress.done
+                })
                 .enumerate()
             {
                 let label = progress.detail(stage, true);

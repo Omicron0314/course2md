@@ -7,6 +7,7 @@ pub struct Activity {
     pub message: String,
     pub done: bool,
     pub workers: usize,
+    sampled: bool,
     started: Instant,
     baseline: u64,
     updated: Instant,
@@ -20,12 +21,14 @@ impl Activity {
             message: String::new(),
             done: false,
             workers: 1,
+            sampled: false,
             started: now,
             baseline: 0,
             updated: now,
         }
     }
     pub fn update(&mut self, current: u64, total: u64, message: Option<String>) {
+        self.sampled = true;
         let now = Instant::now();
         if current < self.current || total != self.total {
             self.started = now;
@@ -43,6 +46,9 @@ impl Activity {
     pub fn fraction(&self) -> Option<f32> {
         (self.total > 0).then(|| (self.current as f32 / self.total as f32).clamp(0., 1.))
     }
+    pub fn has_samples(&self) -> bool {
+        self.sampled
+    }
     fn rate(&self) -> Option<f64> {
         let elapsed = self.started.elapsed().as_secs_f64();
         let processed = self.current.saturating_sub(self.baseline);
@@ -57,6 +63,16 @@ impl Activity {
             return "已停止".into();
         }
         let quantity = quantity(stage, self.current, self.total);
+        // Apple reports weighted preparation stages, not byte throughput. Loading,
+        // downloads and compilation do not advance those stages at a constant rate.
+        if stage == "model/apple" {
+            let elapsed = format!("已用 {}", duration(self.started.elapsed().as_secs_f64()));
+            return if quantity.is_empty() {
+                elapsed
+            } else {
+                format!("{quantity} · {elapsed}")
+            };
+        }
         let remaining = if self.updated.elapsed() >= Duration::from_secs(30) && self.current > 0 {
             if stage.starts_with("scenes/") {
                 "仍在处理"
@@ -215,6 +231,55 @@ fn duration(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stage_boundaries_do_not_invent_download_samples() {
+        let mut activity = Activity::new();
+        assert!(!activity.has_samples());
+        activity.update(0, 0, Some("connecting".into()));
+        assert!(activity.has_samples());
+        assert!(activity.fraction().is_none());
+    }
+
+    #[test]
+    fn apple_preparation_reports_elapsed_time_without_byte_speed_or_eta() {
+        let mut activity = Activity::new();
+        activity.update(1000, 10000, None);
+        activity.started = Instant::now() - Duration::from_secs(180);
+        activity.update(1700, 10000, None);
+        let detail = activity.detail("model/apple", true);
+        assert!(
+            detail.contains("17%") && detail.contains("已用 3 分"),
+            "{detail}"
+        );
+        assert!(
+            !detail.contains("约剩") && !detail.contains("/s") && !detail.contains("MB"),
+            "{detail}"
+        );
+
+        activity.updated = Instant::now() - Duration::from_secs(60);
+        let waiting = activity.detail("model/apple", true);
+        assert!(
+            waiting.contains("已用") && !waiting.contains("等待响应"),
+            "{waiting}"
+        );
+        assert_eq!(activity.detail("model/apple", false), "已停止");
+        activity.done = true;
+        assert_eq!(activity.detail("model/apple", true), "已完成");
+    }
+
+    #[test]
+    fn byte_downloads_keep_measured_speed_and_remaining_time() {
+        let mut activity = Activity::new();
+        activity.update(0, 8 * 1024 * 1024, None);
+        activity.started = Instant::now() - Duration::from_secs(10);
+        activity.update(4 * 1024 * 1024, 8 * 1024 * 1024, None);
+        let detail = activity.detail("model/model.gguf", true);
+        assert!(detail.contains("4.0 MB / 8.0 MB"), "{detail}");
+        assert!(
+            detail.contains("MB/s") && detail.contains("约剩"),
+            "{detail}"
+        );
+    }
     #[test]
     fn completed_scan_cannot_supply_the_new_extraction_counter_or_eta() {
         let mut scan = Activity::new();
