@@ -552,7 +552,7 @@ pub fn described_choice(
                         .when(selected, |v| {
                             v.child(
                                 crate::icons::check()
-                                    .size(rems(14. / 14.))
+                                    .size(rems(1.))
                                     .text_color(color(ON_PRIMARY)),
                             )
                         }),

@@ -251,6 +251,8 @@ struct Desktop {
     reader_failure_notice: Option<String>,
     reader_scroll: ScrollHandle,
     reader_saved_offset: f32,
+    reader_position_saved_at: Option<Instant>,
+    event_repaint_pending: bool,
     exporting: bool,
     message: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -262,11 +264,16 @@ actions!(
     [Quit, OpenSettings, OpenAbout, ImportVideo, SearchContent]
 );
 
+/// Task log/progress events coalesce into at most one repaint per interval;
+/// stage, error and completion transitions still repaint immediately.
+const EVENT_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
+
 impl Desktop {
     fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.flush_settings_for_exit(cx) || !self.save_current_draft(cx) {
             return false;
         }
+        self.save_reading_position(cx);
         self.cancel_storage_for_close();
         if let Some(workspace) = &mut self.workspace {
             if let Err(error) = workspace.transaction(|state| {
@@ -534,6 +541,8 @@ impl Desktop {
             reader_failure_notice: None,
             reader_scroll: ScrollHandle::new(),
             reader_saved_offset: f32::NAN,
+            reader_position_saved_at: None,
+            event_repaint_pending: false,
             exporting: false,
             message,
             _subscriptions: subscriptions,
@@ -836,7 +845,7 @@ impl Desktop {
             cx.notify();
         }
         self.poll_storage(cx);
-        self.save_reading_position(cx);
+        self.poll_reading_position(cx);
         if self
             .draft_deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -849,8 +858,13 @@ impl Desktop {
             .map(|job| job.events.try_iter().take(512).collect())
             .unwrap_or_default();
         let mut save = false;
+        // Stage transitions persist immediately; steady progress is throttled.
+        let mut flush = false;
+        // Visible state transitions repaint now; log/progress lines coalesce.
+        let mut immediate = false;
         for event in events {
-            if self.active_task.is_some() {
+            let recording = self.active_task.is_some();
+            if recording {
                 self.record_task_event(&event);
                 save = true;
             }
@@ -865,6 +879,8 @@ impl Desktop {
                             .or_insert_with(activity::Activity::new)
                             .done = true;
                     }
+                    flush = recording;
+                    immediate = true;
                 }
                 Event::Progress {
                     stage,
@@ -885,12 +901,20 @@ impl Desktop {
                 Event::Error { message } => {
                     self.task_error = Some(message.clone());
                     self.logs.push_back(message);
+                    flush = recording;
+                    immediate = true;
                 }
                 Event::Blocked { message, .. } => {
                     self.task_error = Some(message);
+                    flush = recording;
+                    immediate = true;
                 }
-                Event::Done(done) => self.pending_done = Some(done),
+                Event::Done(done) => {
+                    self.pending_done = Some(done);
+                    immediate = true;
+                }
                 Event::Exit { success, cancelled } => {
+                    immediate = true;
                     self.job = None;
                     self.cancelling = false;
                     if let Some(id) = self.active_task.take() {
@@ -924,11 +948,15 @@ impl Desktop {
                 self.logs.pop_front();
             }
         }
-        if save
-            && let Some(workspace) = &self.workspace
-            && let Err(error) = workspace.save()
-        {
-            self.workspace_error = Some(format!("任务进度尚未保存：{error:#}"));
+        if save && let Some(workspace) = &self.workspace {
+            let result = if flush {
+                workspace.save().map(|_| ())
+            } else {
+                workspace.save_progress().map(|_| ())
+            };
+            if let Err(error) = result {
+                self.workspace_error = Some(format!("任务进度尚未保存：{error:#}"));
+            }
         }
         if self.closing {
             if self.job.is_none() && self.preview_workers == 0 {
@@ -948,9 +976,19 @@ impl Desktop {
         } else {
             self.start_next_task(cx);
         }
-        if save || (self.job.is_some() && self.last_tick.elapsed() >= Duration::from_secs(1)) {
+        let ticking =
+            save || immediate || self.job.is_some() || self.event_repaint_pending;
+        let interval = if save || self.event_repaint_pending {
+            EVENT_REPAINT_INTERVAL
+        } else {
+            Duration::from_secs(1)
+        };
+        if ticking && (immediate || self.last_tick.elapsed() >= interval) {
             self.last_tick = Instant::now();
+            self.event_repaint_pending = false;
             cx.notify();
+        } else if save {
+            self.event_repaint_pending = true;
         }
     }
     fn refresh_library(&mut self, cx: &mut Context<Self>) {
@@ -1512,6 +1550,7 @@ fn main() {
                 window.on_window_should_close(cx, move |_, cx| {
                     let saved = weak
                         .update(cx, |this, cx| {
+                            this.save_reading_position(cx);
                             this.flush_settings_for_exit(cx) && this.save_current_draft(cx)
                         })
                         .unwrap_or(true);

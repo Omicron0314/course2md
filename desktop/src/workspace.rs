@@ -4,14 +4,16 @@ use anyhow::{Context, Result, bail, ensure};
 use course2md::settings::ConfigFile;
 use serde::{Deserialize, Serialize};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const SCHEMA: u32 = 1;
+/// Minimum spacing between throttled progress saves while a task streams events.
+const PROGRESS_SAVE_INTERVAL: Duration = Duration::from_secs(2);
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn new_id(prefix: &str) -> String {
@@ -1001,6 +1003,12 @@ pub struct Workspace {
     /// Last mirror attempt per task and registered location. A normal input
     /// save must not probe the disks holding every historical task.
     mirror_snapshots: RefCell<BTreeMap<String, (TaskRecord, LibraryLocation)>>,
+    /// Last successful record write; high-frequency saves skip the disk until
+    /// this ages past their interval.
+    last_write: Cell<Option<Instant>>,
+    /// Record bytes this process last wrote, so the backup copy needs no
+    /// re-read of the file it replaces.
+    last_record: RefCell<Option<Vec<u8>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1587,6 +1595,8 @@ impl Workspace {
             recovery: Some(recovery),
             path,
             mirror_snapshots: Default::default(),
+            last_write: Cell::new(None),
+            last_record: RefCell::new(None),
         })
     }
 
@@ -1697,6 +1707,8 @@ impl Workspace {
             recovery,
             path,
             mirror_snapshots: Default::default(),
+            last_write: Cell::new(None),
+            last_record: RefCell::new(None),
         })
     }
 
@@ -1748,6 +1760,20 @@ impl Workspace {
     pub fn save(&self) -> Result<()> {
         self.write(&self.state)
     }
+    /// Throttled progress save for the task event stream. Stage transitions,
+    /// completion and exit flush through `save`; steady progress reaches the
+    /// disk at most once per interval. Returns true when this call wrote.
+    pub fn save_progress(&self) -> Result<bool> {
+        if self
+            .last_write
+            .get()
+            .is_some_and(|last| last.elapsed() < PROGRESS_SAVE_INTERVAL)
+        {
+            return Ok(false);
+        }
+        self.write(&self.state)?;
+        Ok(true)
+    }
     fn write(&self, state: &State) -> Result<()> {
         let parent = self.path.parent().context("任务记录缺少保存目录")?;
         std::fs::create_dir_all(parent)?;
@@ -1789,11 +1815,20 @@ impl Workspace {
                 .borrow_mut()
                 .insert(task.id.clone(), (task.clone(), library.clone()));
         }
-        if self.path.is_file() && Self::read(&self.path).is_ok() {
+        let backup = self.path.with_extension("json.bak");
+        let cached = self.last_record.borrow();
+        if let Some(bytes) = cached.as_deref() {
+            course2md::checkpoint::atomic_write(&backup, bytes)?;
+        } else if self.path.is_file() && Self::read(&self.path).is_ok() {
             let bytes = std::fs::read(&self.path)?;
-            course2md::checkpoint::atomic_write(&self.path.with_extension("json.bak"), &bytes)?;
+            course2md::checkpoint::atomic_write(&backup, &bytes)?;
         }
-        course2md::checkpoint::atomic_write(&self.path, &serde_json::to_vec_pretty(state)?)
+        drop(cached);
+        let bytes = serde_json::to_vec_pretty(state)?;
+        course2md::checkpoint::atomic_write(&self.path, &bytes)?;
+        *self.last_record.borrow_mut() = Some(bytes);
+        self.last_write.set(Some(Instant::now()));
+        Ok(())
     }
     pub fn storage_path(&self) -> &Path {
         &self.path

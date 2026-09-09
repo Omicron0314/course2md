@@ -8,12 +8,16 @@ use gpui_component::{
 };
 use std::{
     cell::RefCell,
+    collections::HashMap,
     ops::Range,
+    path::Path,
     rc::Rc,
     sync::{Arc, atomic::AtomicBool},
 };
 
 const READER_MEASURE: Rems = rems(52.);
+/// Minimum spacing between polled reading-position saves during scrolling.
+const READING_POSITION_INTERVAL: Duration = Duration::from_secs(5);
 
 actions!(
     course2md_reader,
@@ -940,6 +944,15 @@ impl Desktop {
         )
     }
     pub fn save_reading_position(&mut self, cx: &mut Context<Self>) {
+        self.persist_reading_position(false, cx);
+    }
+    /// Polled while the reader scrolls: persist at most once per interval, so
+    /// continuous scrolling does not clone and rewrite the workspace each tick.
+    /// Navigation and exit call `save_reading_position` for an immediate flush.
+    pub fn poll_reading_position(&mut self, cx: &mut Context<Self>) {
+        self.persist_reading_position(true, cx);
+    }
+    fn persist_reading_position(&mut self, throttled: bool, cx: &mut Context<Self>) {
         if self.page != Page::Result
             || self.reading
             || (self.result_tab == 1 && self.reader_ui.gallery_search_position.is_some())
@@ -955,6 +968,15 @@ impl Desktop {
         if self.reader_ui.last_position.as_ref() == Some(&(key.clone(), position.clone())) {
             return;
         }
+        // Skipped ticks leave `last_position` stale, keeping the position dirty
+        // for the next poll or the immediate flush on navigation and exit.
+        if throttled
+            && self
+                .reader_position_saved_at
+                .is_some_and(|saved| saved.elapsed() < READING_POSITION_INTERVAL)
+        {
+            return;
+        }
         if let Some(workspace) = &mut self.workspace {
             if let Err(error) = workspace.transaction(|state| {
                 state.positions.insert(key.clone(), position.clone());
@@ -965,6 +987,7 @@ impl Desktop {
                 return;
             }
         }
+        self.reader_position_saved_at = Some(Instant::now());
         self.reader_saved_offset = position.offset;
         self.reader_ui.last_position = Some((key, position));
     }
@@ -3081,6 +3104,26 @@ impl Desktop {
                 })
         };
         let reading_note = self.result_tab == 0;
+        // One pass over the frames up front; the block loop below queries per
+        // image path and per body anchor instead of rescanning the frames.
+        let frame_index_by_path: HashMap<&Path, usize> = self
+            .reader_ui
+            .frames
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frame)| frame.path.as_deref().map(|path| (path, index)))
+            .fold(HashMap::new(), |mut map, (path, index)| {
+                map.entry(path).or_insert(index);
+                map
+            });
+        let mut missing_by_anchor: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (index, frame) in self.reader_ui.frames.iter().enumerate() {
+            if frame.path.is_none()
+                && let Some(anchor) = frame.body_anchor.as_deref()
+            {
+                missing_by_anchor.entry(anchor).or_default().push(index);
+            }
+        }
         let measured = |index: usize, child: AnyElement| {
             let positions = item_layout.clone();
             let scroll = measured_scroll.clone();
@@ -3279,15 +3322,12 @@ impl Desktop {
                                     }),
                             )
                             .children(
-                                self.reader_ui
-                                    .frames
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, frame)| {
-                                        frame.path.is_none()
-                                            && frame.body_anchor.as_ref() == Some(anchor)
-                                    })
-                                    .map(|(frame_index, frame)| {
+                                missing_by_anchor
+                                    .get(anchor.as_str())
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|&frame_index| {
+                                        let frame = &self.reader_ui.frames[frame_index];
                                         theme::accessible_text(
                                             ("missing-body-image", frame_index),
                                             format!(
@@ -3314,11 +3354,7 @@ impl Desktop {
                     )
                     .into_any_element(),
                     PreviewBlock::Image(path) => {
-                        let frame_index = self
-                            .reader_ui
-                            .frames
-                            .iter()
-                            .position(|frame| frame.path.as_ref() == Some(path));
+                        let frame_index = frame_index_by_path.get(path.as_path()).copied();
                         let frame = frame_index.and_then(|i| self.reader_ui.frames.get(i));
                         if frame_index.is_none() && !self.reader_ui.data_loading {
                             article = article.child(measured(
@@ -4507,9 +4543,37 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
     };
     match provenance {
         Ok(Some(provenance)) => {
+            // One indexing pass: per-image transcript and body-anchor lookups
+            // below are slice lookups instead of rescanning the blocks.
+            let resources: HashMap<&str, _> =
+                provenance
+                    .resources
+                    .iter()
+                    .fold(HashMap::new(), |mut map, resource| {
+                        map.entry(resource.reference.as_str()).or_insert(resource);
+                        map
+                    });
+            let blocks = &provenance.blocks;
+            let mut run_end = vec![blocks.len(); blocks.len() + 1];
+            let mut next_anchor: Vec<Option<String>> = vec![None; blocks.len() + 1];
+            for index in (0..blocks.len()).rev() {
+                run_end[index] = match &blocks[index] {
+                    course2md::legacy::Block::Paragraph { .. } => run_end[index + 1].max(index + 1),
+                    _ => index,
+                };
+                next_anchor[index] = match &blocks[index] {
+                    course2md::legacy::Block::Heading { .. } => {
+                        Some(format!("legacy-heading-{index}"))
+                    }
+                    course2md::legacy::Block::Paragraph { .. } => {
+                        Some(format!("legacy-paragraph-{index}"))
+                    }
+                    _ => next_anchor[index + 1].clone(),
+                };
+            }
             let mut seconds = None;
             let mut anchor = None;
-            for (index, block) in provenance.blocks.iter().enumerate() {
+            for (index, block) in blocks.iter().enumerate() {
                 match block {
                     course2md::legacy::Block::Heading { seconds: time, .. } => {
                         seconds = *time;
@@ -4519,10 +4583,7 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
                         anchor = Some(format!("legacy-paragraph-{index}"));
                     }
                     course2md::legacy::Block::Image { reference, alt } => {
-                        let resource = provenance
-                            .resources
-                            .iter()
-                            .find(|resource| resource.reference == *reference);
+                        let resource = resources.get(reference.as_str()).copied();
                         let path = resource.and_then(|resource| {
                             let relative = if preview.course.manifest.is_some() {
                                 Some(resource.path.as_str())
@@ -4534,13 +4595,8 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
                             }?;
                             course2md::artifact::safe_asset_path(dir, relative).ok()
                         });
-                        let transcript = provenance
-                            .blocks
+                        let transcript = blocks[index + 1..run_end[index + 1]]
                             .iter()
-                            .skip(index + 1)
-                            .take_while(|block| {
-                                matches!(block, course2md::legacy::Block::Paragraph { .. })
-                            })
                             .filter_map(|block| {
                                 if let course2md::legacy::Block::Paragraph { text } = block {
                                     Some(text.as_str())
@@ -4550,22 +4606,9 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
                             })
                             .collect::<Vec<_>>()
                             .join("\n\n");
-                        let body_anchor = anchor.clone().or_else(|| {
-                            provenance
-                                .blocks
-                                .iter()
-                                .enumerate()
-                                .skip(index + 1)
-                                .find_map(|(i, block)| match block {
-                                    course2md::legacy::Block::Heading { .. } => {
-                                        Some(format!("legacy-heading-{i}"))
-                                    }
-                                    course2md::legacy::Block::Paragraph { .. } => {
-                                        Some(format!("legacy-paragraph-{i}"))
-                                    }
-                                    _ => None,
-                                })
-                        });
+                        let body_anchor = anchor
+                            .clone()
+                            .or_else(|| next_anchor[index + 1].clone());
                         data.frames.push(checked_frame(Frame {
                             anchor: format!("legacy-image-{index}"),
                             path,

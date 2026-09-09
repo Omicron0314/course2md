@@ -1723,7 +1723,8 @@ impl Desktop {
         let Some(task) = self.workspace.as_mut().and_then(|w| w.state.task_mut(id)) else {
             return;
         };
-        task.updated = workspace::now();
+        // High-frequency log/progress events keep the persisted timestamp;
+        // only state the user would act on moves it (and rewrites the mirror).
         match event {
             Event::Log { message } => {
                 task.logs.push(message.clone());
@@ -1732,6 +1733,7 @@ impl Desktop {
                 }
             }
             Event::Stage { stage, status } => {
+                task.updated = workspace::now();
                 if stage.starts_with("scenes/") {
                     // Old workers combined scanning and extraction under this
                     // key. Do not retain its completed counter on continuation.
@@ -1758,7 +1760,10 @@ impl Desktop {
                 value.total = *total;
                 value.detail = message.clone();
             }
-            Event::Error { message } => task.error = Some(message.clone()),
+            Event::Error { message } => {
+                task.updated = workspace::now();
+                task.error = Some(message.clone());
+            }
             Event::Blocked {
                 reason,
                 request_id,
@@ -1766,6 +1771,7 @@ impl Desktop {
                 description,
                 message,
             } => {
+                task.updated = workspace::now();
                 if reason == "uncertain" {
                     task.state = TaskState::Uncertain;
                 }
