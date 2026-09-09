@@ -16,6 +16,7 @@ mod import_ui;
 mod legacy_settings;
 mod library_ui;
 mod motion;
+mod model_discovery;
 mod notes;
 mod onboarding;
 mod organize;

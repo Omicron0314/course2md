@@ -15,6 +15,7 @@ use gpui_component::{
     checkbox::Checkbox,
     input::{InputContentType, Textarea, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
+    scroll::{Scrollbar, ScrollbarMode},
     switch::Switch,
 };
 use std::sync::{
@@ -44,6 +45,7 @@ enum EditField {
 
 struct ServiceEditor {
     draft: ServiceDraft,
+    models: crate::model_discovery::State,
     target: Option<String>,
     also_default: bool,
     return_focus: Option<FocusHandle>,
@@ -236,9 +238,9 @@ fn settings_form_row(
         .gap_4()
         .child(
             v_flex()
-                .flex_1()
-                .flex_basis(rems(160. / 14.))
-                .min_w(rems(140. / 14.))
+                .w(rems(180. / 14.))
+                .max_w_full()
+                .flex_shrink_0()
                 .when(align_first_control, |label| {
                     label.min_h(CONTROL_HEIGHT).justify_center()
                 })
@@ -256,11 +258,11 @@ fn settings_form_row(
         )
         .child(
             h_flex()
-                .w(rems(360. / 14.))
+                .flex_1()
+                .flex_basis(rems(320. / 14.))
                 .max_w_full()
                 .min_w_0()
                 .when(align_first_control, |field| field.min_h(CONTROL_HEIGHT))
-                .flex_shrink_0()
                 .justify_start()
                 .items_center()
                 .child(control),
@@ -700,6 +702,7 @@ impl Desktop {
             );
         let navigation = self.settings_navigation(sidebar, window, cx);
         let mut panel = v_flex()
+            .relative()
             .id("settings-panel")
             .role(Role::TabPanel)
             .aria_label(settings_tab_label(self.settings_tab))
@@ -792,17 +795,23 @@ impl Desktop {
             3 => self.application_settings_page(window, cx),
             _ => self.appearance_page(window, cx),
         };
-        let panel = panel.child(
-            div()
-                .id("settings-content-scroll")
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .w_full()
-                .overflow_y_scroll()
-                .track_scroll(&self.scrolls[Page::Settings as usize])
-                .child(div().w_full().min_w_0().pb(px(24.)).child(content)),
-        );
+        let panel = panel
+            .child(
+                div()
+                    .id("settings-content-scroll")
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scrolls[Page::Settings as usize])
+                    .p(px(4.))
+                    .child(div().w_full().min_w_0().pb(px(24.)).child(content)),
+            )
+            .child(
+                Scrollbar::vertical(&self.scrolls[Page::Settings as usize])
+                    .mode(ScrollbarMode::Always),
+            );
         let body = div()
             .flex()
             .w_full()
@@ -996,14 +1005,33 @@ impl Desktop {
                         ),
                 )
                 .child(
-                    quiet("toggle-asr-advanced")
-                        .icon(icons::tune())
-                        .label("高级识别设置")
-                        .self_start()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings_ui.asr_details_open = !this.settings_ui.asr_details_open;
-                            cx.notify();
-                        })),
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(
+                            quiet("toggle-asr-advanced")
+                                .icon(icons::tune())
+                                .label("高级识别设置")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings_ui.asr_details_open =
+                                        !this.settings_ui.asr_details_open;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            quiet("toggle-model-details")
+                                .icon(icons::download())
+                                .label(if self.settings_ui.model_details_open {
+                                    "收起模型管理"
+                                } else {
+                                    "管理模型与下载"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings_ui.model_details_open =
+                                        !this.settings_ui.model_details_open;
+                                    cx.notify();
+                                })),
+                        ),
                 )
                 .child(crate::motion::disclosure(
                     "asr-advanced-settings",
@@ -1056,22 +1084,7 @@ impl Desktop {
                         ),
                     window,
                     cx,
-                ))
-                .child(
-                    quiet("toggle-model-details")
-                        .icon(icons::download())
-                        .label(if self.settings_ui.model_details_open {
-                            "收起模型管理"
-                        } else {
-                            "管理模型与下载"
-                        })
-                        .self_start()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings_ui.model_details_open =
-                                !this.settings_ui.model_details_open;
-                            cx.notify();
-                        })),
-                );
+                ));
             let model_panel = self.default_model_readiness_panel(window, cx);
             recognition = recognition.child(crate::motion::disclosure(
                 "default-model-management",
@@ -1405,11 +1418,7 @@ impl Desktop {
     }
 
     fn services_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut view = v_flex().w_full().min_w_0().gap_5().child(
-            text("service-purpose-help", "连接你使用的语音或 AI 服务。")
-                .text_sm()
-                .text_color(color(MUTED)),
-        );
+        let mut view = v_flex().w_full().min_w_0().gap_5();
         // Keep the active form near the start of the page, including in a long service list.
         let inline_editor = self
             .settings_ui
@@ -1421,6 +1430,34 @@ impl Desktop {
                 .child(self.service_editor_card(window, cx))
                 .into_any_element();
         }
+        view = view.child(
+            text("service-purpose-help", "连接你使用的语音或 AI 服务。")
+                .text_sm()
+                .text_color(color(MUTED)),
+        );
+        view = view.child(
+            group("account-settings-heading", "来源账号").child(
+                v_flex()
+                    .w_full()
+                    .gap_3()
+                    .p_4()
+                    .bg(color(SURFACE))
+                    .border_1()
+                    .border_color(color(CARD_LINE))
+                    .rounded(RADIUS_CARD)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(icons::bilibili().size_5())
+                            .child(
+                                text("account-card-title", "Bilibili 账号")
+                                    .font_weight(FontWeight::SEMIBOLD),
+                            ),
+                    )
+                    .child(self.account_settings_page(cx)),
+            ),
+        );
         let mut latest = BTreeMap::<String, ServiceVersion>::new();
         for version in self.preferences.versions() {
             if latest
@@ -1462,33 +1499,10 @@ impl Desktop {
             );
             view = view.child(section);
         }
-        view.child(
-            group("account-settings-heading", "来源账号").child(
-                v_flex()
-                    .w_full()
-                    .gap_3()
-                    .p_4()
-                    .bg(color(SURFACE))
-                    .border_1()
-                    .border_color(color(CARD_LINE))
-                    .rounded(RADIUS_CARD)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(icons::bilibili().size_5())
-                            .child(
-                                text("account-card-title", "Bilibili 账号")
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            ),
-                    )
-                    .child(self.account_settings_page(cx)),
-            ),
-        )
-        .into_any_element()
+        view.into_any_element()
     }
 
-    /// One saved service as a mock 服务行卡: name + status badge + meta + quiet actions.
+    /// A saved service with capability-specific test results and quiet actions.
     fn service_card(&self, version: &ServiceVersion, cx: &mut Context<Self>) -> Div {
         let stopped = self
             .preferences
@@ -1517,38 +1531,46 @@ impl Desktop {
         } else {
             &[TestKind::Proofread, TestKind::Summary, TestKind::Vision]
         };
-        let tests: Vec<String> = kinds
+        let tests: Vec<_> = kinds
             .iter()
             .filter_map(|kind| {
                 self.preferences
                     .test_evidence(&version.config, kind.contract())
-                    .map(|evidence| format!("上次{}测试：{}", kind.label(), evidence.message))
+                    .map(|evidence| (*kind, evidence))
             })
             .collect();
-        let passed = self
-            .preferences
-            .test_evidence(&version.config, kinds[0].contract())
-            .filter(|evidence| evidence.outcome == preferences::TestOutcome::Passed);
-        let has_failed_test = kinds.iter().any(|kind| {
-            self.preferences
-                .test_evidence(&version.config, kind.contract())
-                .is_some_and(|evidence| evidence.outcome != preferences::TestOutcome::Passed)
-        });
-        let (status_kind, status_label) = if stopped {
-            (BadgeKind::Neutral, "已停用".to_owned())
-        } else if has_failed_test {
-            (BadgeKind::Warning, "有测试未通过".to_owned())
-        } else if let Some(evidence) = passed {
+        let mut status_badges = Vec::new();
+        if stopped || tests.is_empty() {
+            status_badges.push(badge(BadgeKind::Neutral).child(text(
+                SharedString::from(format!("saved-service-badge-{id}")),
+                if stopped { "已停用" } else { "尚未测试" },
+            )));
+        }
+        for (kind, evidence) in &tests {
+            let (status_kind, outcome) = match evidence.outcome {
+                preferences::TestOutcome::Passed => (BadgeKind::Success, "通过"),
+                preferences::TestOutcome::OutcomeUnknown => (BadgeKind::Warning, "结果未确认"),
+                preferences::TestOutcome::NotSent => (BadgeKind::Neutral, "未完成"),
+                _ => (BadgeKind::Warning, "未通过"),
+            };
             let stamp = crate::reader_navigation::timestamp_local(evidence.tested_at * 1000);
-            let date = stamp.get(..10).unwrap_or(&stamp).to_owned();
-            (BadgeKind::Success, format!("测试通过 · {date}"))
+            let date = stamp.get(..10).unwrap_or(&stamp);
+            status_badges.push(badge(status_kind).child(text(
+                SharedString::from(format!("saved-service-test-{id}-{}", kind.contract())),
+                format!("{}{outcome} · {date}", kind.label()),
+            )));
+        }
+        let failures: Vec<_> = tests
+            .iter()
+            .filter(|(_, evidence)| evidence.outcome != preferences::TestOutcome::Passed)
+            .map(|(kind, evidence)| format!("{}：{}", kind.label(), evidence.message))
+            .collect();
+        let host = version.config.host();
+        let description = if host.is_empty() || version.config.name.trim() == host {
+            format!("{}{}", version.config.model, default_description)
         } else {
-            (BadgeKind::Neutral, "配置已保存".to_owned())
+            format!("{} · {}{}", version.config.model, host, default_description)
         };
-        let status_badge = badge(status_kind).child(text(
-            SharedString::from(format!("saved-service-badge-{id}")),
-            status_label,
-        ));
         let edit_id = id.clone();
         let test_id = id.clone();
         v_flex()
@@ -1571,7 +1593,7 @@ impl Desktop {
                         )
                         .font_weight(FontWeight::SEMIBOLD),
                     )
-                    .child(status_badge)
+                    .children(status_badges)
                     .child(div().flex_1())
                     .when(!stopped, |row| {
                         row.child(
@@ -1607,28 +1629,21 @@ impl Desktop {
             .child(
                 text(
                     SharedString::from(format!("saved-service-description-{id}")),
-                    format!(
-                        "{} · {}{}",
-                        version.config.model,
-                        version.config.host(),
-                        default_description,
-                    ),
+                    description,
                 )
                 .text_size(TEXT_AUX)
                 .text_color(color(GRAY)),
             )
-            .child(
-                text(
-                    SharedString::from(format!("saved-service-test-status-{id}")),
-                    if tests.is_empty() {
-                        "尚未测试".to_owned()
-                    } else {
-                        tests.join("\n")
-                    },
+            .when(!failures.is_empty(), |card| {
+                card.child(
+                    text(
+                        SharedString::from(format!("saved-service-test-status-{id}")),
+                        failures.join("\n"),
+                    )
+                    .text_size(TEXT_AUX)
+                    .text_color(color(GRAY)),
                 )
-                .text_size(TEXT_AUX)
-                .text_color(color(GRAY)),
-            )
+            })
             .when(!stopped, |card| {
                 card.child(
                     quiet(SharedString::from(format!(
@@ -1656,7 +1671,7 @@ impl Desktop {
             "AI 服务"
         };
         let title = if editor.draft.based_on.is_some() {
-            format!("编辑{kind}")
+            format!("编辑 {kind}")
         } else {
             format!("添加 {kind}")
         };
@@ -1668,7 +1683,7 @@ impl Desktop {
             .border_1()
             .border_color(color(CONTROL))
             .rounded(RADIUS_CARD)
-            .child(text("service-editor-inline-title", title).font_weight(FontWeight::SEMIBOLD))
+            .child(text("service-editor-inline-title", title).text_size(TEXT_TITLE).font_weight(FontWeight::SEMIBOLD))
             .child(self.service_editor_content(true, window, cx))
     }
     pub fn task_service_picker(&self, purpose: ServicePurpose, cx: &mut Context<Self>) -> Div {
@@ -2049,6 +2064,7 @@ impl Desktop {
             });
         self.settings_ui.editor = Some(ServiceEditor {
             draft,
+            models: Default::default(),
             target,
             also_default,
             return_focus: window.focused(cx),
@@ -2077,14 +2093,14 @@ impl Desktop {
             desktop,
         });
         let weak = cx.weak_entity();
-        window.open_dialog(cx, move |sheet, _, _| {
+        window.open_dialog(cx, move |sheet, window, _| {
             let closed = weak.clone();
             let cancel = weak.clone();
             let submit = weak.clone();
             sheet
                 .title(title)
-                .w(px(620.))
-                .margin_top(px(24.))
+                .w((window.rem_size() * (620. / 14.)).min(window.viewport_size().width - px(48.)))
+                .margin_top(task_dialog_top(window))
                 .overlay_closable(false)
                 .close_button(false)
                 .child(content.clone())
@@ -2131,7 +2147,7 @@ impl Desktop {
             .px_1();
         if !inline {
             view = view
-                .max_h((window.bounds().size.height - window.rem_size() * 10.).max(px(80.)))
+                .max_h((window.viewport_size().height - task_dialog_top(window) - window.rem_size() * 5. - px(72.)).max(px(80.)))
                 .min_h_0()
                 .overflow_y_scroll();
         }
@@ -2182,6 +2198,7 @@ impl Desktop {
                                 };
                                 if let Some(editor) = &mut this.settings_ui.editor {
                                     editor.draft.protocol = candidate;
+                                    editor.models.invalidate();
                                     editor.errors.clear();
                                     editor.evidence = None;
                                 }
@@ -2191,8 +2208,9 @@ impl Desktop {
             )
             })
             .child(self.setting_field(EditField::Address, "服务地址", cx));
-        if let Ok(endpoint) =
-            preferences::normalize_endpoint(&self.setting_value(EditField::Address, cx), protocol)
+        let address = self.setting_value(EditField::Address, cx);
+        if let Ok(endpoint) = preferences::normalize_endpoint(&address, protocol)
+            && endpoint != address.trim()
         {
             view = view.child(
                 text("service-actual-endpoint", format!("将请求 {endpoint}"))
@@ -2200,36 +2218,35 @@ impl Desktop {
                     .text_color(color(MUTED)),
             );
         }
-        view = view
-            .child(self.setting_field(EditField::Model, "模型 ID", cx))
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(field_label("service-auth-heading", "认证方式"))
-                    .child(
-                        self.setting_choices("service-auth-mode", "服务认证方式")
-                            .options([("api_key", "API Key"), ("none", "无需认证")])
-                            .selected(if auth == Authentication::ApiKey {
-                                "api_key"
+        view = view.child(
+            v_flex()
+                .gap_2()
+                .child(field_label("service-auth-heading", "认证方式"))
+                .child(
+                    self.setting_choices("service-auth-mode", "服务认证方式")
+                        .options([("api_key", "API Key"), ("none", "无需认证")])
+                        .selected(if auth == Authentication::ApiKey {
+                            "api_key"
+                        } else {
+                            "none"
+                        })
+                        .disabled(awaiting_binding)
+                        .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
+                            let mode = if selected.as_ref() == "api_key" {
+                                Authentication::ApiKey
                             } else {
-                                "none"
-                            })
-                            .disabled(awaiting_binding)
-                            .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
-                                let mode = if selected.as_ref() == "api_key" {
-                                    Authentication::ApiKey
-                                } else {
-                                    Authentication::None
-                                };
-                                if let Some(editor) = &mut this.settings_ui.editor {
-                                    editor.draft.authentication = mode;
-                                    editor.errors.clear();
-                                    editor.evidence = None;
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            );
+                                Authentication::None
+                            };
+                            if let Some(editor) = &mut this.settings_ui.editor {
+                                editor.draft.authentication = mode;
+                                editor.models.invalidate();
+                                editor.errors.clear();
+                                editor.evidence = None;
+                            }
+                            cx.notify();
+                        })),
+                ),
+        );
         if auth == Authentication::ApiKey {
             view = view.child(self.setting_field(EditField::Key, "API Key", cx));
             for (index, name) in
@@ -2256,6 +2273,7 @@ impl Desktop {
                                 Ok(draft) => {
                                     if let Some(editor) = &mut this.settings_ui.editor {
                                         editor.draft = draft;
+                                        editor.models.invalidate();
                                         editor.evidence = None;
                                         editor.save_failed = false;
                                         editor.status =
@@ -2318,6 +2336,29 @@ impl Desktop {
                 .text_sm(),
             );
         }
+        let model_error = editor.errors.iter().find(|error| error.field == "model");
+        view = view.child(
+            self.reveal_setting(
+                ("setting-field-reveal", EditField::Model as usize),
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .child(field_label(
+                        ("setting-field-label", EditField::Model as usize),
+                        "模型 ID",
+                    ))
+                    .child(crate::model_discovery::model_field_with_error(
+                        "service-models",
+                        &self.settings_ui.inputs[&EditField::Model],
+                        &editor.models,
+                        awaiting_binding,
+                        model_error.map(|error| error.message.as_str()),
+                        cx.listener(|this, _, _, cx| this.fetch_service_models(cx)),
+                        cx,
+                    )),
+            ),
+        );
         if editor.target.is_some() {
             view = view.child(
                 self.setting_preference(
@@ -2493,7 +2534,11 @@ impl Desktop {
                 outline_pill("run-service-test")
                     .icon(icons::science())
                     .label(
-                        match editor.evidence.as_ref().map(|evidence| evidence.outcome.clone()) {
+                        match editor
+                            .evidence
+                            .as_ref()
+                            .map(|evidence| evidence.outcome.clone())
+                        {
                             Some(preferences::TestOutcome::Passed) => "测试通过 · 重测",
                             Some(
                                 preferences::TestOutcome::AuthenticationRefused
@@ -2523,7 +2568,7 @@ impl Desktop {
                     ),
             );
         if inline {
-            view.child(actions).into_any_element()
+            view.child(self.reveal_setting("service-editor-actions-focus", actions)).into_any_element()
         } else {
             v_flex()
                 .gap_4()
@@ -2532,6 +2577,59 @@ impl Desktop {
                 .into_any_element()
         }
     }
+    fn live_service_model_draft(&self, cx: &App) -> Option<ServiceDraft> {
+        let mut draft = self.settings_ui.editor.as_ref()?.draft.clone();
+        draft.address = self.setting_value(EditField::Address, cx);
+        Some(draft)
+    }
+
+    fn fetch_service_models(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.live_service_model_draft(cx) else {
+            return;
+        };
+        let request = crate::model_discovery::Request::from_draft(
+            &draft,
+            Secret::new(self.setting_value(EditField::Key, cx)),
+        );
+        let Some(editor) = &mut self.settings_ui.editor else {
+            return;
+        };
+        if editor.pending_binding.is_some() {
+            return;
+        }
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                editor.models.reject(error);
+                cx.notify();
+                return;
+            }
+        };
+        let ticket = editor.models.begin(&request);
+        let editor_id = draft.id;
+        let vault = self.preferences.vault();
+        cx.spawn(async move |this, cx| {
+            let result = crate::model_discovery::discover(request, vault).await;
+            let _ = this.update(cx, |this, cx| {
+                let current = this.live_service_model_draft(cx).and_then(|draft| {
+                    crate::model_discovery::RequestKey::from_draft(
+                        &draft,
+                        &this.setting_value(EditField::Key, cx),
+                    )
+                    .ok()
+                });
+                if let Some(editor) = &mut this.settings_ui.editor
+                    && editor.draft.id == editor_id
+                {
+                    editor.models.complete(ticket, current.as_ref(), result);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn setting_input_changed(&mut self, field: EditField, cx: &mut Context<Self>) {
         if !self.settings_ui.initialized
             && matches!(field, EditField::LocalModel | EditField::Languages)
@@ -2563,6 +2661,9 @@ impl Desktop {
         }
         let input = self.setting_value(field, cx);
         if let Some(editor) = &mut self.settings_ui.editor {
+            if matches!(field, EditField::Address | EditField::Key) {
+                editor.models.invalidate();
+            }
             match field {
                 EditField::Name => editor.draft.name = input,
                 EditField::Address => editor.draft.address = input,
