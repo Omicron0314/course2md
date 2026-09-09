@@ -320,7 +320,9 @@ impl Render for Desktop {
                                 .h(px(40. * self.preferences.application().font_scale + 16.))
                                 .bg(color(CANVAS))
                                 .border_color(color(HAIRLINE))
-                                .child(h_flex().w_full().justify_center().child("course2md")),
+                                .child(h_flex().w_full().justify_center().gap_2().items_center()
+                                    .child(icons::book_open().size_4().text_color(color(GRAY)))
+                                    .child("course2md")),
                         )
                         .child(content),
                     window.has_active_dialog(cx),

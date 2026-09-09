@@ -317,7 +317,10 @@ impl RenderOnce for SingleChoiceGroup {
                 div()
                     .absolute()
                     .rounded_full()
-                    .bg(super::color(super::ACCENT_SOFT))
+                    .bg(super::color(super::SURFACE))
+                    .border_1()
+                    .border_color(super::blend(super::color(super::SURFACE), super::color(super::ACCENT), 0.45))
+                    .shadow(super::shadow_segment_selected())
                     .when(!vertical, |fill| {
                         fill.top_0()
                             .bottom_0()

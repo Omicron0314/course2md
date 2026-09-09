@@ -281,7 +281,7 @@ impl Desktop {
             cx,
         );
         let available_height = (f32::from(window.viewport_size().height)
-            - PICKER_GUTTER * 2.
+            - f32::from(task_dialog_top(window)) - PICKER_GUTTER
             - PICKER_PADDING * 2.
             - PICKER_BORDER * 2.
             - f32::from(window.rem_size()) * 3.
@@ -339,10 +339,11 @@ impl Desktop {
         });
         window.open_dialog(cx, move |dialog, window, _| {
             dialog
-                .title(if dark { "深色主题" } else { "浅色主题" })
+                .title(crate::settings_ui::settings_value("palette-dialog-title", if dark { "深色主题" } else { "浅色主题" })
+                    .text_size(TEXT_TITLE).font_weight(FontWeight::SEMIBOLD))
                 .w(px(picker_width(window)))
                 .p(px(PICKER_PADDING))
-                .margin_top(px(PICKER_GUTTER))
+                .margin_top(task_dialog_top(window))
                 .child(content.clone())
         });
     }
