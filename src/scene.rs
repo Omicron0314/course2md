@@ -110,12 +110,14 @@ async fn sample_timestamps(cfg: &PipelineConfig, media: &Path) -> Result<Vec<(f6
     });
     let frame_len = (tw as usize) * (th as usize);
     let mut buf = vec![0u8; frame_len];
-    // Duration/fps gives an estimate, not the number ffmpeg will actually
-    // decode (especially for VFR input). Report observed samples without a
-    // fabricated denominator. Candidate selection happens within this scan.
-    // （tests/task_execution.rs 钉死了 total=0 这一语义，勿改）
-    let pb = crate::progress::Bar::new("scenes/scan", 0)
-        .with_template("{spinner:.green} sample {pos} frames {msg}");
+    // Duration/interval gives an estimate, not the number ffmpeg will actually
+    // decode (especially for VFR input). The bar reports this estimate as the
+    // denominator so users see forward progress; actual samples may land one
+    // or two frames off, which the label tolerates. Candidate selection
+    // happens within this scan.
+    let estimate = (info.duration / interval).round().max(1.0) as u64;
+    let pb = crate::progress::Bar::new("scenes/scan", estimate)
+        .with_template("{spinner:.green} sample {pos}/{len} frames {msg}");
     pb.set_position(0);
 
     // 三状态检测：检测永不休眠（cooldown 只限制「发射」，不再造成盲区）。

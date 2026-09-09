@@ -85,7 +85,7 @@ fn events(output: &Output) -> Vec<serde_json::Value> {
 
 #[test]
 #[cfg(unix)]
-fn scanning_finishes_before_a_slow_screenshot_reports_zero_of_its_real_total() {
+fn scanning_finishes_before_a_slow_screenshot_reports_progress_with_estimated_total() {
     use std::{
         io::{BufRead, BufReader},
         os::unix::fs::PermissionsExt,
@@ -192,8 +192,8 @@ fn scanning_finishes_before_a_slow_screenshot_reports_zero_of_its_real_total() {
         .unwrap();
     assert_eq!(scan["current"], 18);
     assert_eq!(
-        scan["total"], 0,
-        "duration-derived estimates are not actual sample totals"
+        scan["total"], 18,
+        "total is the duration/interval estimate; CFR fixtures match exactly"
     );
     let deadline = Instant::now() + Duration::from_secs(3);
     while !gate.exists() && Instant::now() < deadline {
