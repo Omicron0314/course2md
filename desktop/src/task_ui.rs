@@ -15,6 +15,95 @@ enum PlanValidation {
     Submission,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerWait {
+    Starting,
+    BetweenStages,
+    Finishing,
+}
+
+impl WorkerWait {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "正在启动任务…",
+            Self::BetweenStages => "正在继续处理…",
+            Self::Finishing => "正在完成笔记…",
+        }
+    }
+}
+
+/// A closed stage is not a completed task: later stages may not have started.
+/// Only the final render event or worker result identifies the finishing phase;
+/// the task itself is still completed by the existing Exit/manifest path.
+fn worker_wait_state<'a>(
+    active: bool,
+    result_received: bool,
+    stages: impl IntoIterator<Item = (&'a str, bool)>,
+) -> Option<WorkerWait> {
+    if !active {
+        return None;
+    }
+    let mut has_stage = false;
+    let mut render_done = false;
+    for (stage, done) in stages {
+        has_stage = true;
+        if !done {
+            return None;
+        }
+        render_done |= stage == "render";
+    }
+    Some(if render_done || result_received {
+        WorkerWait::Finishing
+    } else if has_stage {
+        WorkerWait::BetweenStages
+    } else {
+        WorkerWait::Starting
+    })
+}
+
+#[derive(IntoElement)]
+struct TaskProcessingDetails {
+    task_id: String,
+    lines: Vec<(SharedString, String)>,
+}
+
+impl RenderOnce for TaskProcessingDetails {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(
+            SharedString::from(format!("attention-stage-details-state-{}", self.task_id)),
+            cx,
+            |_, _| false,
+        );
+        let open = *state.read(cx);
+        v_flex()
+            .gap_2()
+            .child(
+                quiet(SharedString::from(format!(
+                    "attention-stage-details-toggle-{}",
+                    self.task_id,
+                )))
+                .self_start()
+                .icon(icons::info())
+                .label(if open { "收起处理详情" } else { "处理详情" })
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |open, cx| {
+                        *open = !*open;
+                        cx.notify();
+                    });
+                }),
+            )
+            .child(disclosure(
+                SharedString::from(format!("attention-stage-details-{}", self.task_id)),
+                open,
+                v_flex().gap_2().children(self.lines.into_iter().map(|(id, line)| {
+                    accessible_text(id, line).text_sm().text_color(color(GRAY))
+                })),
+                window,
+                cx,
+            ))
+    }
+}
+
 fn validate_plan_storage(
     validation: PlanValidation,
     library: &workspace::LibraryLocation,
@@ -1170,7 +1259,7 @@ impl Desktop {
                 .child(
                     accessible_text("task-empty-title", "还没有生成任务")
                         .role(Role::Heading)
-                        .text_lg(),
+                        .text_lg().font_weight(FontWeight::SEMIBOLD),
                 )
                 .child(accessible_text(
                     "task-empty-description",
@@ -1178,8 +1267,8 @@ impl Desktop {
                 ))
                 .child(
                     primary_pill("task-new")
-                        .icon(icons::arrow_left())
-                        .label("返回工作台")
+                        .icon(icons::plus())
+                        .label("导入视频")
                         .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::New, cx))),
                 )
                 .into_any_element();
@@ -1195,7 +1284,7 @@ impl Desktop {
                 .child(
                     accessible_text("tasks-page-title", "任务")
                         .role(Role::Heading)
-                        .text_size(rems(24. / 14.))
+                        .text_size(TEXT_DISPLAY)
                         .font_weight(FontWeight::SEMIBOLD),
                 )
                 .child(
@@ -1732,6 +1821,13 @@ impl Desktop {
         let id = task.id.clone();
         let active = self.active_task.as_deref() == Some(&id) && self.job.is_some();
         let queued = task.state == TaskState::Queued;
+        let waiting = worker_wait_state(
+            active,
+            self.pending_done.is_some(),
+            self.progress
+                .iter()
+                .map(|(stage, item)| (stage.as_str(), item.done)),
+        );
         let mut card = crate::import_ui::box_section("本次任务").gap_3().child(
             h_flex()
                 .gap_2()
@@ -1742,7 +1838,15 @@ impl Desktop {
                     } else {
                         BadgeKind::Progress
                     })
-                    .child(task.state.label()),
+                    .child(
+                        if waiting == Some(WorkerWait::Finishing)
+                            && task.state == TaskState::Running
+                        {
+                            "正在完成笔记"
+                        } else {
+                            task.state.label()
+                        },
+                    ),
                 )
                 .child(
                     div()
@@ -1796,41 +1900,28 @@ impl Desktop {
         }
         let mut work = v_flex().gap_3();
         if active {
-            if self.progress.is_empty() {
+            if let Some(waiting) = waiting {
                 work = work.child(
                     h_flex()
                         .gap_2()
                         .items_center()
                         .child(crate::motion::spinner(
-                            SharedString::from(format!("task-starting-{id}")),
+                            SharedString::from(format!("task-waiting-{id}")),
                             cx,
                         ))
                         .child(
-                            div()
-                                .text_sm()
-                                .text_color(color(GRAY))
-                                .child("正在启动任务…"),
+                            accessible_text(
+                                SharedString::from(format!("task-waiting-label-{id}")),
+                                waiting.label(),
+                            )
+                            .text_sm()
+                            .text_color(color(GRAY)),
                         ),
                 );
             }
             let mut stages: Vec<_> = self.progress.iter().collect();
             stages.sort_by_key(|(stage, _)| activity::stage_order(stage));
-            for (stage, item) in stages {
-                if item.done {
-                    work = work.child(
-                        h_flex()
-                            .gap_2()
-                            .items_baseline()
-                            .child(icons::check_circle().size_4().text_color(color(SUCCESS)))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(color(GRAY))
-                                    .child(activity::title(stage)),
-                            ),
-                    );
-                    continue;
-                }
+            for (stage, item) in stages.iter().filter(|(_, item)| !item.done) {
                 let mut row = v_flex().gap_2();
                 row = row.child(
                     h_flex()
@@ -1869,6 +1960,57 @@ impl Desktop {
                     ));
                 }
                 work = work.child(row);
+            }
+            if stages.iter().any(|(_, item)| item.done) {
+                let details_state = window.use_keyed_state(
+                    SharedString::from(format!("task-stage-details-state-{id}")),
+                    cx,
+                    |_, _| false,
+                );
+                let details_open = *details_state.read(cx);
+                work = work
+                    .child(
+                        quiet(SharedString::from(format!("task-stage-details-toggle-{id}")))
+                            .self_start()
+                            .icon(icons::info())
+                            .label(if details_open {
+                                "收起处理详情"
+                            } else {
+                                "处理详情"
+                            })
+                            .on_click(move |_, _, cx| {
+                                details_state.update(cx, |open, cx| {
+                                    *open = !*open;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(disclosure(
+                        SharedString::from(format!("task-stage-details-{id}")),
+                        details_open,
+                        v_flex().gap_2().children(
+                            stages.iter().filter(|(_, item)| item.done).map(|(stage, _)| {
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        icons::check_circle()
+                                            .size_4()
+                                            .text_color(color(SUCCESS)),
+                                    )
+                                    .child(
+                                        accessible_text(
+                                            SharedString::from(format!("task-stage-done-{id}-{stage}")),
+                                            format!("{} · 已完成", activity::title(stage)),
+                                        )
+                                        .text_sm()
+                                        .text_color(color(GRAY)),
+                                    )
+                            }),
+                        ),
+                        window,
+                        cx,
+                    ));
             }
         } else {
             let fact = if queued {
@@ -2031,14 +2173,6 @@ impl Desktop {
                 .text_sm(),
             );
         }
-        for (text_id, line) in self.stage_detail_lines(task) {
-            card = card.child(
-                div()
-                    .text_sm()
-                    .text_color(color(GRAY))
-                    .child(accessible_text(text_id, line)),
-            );
-        }
         if let Some(block) = self.uncertain_block(task, cx) {
             card = card.child(block);
         }
@@ -2143,6 +2277,15 @@ impl Desktop {
                 );
         }
         card = card.child(actions);
+        // Recovery and any resend decision come before history. Each stage fact
+        // remains available, but is not a required step before the next action.
+        let lines = self.stage_detail_lines(task);
+        if !lines.is_empty() {
+            card = card.child(TaskProcessingDetails {
+                task_id: task.id.clone(),
+                lines,
+            });
+        }
         if !task.logs.is_empty()
             || task.error.is_some()
             || uncertain
@@ -2314,9 +2457,47 @@ fn validate_plan_config(source: &str, config: &course2md::settings::ConfigFile) 
 #[cfg(test)]
 mod tests {
     use super::{
-        PlanValidation, update_draft_source_title, update_input_form, validate_plan_config,
-        validate_plan_storage,
+        PlanValidation, WorkerWait, update_draft_source_title, update_input_form,
+        validate_plan_config, validate_plan_storage, worker_wait_state,
     };
+
+    #[test]
+    fn a_closed_intermediate_stage_does_not_claim_the_task_is_finishing() {
+        assert_eq!(worker_wait_state(true, false, []), Some(WorkerWait::Starting));
+        assert_eq!(
+            worker_wait_state(true, false, [("subtitle", true)]),
+            Some(WorkerWait::BetweenStages),
+        );
+        assert_eq!(
+            worker_wait_state(true, false, [("subtitle", true), ("download", false)]),
+            None,
+        );
+        assert_eq!(
+            worker_wait_state(true, false, [("subtitle", true), ("download", true)]),
+            Some(WorkerWait::BetweenStages),
+        );
+    }
+
+    #[test]
+    fn finishing_uses_worker_evidence_and_stops_with_the_process() {
+        let stages = [("subtitle", true), ("render", true)];
+        assert_eq!(
+            worker_wait_state(true, false, stages),
+            Some(WorkerWait::Finishing),
+        );
+        // Reusing a complete artifact can emit Done without any new stages.
+        assert_eq!(
+            worker_wait_state(true, true, []),
+            Some(WorkerWait::Finishing),
+        );
+        // A retry/remaining active stage keeps its real progress visible.
+        assert_eq!(
+            worker_wait_state(true, false, [("render", true), ("summary", false)]),
+            None,
+        );
+        assert_eq!(worker_wait_state(false, true, stages), None);
+        assert_eq!(worker_wait_state(false, false, []), None);
+    }
 
     #[test]
     fn unchanged_form_values_do_not_request_a_save_or_update_the_timestamp() {

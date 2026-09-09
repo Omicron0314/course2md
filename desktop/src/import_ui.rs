@@ -157,18 +157,61 @@ fn subtitle_needs_confirmation(source: &source::Source, source_mode: usize) -> b
             || source.subtitle_read_error.is_some())
 }
 
+/// Follow only this input's submitted recovery chain. A matching URL or the
+/// selected queue item alone cannot establish that a task belongs to this form.
+fn submitted_input_task<'a>(
+    draft: &workspace::Draft,
+    tasks: &'a [workspace::TaskRecord],
+    input: &str,
+) -> Option<&'a workspace::TaskRecord> {
+    if draft.input != input || input.trim().is_empty() {
+        return None;
+    }
+    let find = |id: &str| {
+        let mut matches = tasks.iter().filter(|task| task.id == id);
+        let task = matches.next()?;
+        matches.next().is_none().then_some(task)
+    };
+    let mut task = find(draft.submitted_task.as_deref()?)?;
+    let source_id = &task.plan.source_id;
+    let online = task.plan.source.online;
+    if source_id.is_empty()
+        || task.plan.source.input != input
+        || online != draft.online
+        || draft
+            .source
+            .as_ref()
+            .is_some_and(|source| source.identity != *source_id || source.online != online)
+    {
+        return None;
+    }
+    let mut visited = std::collections::BTreeSet::new();
+    loop {
+        if !visited.insert(task.id.as_str())
+            || task.plan.source_id != *source_id
+            || task.plan.source.identity != *source_id
+            || task.plan.source.online != online
+        {
+            return None;
+        }
+        let Some(next) = task.handled_by.as_deref() else {
+            return Some(task);
+        };
+        let next = find(next)?;
+        if next.parent.as_deref() != Some(task.id.as_str()) {
+            return None;
+        }
+        task = next;
+    }
+}
+
 fn completed_input_task<'a>(
     draft: &workspace::Draft,
     tasks: &'a [workspace::TaskRecord],
     input: &str,
 ) -> Option<&'a workspace::TaskRecord> {
-    if draft.input != input {
-        return None;
-    }
-    let id = draft.submitted_task.as_deref()?;
-    tasks.iter().find(|task| {
-        task.id == id && task.state == workspace::TaskState::Complete && task.artifact.is_some()
-    })
+    submitted_input_task(draft, tasks, input)
+        .filter(|task| task.state == workspace::TaskState::Complete && task.artifact.is_some())
 }
 
 struct PlanDialog {
@@ -2676,12 +2719,13 @@ impl Desktop {
         let linked_task = self
             .workspace
             .as_ref()
-            .and_then(|workspace| workspace.state.draft())
-            .and_then(|draft| draft.submitted_task.clone())
-            .and_then(|id| {
-                self.workspace
-                    .as_ref()
-                    .and_then(|workspace| workspace.state.task(&id).cloned())
+            .and_then(|workspace| {
+                submitted_input_task(
+                    workspace.state.draft()?,
+                    &workspace.state.tasks,
+                    &self.value(Field::Source, cx),
+                )
+                .cloned()
             })
             .filter(|task| {
                 // 部分完成仍有可补做的失败项，盒内继续出示这张卡。
@@ -2999,7 +3043,8 @@ impl Desktop {
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_subtitle_fallback, completed_input_task, subtitle_needs_confirmation, uses_speech,
+        automatic_subtitle_fallback, completed_input_task, submitted_input_task,
+        subtitle_needs_confirmation, uses_speech,
     };
     use crate::{source, workspace};
     use course2md::subtitle::{CachedSubtitle, SubtitleEvidence, SubtitleReadError};
@@ -3066,6 +3111,182 @@ mod tests {
             completed_input_task(state.draft().unwrap(), &state.tasks, &source.input).is_none()
         );
         assert!(state.task(&id).unwrap().plan == plan);
+    }
+
+    fn submitted_recovery_chain() -> (workspace::Draft, Vec<workspace::TaskRecord>) {
+        let source = source::Source {
+            input: "https://www.bilibili.com/video/BVfixture".into(),
+            identity: "video-fixture".into(),
+            online: true,
+            ..Default::default()
+        };
+        let mut draft = workspace::Draft::new(true, "library".into(), Default::default());
+        draft.change_source(source.input.clone());
+        draft.source = Some(source.clone());
+        draft.submitted_task = Some("original".into());
+        let mut original = workspace::TaskRecord {
+            id: "original".into(),
+            plan: workspace::TaskPlan {
+                operation: Default::default(),
+                source_id: source.identity.clone(),
+                source,
+                title: "已提交的课程".into(),
+                library_id: "library".into(),
+                folder: None,
+                options: Default::default(),
+                subtitle: None,
+                config: Default::default(),
+                asr_service: None,
+                ai_service: None,
+            },
+            state: workspace::TaskState::Uncertain,
+            intent: workspace::Intent::Pause,
+            created: 0,
+            updated: 0,
+            parent: None,
+            handled_by: None,
+            work_dir: "work/original".into(),
+            stages: Default::default(),
+            error: Some("原摘要请求结果未确认".into()),
+            artifact: Some("versions/original".into()),
+            outcomes: None,
+            unread: false,
+            logs: Vec::new(),
+            blocked: Vec::new(),
+            resend: Vec::new(),
+        };
+        let mut recovery = original.clone();
+        recovery.id = "recovery".into();
+        recovery.parent = Some(original.id.clone());
+        recovery.state = workspace::TaskState::Queued;
+        recovery.intent = workspace::Intent::Run;
+        recovery.error = None;
+        recovery.artifact = None;
+        recovery.work_dir = "work/recovery".into();
+        recovery.plan.operation = course2md::execution::Operation::Reprocess {
+            base_version_dir: "versions/original".into(),
+            components: vec!["summary".into()],
+            prior_work_dir: Some(original.work_dir.clone()),
+        };
+        original.handled_by = Some(recovery.id.clone());
+        (draft, vec![original, recovery])
+    }
+
+    #[test]
+    fn workbench_follows_the_same_recovery_for_queued_running_and_completed_results() {
+        let (draft, mut tasks) = submitted_recovery_chain();
+        let original = tasks[0].clone();
+        for state in [workspace::TaskState::Queued, workspace::TaskState::Running] {
+            tasks[1].state = state;
+            assert_eq!(
+                submitted_input_task(&draft, &tasks, &draft.input)
+                    .unwrap()
+                    .id,
+                "recovery"
+            );
+            assert!(completed_input_task(&draft, &tasks, &draft.input).is_none());
+        }
+        tasks[1].state = workspace::TaskState::Complete;
+        assert!(completed_input_task(&draft, &tasks, &draft.input).is_none());
+        tasks[1].artifact = Some("versions/recovery".into());
+        assert_eq!(
+            completed_input_task(&draft, &tasks, &draft.input)
+                .unwrap()
+                .id,
+            "recovery"
+        );
+
+        let mut final_attempt = tasks[1].clone();
+        final_attempt.id = "final-attempt".into();
+        final_attempt.parent = Some("recovery".into());
+        final_attempt.state = workspace::TaskState::Running;
+        final_attempt.artifact = None;
+        tasks[1].state = workspace::TaskState::Uncertain;
+        tasks[1].handled_by = Some(final_attempt.id.clone());
+        tasks.push(final_attempt);
+        assert_eq!(
+            submitted_input_task(&draft, &tasks, &draft.input)
+                .unwrap()
+                .id,
+            "final-attempt"
+        );
+        assert!(completed_input_task(&draft, &tasks, &draft.input).is_none());
+        tasks[2].state = workspace::TaskState::Complete;
+        tasks[2].artifact = Some("versions/final-attempt".into());
+        assert_eq!(
+            completed_input_task(&draft, &tasks, &draft.input)
+                .unwrap()
+                .id,
+            "final-attempt"
+        );
+        assert!(tasks[0] == original);
+        assert_eq!(draft.submitted_task.as_deref(), Some("original"));
+    }
+
+    #[test]
+    fn recovery_lookup_rejects_broken_cycles_or_unrelated_task_links() {
+        for case in [
+            "missing",
+            "self-cycle",
+            "cycle",
+            "wrong-parent",
+            "other-source",
+            "inconsistent-source",
+            "other-kind",
+            "duplicate-id",
+            "unrelated-submission",
+        ] {
+            let (mut draft, mut tasks) = submitted_recovery_chain();
+            match case {
+                "missing" => tasks[0].handled_by = Some("missing".into()),
+                "self-cycle" => {
+                    tasks[0].handled_by = Some("original".into());
+                    tasks[0].parent = Some("original".into());
+                }
+                "cycle" => {
+                    tasks[1].handled_by = Some("original".into());
+                    tasks[0].parent = Some("recovery".into());
+                }
+                "wrong-parent" => tasks[1].parent = Some("unrelated".into()),
+                "other-source" => {
+                    tasks[1].plan.source_id = "other-video".into();
+                    tasks[1].plan.source.identity = "other-video".into();
+                }
+                "inconsistent-source" => tasks[1].plan.source.identity = "other-video".into(),
+                "other-kind" => tasks[1].plan.source.online = false,
+                "duplicate-id" => tasks.push(tasks[1].clone()),
+                "unrelated-submission" => {
+                    tasks[1].plan.source_id = "other-video".into();
+                    tasks[1].plan.source.identity = "other-video".into();
+                    draft.submitted_task = Some("recovery".into());
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                submitted_input_task(&draft, &tasks, &draft.input).is_none(),
+                "{case}"
+            );
+            assert!(
+                completed_input_task(&draft, &tasks, &draft.input).is_none(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recovered_result_cannot_replace_new_or_changed_input() {
+        let (mut draft, mut tasks) = submitted_recovery_chain();
+        tasks[1].state = workspace::TaskState::Complete;
+        tasks[1].artifact = Some("versions/recovery".into());
+        for input in ["", "https://www.bilibili.com/video/BVnext"] {
+            assert!(submitted_input_task(&draft, &tasks, input).is_none());
+            assert!(completed_input_task(&draft, &tasks, input).is_none());
+        }
+        draft.source.as_mut().unwrap().identity = "newly-inspected-content".into();
+        assert!(submitted_input_task(&draft, &tasks, &draft.input).is_none());
+        draft.source = None;
+        draft.input = "https://www.bilibili.com/video/BVnext".into();
+        assert!(submitted_input_task(&draft, &tasks, &draft.input).is_none());
     }
 
     #[test]
