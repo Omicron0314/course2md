@@ -64,6 +64,82 @@ struct ReaderData {
     versions: Vec<Version>,
     issues: Vec<String>,
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum OfflineVideo {
+    #[default]
+    NotRequested,
+    Missing,
+    Available(PathBuf),
+}
+
+#[derive(Clone)]
+struct OfflineVideoRequest {
+    library_root: PathBuf,
+    task_id: String,
+    work_dir: PathBuf,
+    version_dir: PathBuf,
+}
+
+impl OfflineVideoRequest {
+    fn for_version(
+        course: &Course,
+        task: &workspace::TaskRecord,
+        library: &workspace::LibraryLocation,
+    ) -> Option<Self> {
+        let manifest = course.manifest.as_ref()?;
+        if !task.plan.source.online
+            || !task.plan.options.keep_video
+            || task.id != manifest.task_id
+            || task.plan.source_id != manifest.source_id
+            || task.artifact.as_ref() != Some(&course.dir)
+            || task.plan.library_id != library.id
+        {
+            return None;
+        }
+        Some(Self {
+            library_root: library.root.clone(),
+            task_id: task.id.clone(),
+            work_dir: task.work_dir.clone(),
+            version_dir: course.dir.clone(),
+        })
+    }
+
+    /// Called only by reader workers, including the final check before opening.
+    fn inspect(&self) -> OfflineVideo {
+        self.checked_path()
+            .map(OfflineVideo::Available)
+            .unwrap_or(OfflineVideo::Missing)
+    }
+
+    fn checked_path(&self) -> Option<PathBuf> {
+        let mut components = std::path::Path::new(&self.task_id).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return None;
+        }
+        let expected_work = self
+            .library_root
+            .join(".course2md/work")
+            .join(&self.task_id);
+        if self.work_dir != expected_work {
+            return None;
+        }
+        let root = self.library_root.canonicalize().ok()?;
+        let work = self.work_dir.canonicalize().ok()?;
+        if work != root.join(".course2md/work").join(&self.task_id)
+            || !self.version_dir.canonicalize().ok()?.starts_with(&root)
+        {
+            return None;
+        }
+        let media = work.join("media.mp4").canonicalize().ok()?;
+        let metadata = media.metadata().ok()?;
+        (media.parent() == Some(work.as_path()) && metadata.is_file() && metadata.len() > 0)
+            .then_some(media)
+    }
+}
+
 struct ImageViewer {
     scroll: ScrollHandle,
     viewport_scroll: ScrollHandle,
@@ -109,6 +185,8 @@ pub(crate) struct State {
     source_loading: bool,
     source: Option<nav::SourceTarget>,
     source_available: bool,
+    offline_video: OfflineVideo,
+    offline_opening: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl State {
@@ -177,6 +255,8 @@ impl State {
             source_loading: false,
             source: None,
             source_available: false,
+            offline_video: OfflineVideo::NotRequested,
+            offline_opening: false,
             _subscriptions: vec![subscription],
         }
     }
@@ -415,11 +495,10 @@ impl Desktop {
         cx.notify();
     }
     pub fn save_library_presentation(&mut self, cx: &mut Context<Self>) {
-        let mut preferences = self.preferences.application().clone();
-        preferences.desktop = self.desktop_settings.clone();
-        if let Err(error) = self.preferences.save_application(preferences) {
-            self.settings_status = format!("课程库显示方式尚未保存：{error:#}");
-        }
+        let mut preferences = self.application_edit_base();
+        preferences.desktop.library_cards = self.desktop_settings.library_cards;
+        preferences.desktop.library_group_folders = self.desktop_settings.library_group_folders;
+        self.commit_application(preferences, cx);
         cx.notify();
     }
     fn reading_key(&self) -> Option<String> {
@@ -633,6 +712,8 @@ impl Desktop {
         self.reader_ui.issues.clear();
         self.reader_ui.source = None;
         self.reader_ui.source_available = false;
+        self.reader_ui.offline_video = OfflineVideo::NotRequested;
+        self.reader_ui.offline_opening = false;
         self.reader_ui.matches.clear();
         self.reader_ui.find_open = false;
         self.reader_ui.info_open = false;
@@ -648,6 +729,7 @@ impl Desktop {
         };
         let path = preview.course.dir.clone();
         let source = self.unmapped_reader_source();
+        let offline_request = self.reader_offline_video_request();
         let locations = self
             .workspace
             .as_ref()
@@ -663,8 +745,9 @@ impl Desktop {
         self.reader_ui.generation += 1;
         let generation = self.reader_ui.generation;
         self.reader_ui.data_loading = true;
+        self.reader_ui.offline_opening = false;
         cx.spawn(async move |this, cx| {
-            let (data, source, source_available) = cx
+            let (data, source, source_available, offline_video) = cx
                 .background_executor()
                 .spawn(async move {
                     let source = source.map(|source| match source {
@@ -677,7 +760,10 @@ impl Desktop {
                         nav::SourceTarget::Web(_) => true,
                         nav::SourceTarget::Local(path) => path.is_file(),
                     });
-                    (load_reader_data(&preview), source, available)
+                    let offline_video = offline_request
+                        .map(|request| request.inspect())
+                        .unwrap_or_default();
+                    (load_reader_data(&preview), source, available, offline_video)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -697,6 +783,7 @@ impl Desktop {
                 this.reader_ui.issues = data.issues;
                 this.reader_ui.source = source;
                 this.reader_ui.source_available = source_available;
+                this.reader_ui.offline_video = offline_video;
                 this.reader_ui.data_loading = false;
                 this.reader_ui.layout = None;
                 this.reader_ui.restore_generation += 1;
@@ -725,6 +812,54 @@ impl Desktop {
     }
     fn reader_source(&self) -> Option<nav::SourceTarget> {
         self.reader_ui.source.clone()
+    }
+    fn reader_offline_video_request(&self) -> Option<OfflineVideoRequest> {
+        let course = &self.preview.as_ref()?.course;
+        let manifest = course.manifest.as_ref()?;
+        let state = &self.workspace.as_ref()?.state;
+        let task = state.task(&manifest.task_id)?;
+        let library = state.library(&task.plan.library_id)?;
+        OfflineVideoRequest::for_version(course, task, library)
+    }
+    fn play_reader_offline_video(&mut self, cx: &mut Context<Self>) {
+        if self.reader_ui.offline_opening {
+            return;
+        }
+        let Some(request) = self.reader_offline_video_request() else {
+            return;
+        };
+        let version = request.version_dir.clone();
+        let generation = self.reader_ui.generation;
+        self.reader_ui.offline_opening = true;
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { request.inspect() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reader_ui.generation != generation
+                    || this
+                        .preview
+                        .as_ref()
+                        .is_none_or(|preview| preview.course.dir != version)
+                {
+                    return;
+                }
+                this.reader_ui.offline_opening = false;
+                if this.page == Page::Result {
+                    if let OfflineVideo::Available(path) = &status {
+                        cx.open_with_system(path);
+                    } else {
+                        this.message =
+                            Some("此版本的离线视频暂不可用，仍可打开原视频网页。".into());
+                    }
+                }
+                this.reader_ui.offline_video = status;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
     fn unmapped_reader_source(&self) -> Option<nav::SourceTarget> {
         if let Some(path) = self
@@ -1417,12 +1552,53 @@ impl Desktop {
                 }
             }
         }
-        if !facts.is_empty() || self.reader_source().is_some() {
+        match &self.reader_ui.offline_video {
+            OfflineVideo::Available(_) => {
+                meta_facts = meta_facts.child(reveal(
+                    "reveal-reader-offline-video",
+                    quiet("reader-offline-video")
+                        .icon(icons::movie())
+                        .label("播放离线视频")
+                        .loading(self.reader_ui.offline_opening)
+                        .disabled(self.reader_ui.offline_opening)
+                        .on_click(cx.listener(|this, _, _, cx| this.play_reader_offline_video(cx)))
+                        .into_any_element(),
+                ));
+            }
+            OfflineVideo::Missing => {
+                meta_facts = meta_facts
+                    .child(
+                        theme::accessible_text(
+                            "reader-offline-video-missing",
+                            "此版本的离线视频暂不可用，仍可打开原视频网页。",
+                        )
+                        .text_size(TEXT_AUX)
+                        .text_color(color(MUTED)),
+                    )
+                    .child(reveal(
+                        "reveal-retry-reader-offline-video",
+                        quiet("retry-reader-offline-video")
+                            .icon(icons::refresh())
+                            .label("重试播放离线视频")
+                            .loading(self.reader_ui.offline_opening)
+                            .disabled(self.reader_ui.offline_opening)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.play_reader_offline_video(cx)),
+                            )
+                            .into_any_element(),
+                    ));
+            }
+            OfflineVideo::NotRequested => {}
+        }
+        if !facts.is_empty()
+            || self.reader_source().is_some()
+            || self.reader_ui.offline_video != OfflineVideo::NotRequested
+        {
             page = page.child(meta_facts);
         }
         // Meta line 2: 版本 · 生成日期 · 选择版本 · 课程信息。
         if let Some(manifest) = &preview.course.manifest {
-            let stamp = nav::timestamp_utc(manifest.created_at_ms);
+            let stamp = nav::timestamp_local(manifest.created_at_ms);
             let date = stamp.get(..10).unwrap_or(&stamp).to_owned();
             let mut meta_version = h_flex().gap_2().flex_wrap().items_baseline().child(
                 theme::accessible_text(
@@ -3439,7 +3615,7 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
                                 let label = format!(
                                     "第 {} 版 · {}{}",
                                     other.revision,
-                                    nav::timestamp_utc(other.created_at_ms),
+                                    nav::timestamp_local(other.created_at_ms),
                                     if other.partial {
                                         " · 部分完成"
                                     } else {
@@ -3524,9 +3700,10 @@ fn image_zoom_offset(viewport: f32, old_extent: f32, new_extent: f32, offset: f3
 #[cfg(test)]
 mod tests {
     use super::{
-        PreviewBlock, block_time, files_need_reload, image_zoom_offset, load_reader_data,
-        processing_notice,
+        OfflineVideo, OfflineVideoRequest, PreviewBlock, block_time, files_need_reload,
+        image_zoom_offset, load_reader_data, processing_notice,
     };
+    use crate::{ConversionOptions, notes::Course, source, workspace};
 
     #[test]
     fn image_zoom_keeps_the_visible_center_and_all_edges_reachable() {
@@ -3642,6 +3819,118 @@ mod tests {
             warning: None,
         }
     }
+    fn offline_task_fixture(
+        root: &std::path::Path,
+        course: &Course,
+    ) -> (workspace::TaskRecord, workspace::LibraryLocation) {
+        let manifest = course.manifest.as_ref().unwrap();
+        let library = workspace::LibraryLocation {
+            id: "offline-library".into(),
+            name: "Offline library".into(),
+            root: root.to_owned(),
+            previous_roots: Vec::new(),
+        };
+        let task = workspace::TaskRecord {
+            id: manifest.task_id.clone(),
+            plan: workspace::TaskPlan {
+                operation: Default::default(),
+                source: source::Source {
+                    input: "https://www.bilibili.com/video/BVfixture?p=2".into(),
+                    identity: manifest.source_id.clone(),
+                    online: true,
+                    ..Default::default()
+                },
+                source_id: manifest.source_id.clone(),
+                title: course.title.clone(),
+                library_id: library.id.clone(),
+                folder: None,
+                options: ConversionOptions {
+                    keep_video: true,
+                    ..Default::default()
+                },
+                subtitle: None,
+                config: Default::default(),
+                asr_service: None,
+                ai_service: None,
+            },
+            state: workspace::TaskState::Complete,
+            intent: workspace::Intent::Run,
+            created: 0,
+            updated: 0,
+            parent: None,
+            handled_by: None,
+            work_dir: root.join(".course2md/work").join(&manifest.task_id),
+            stages: Default::default(),
+            error: None,
+            artifact: Some(course.dir.clone()),
+            outcomes: None,
+            unread: false,
+            logs: Vec::new(),
+            blocked: Vec::new(),
+            resend: Vec::new(),
+        };
+        (task, library)
+    }
+
+    #[test]
+    fn offline_video_uses_its_version_task_and_rechecks_removed_media() {
+        let root = tempfile::tempdir().unwrap();
+        let first = fixture_version(root.path(), 1, &[10.]);
+        let second = fixture_version(root.path(), 2, &[20.]);
+        let (task, library) = offline_task_fixture(root.path(), &first);
+        std::fs::create_dir_all(&task.work_dir).unwrap();
+        let media = task.work_dir.join("media.mp4");
+        std::fs::write(&media, "retained first video").unwrap();
+        let request = OfflineVideoRequest::for_version(&first, &task, &library).unwrap();
+        assert_eq!(
+            request.inspect(),
+            OfflineVideo::Available(media.canonicalize().unwrap())
+        );
+        assert!(OfflineVideoRequest::for_version(&second, &task, &library).is_none());
+        let mut changed = task.clone();
+        changed.artifact = Some(second.dir.clone());
+        assert!(OfflineVideoRequest::for_version(&first, &changed, &library).is_none());
+        changed = task.clone();
+        changed.plan.source_id = "another-video".into();
+        assert!(OfflineVideoRequest::for_version(&first, &changed, &library).is_none());
+        changed = task.clone();
+        changed.plan.options.keep_video = false;
+        assert!(OfflineVideoRequest::for_version(&first, &changed, &library).is_none());
+        std::fs::remove_file(media).unwrap();
+        assert_eq!(request.inspect(), OfflineVideo::Missing);
+    }
+
+    #[test]
+    fn offline_video_refuses_other_task_paths_and_files_outside_its_library() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let course = fixture_version(root.path(), 1, &[10.]);
+        let (mut task, library) = offline_task_fixture(root.path(), &course);
+        let expected_work = task.work_dir.clone();
+        std::fs::write(outside.path().join("media.mp4"), "unrelated video").unwrap();
+        task.work_dir = outside.path().to_owned();
+        let request = OfflineVideoRequest::for_version(&course, &task, &library).unwrap();
+        assert_eq!(request.inspect(), OfflineVideo::Missing);
+        task.work_dir = expected_work;
+        std::fs::create_dir_all(&task.work_dir).unwrap();
+        let mut request = OfflineVideoRequest::for_version(&course, &task, &library).unwrap();
+        std::fs::write(task.work_dir.join("media.mp4"), "retained video").unwrap();
+        request.version_dir = outside.path().to_owned();
+        assert_eq!(request.inspect(), OfflineVideo::Missing);
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(task.work_dir.join("media.mp4")).unwrap();
+            std::os::unix::fs::symlink(
+                outside.path().join("media.mp4"),
+                task.work_dir.join("media.mp4"),
+            )
+            .unwrap();
+            let request = OfflineVideoRequest::for_version(&course, &task, &library).unwrap();
+            assert_eq!(request.inspect(), OfflineVideo::Missing);
+        }
+    }
+
     #[test]
     fn summary_failure_keeps_body_readable_and_does_not_offer_file_reload() {
         let root = tempfile::tempdir().unwrap();

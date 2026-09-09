@@ -26,6 +26,7 @@ pub struct State {
     resume_task: Option<String>,
     cleanup: bool,
     association: bool,
+    relocation: Option<String>,
     location_checks: LocationChecks,
 }
 
@@ -156,7 +157,9 @@ impl State {
     }
 
     fn title(&self) -> &'static str {
-        if self.association {
+        if self.relocation.is_some() {
+            "重新定位课程库"
+        } else if self.association {
             "重新关联保存位置"
         } else if self.cleanup {
             "清理旧位置备份"
@@ -267,6 +270,21 @@ fn relocate_config(config: &mut course2md::settings::ConfigFile, old: &Path, new
     }
 }
 
+fn relocate_preview(preview: &mut crate::notes::Preview, old: &Path, new: &Path) {
+    storage::relocate_path(&mut preview.course.dir, old, new);
+    if let Some(path) = &mut preview.course.thumbnail {
+        storage::relocate_path(path, old, new);
+    }
+    for path in &mut preview.frames {
+        storage::relocate_path(path, old, new);
+    }
+    for block in &mut preview.blocks {
+        if let crate::notes::PreviewBlock::Image(path) = block {
+            storage::relocate_path(path, old, new);
+        }
+    }
+}
+
 fn validate_registered_destination(
     state: &workspace::State,
     library_id: &str,
@@ -283,7 +301,7 @@ fn validate_registered_destination(
                     std::fs::canonicalize(&library.root).unwrap_or_else(|_| library.root.clone());
                 root.starts_with(&destination) || destination.starts_with(root)
             }),
-        "目标与另一个已登记课程库重叠，请选择独立的空文件夹"
+        "目标与另一个已登记课程库重叠，请选择独立的课程库位置"
     );
     Ok(())
 }
@@ -310,68 +328,7 @@ fn publish_location(
     );
     validate_registered_destination(state, &journal.library_id, &journal.destination)?;
     let roots = [journal.source.clone(), location.root.clone()];
-    for old in &roots {
-        for path in state.reader_sources.values_mut() {
-            storage::relocate_path(path, old, &journal.destination);
-        }
-        for draft in &mut state.drafts {
-            if let Some(source) = &mut draft.source {
-                let before = source.input.clone();
-                relocate_source(source, old, &journal.destination);
-                if !source.online && before != source.input {
-                    draft.input = source.input.clone();
-                }
-            } else if !draft.online {
-                let mut path = PathBuf::from(&draft.input);
-                storage::relocate_path(&mut path, old, &journal.destination);
-                draft.input = path.display().to_string();
-            }
-            if let Some(path) = &mut draft.subtitle {
-                storage::relocate_path(path, old, &journal.destination);
-            }
-            if let Some(config) = &mut draft.base_config {
-                relocate_config(config, old, &journal.destination);
-            }
-        }
-        for task in &mut state.tasks {
-            storage::relocate_path(&mut task.work_dir, old, &journal.destination);
-            if let Some(path) = &mut task.artifact {
-                storage::relocate_path(path, old, &journal.destination);
-            }
-            if let Some(path) = &mut task.plan.subtitle {
-                storage::relocate_path(path, old, &journal.destination);
-            }
-            relocate_source(&mut task.plan.source, old, &journal.destination);
-            relocate_config(&mut task.plan.config, old, &journal.destination);
-            if let course2md::execution::Operation::Reprocess {
-                base_version_dir,
-                prior_work_dir,
-                ..
-            } = &mut task.plan.operation
-            {
-                storage::relocate_path(base_version_dir, old, &journal.destination);
-                if let Some(path) = prior_work_dir {
-                    storage::relocate_path(path, old, &journal.destination);
-                }
-            }
-        }
-    }
-    let location = state
-        .libraries
-        .iter_mut()
-        .find(|library| library.id == journal.library_id)
-        .unwrap();
-    for old in roots {
-        if !location.previous_roots.contains(&old) {
-            location.previous_roots.push(old);
-        }
-    }
-    location.root = journal.destination.clone();
-    for backup in &mut state.storage_backups {
-        if backup.library_id == journal.library_id {
-            backup.current_root = journal.destination.clone();
-        }
-    }
+    rebind_location(state, &journal.library_id, &roots, &journal.destination)?;
     state.storage_backups.push(storage::BackupRecord {
         id: journal.id.clone(),
         library_id: journal.library_id.clone(),
@@ -384,7 +341,284 @@ fn publish_location(
     Ok(())
 }
 
+/// A library move and locating an already moved library share the same registry
+/// update. Only a verified copy operation creates a backup record.
+fn rebind_location(
+    state: &mut workspace::State,
+    library_id: &str,
+    roots: &[PathBuf],
+    destination: &Path,
+) -> Result<()> {
+    ensure!(
+        state.library(library_id).is_some(),
+        "原课程库已不在已登记位置中"
+    );
+    for old in roots {
+        for path in state.reader_sources.values_mut() {
+            storage::relocate_path(path, old, destination);
+        }
+        for draft in &mut state.drafts {
+            if let Some(source) = &mut draft.source {
+                let before = source.input.clone();
+                relocate_source(source, old, destination);
+                if !source.online && before != source.input {
+                    draft.input = source.input.clone();
+                }
+            } else if !draft.online {
+                let mut path = PathBuf::from(&draft.input);
+                storage::relocate_path(&mut path, old, destination);
+                draft.input = path.display().to_string();
+            }
+            if let Some(path) = &mut draft.subtitle {
+                storage::relocate_path(path, old, destination);
+            }
+            if let Some(config) = &mut draft.base_config {
+                relocate_config(config, old, destination);
+            }
+        }
+        for task in &mut state.tasks {
+            storage::relocate_path(&mut task.work_dir, old, destination);
+            if let Some(path) = &mut task.artifact {
+                storage::relocate_path(path, old, destination);
+            }
+            if let Some(path) = &mut task.plan.subtitle {
+                storage::relocate_path(path, old, destination);
+            }
+            relocate_source(&mut task.plan.source, old, destination);
+            relocate_config(&mut task.plan.config, old, destination);
+            if let course2md::execution::Operation::Reprocess {
+                base_version_dir,
+                prior_work_dir,
+                ..
+            } = &mut task.plan.operation
+            {
+                storage::relocate_path(base_version_dir, old, destination);
+                if let Some(path) = prior_work_dir {
+                    storage::relocate_path(path, old, destination);
+                }
+            }
+        }
+    }
+    let location = state
+        .libraries
+        .iter_mut()
+        .find(|library| library.id == library_id)
+        .unwrap();
+    for old in roots {
+        if !location.previous_roots.contains(old) {
+            location.previous_roots.push(old.clone());
+        }
+    }
+    location.root = destination.to_owned();
+    for backup in &mut state.storage_backups {
+        if backup.library_id == library_id {
+            backup.current_root = destination.to_owned();
+        }
+    }
+    Ok(())
+}
+
+struct LocatedLibrary {
+    library_id: String,
+    previous_root: PathBuf,
+    destination: PathBuf,
+    stamp: storage::DirectoryStamp,
+}
+
+/// Read only: finding a moved library never creates or repairs its identity.
+fn inspect_relocation(
+    state: &workspace::State,
+    library_id: &str,
+    destination: &Path,
+) -> Result<LocatedLibrary> {
+    let location = state
+        .library(library_id)
+        .context("课程库已不在已登记位置中")?;
+    let destination = destination
+        .canonicalize()
+        .context("所选文件夹暂时无法访问")?;
+    ensure!(
+        destination
+            != location
+                .root
+                .canonicalize()
+                .unwrap_or_else(|_| location.root.clone()),
+        "所选仍是当前登记位置，请选择移动后的课程库文件夹"
+    );
+    validate_registered_destination(state, library_id, &destination)?;
+    let stamp = storage::directory_stamp(&destination)?;
+    let identity = std::fs::read_to_string(destination.join(".course2md-library-id"))
+        .context("所选文件夹没有可读取的课程库关联记录，请选择移动后的完整课程库文件夹")?;
+    ensure!(
+        identity.trim() == library_id,
+        "所选文件夹属于其他课程库，请选择这个课程库移动后的文件夹"
+    );
+    ensure!(
+        storage::directory_stamp(&destination)? == stamp,
+        "所选文件夹已变化，请重新选择"
+    );
+    Ok(LocatedLibrary {
+        library_id: library_id.to_owned(),
+        previous_root: location.root.clone(),
+        destination,
+        stamp,
+    })
+}
+
+fn publish_relocation(state: &mut workspace::State, located: &LocatedLibrary) -> Result<()> {
+    ensure!(
+        state
+            .library(&located.library_id)
+            .is_some_and(|location| location.root == located.previous_root),
+        "这个课程库的登记位置已变化，请重新选择"
+    );
+    // Recheck the actual directory and identity immediately before publication.
+    let current = inspect_relocation(state, &located.library_id, &located.destination)?;
+    ensure!(
+        current.stamp == located.stamp,
+        "所选文件夹已被替换，请重新选择"
+    );
+    rebind_location(
+        state,
+        &located.library_id,
+        std::slice::from_ref(&located.previous_root),
+        &located.destination,
+    )
+}
+
 impl Desktop {
+    pub fn begin_library_relocation(
+        &mut self,
+        library_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.storage_ui.busy {
+            return;
+        }
+        self.storage_ui.relocation = Some(library_id.clone());
+        self.storage_ui.association = false;
+        self.storage_ui.cleanup = false;
+        self.storage_ui.error = None;
+        self.storage_ui.progress = Progress::default();
+        if self.job.is_some() || self.preview_workers > 0 {
+            self.storage_ui.error = Some(
+                "正在读取或生成内容，请等待结束或停止后再重新定位。原保存位置保持不变。".into(),
+            );
+            self.open_storage_dialog(window, cx);
+            return;
+        }
+        if !self.save_current_draft(cx) {
+            return;
+        }
+        let Some(state) = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.state.clone())
+        else {
+            return;
+        };
+        self.storage_ui.busy = true;
+        self.storage_ui.generation = self.storage_ui.generation.wrapping_add(1);
+        let generation = self.storage_ui.generation;
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择这个课程库移动后的文件夹".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = prompt.await;
+            let destination = match answer {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                error => {
+                    let message = match error {
+                        Ok(Err(error)) => format!("无法选择课程库位置：{error:#}"),
+                        Err(error) => format!("无法打开文件选择器：{error}"),
+                        _ => unreachable!(),
+                    };
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.storage_ui.busy = false;
+                        this.storage_ui.error = Some(message);
+                        this.open_storage_dialog(window, cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(destination) = destination else {
+                let _ = this.update_in(cx, |this, _, cx| {
+                    this.storage_ui.busy = false;
+                    this.storage_ui.relocation = None;
+                    this.start_next_task(cx);
+                    cx.notify();
+                });
+                return;
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.storage_ui.cancel = Some(cancel.clone());
+                this.storage_ui.progress.message = "正在核对所选课程库…".into();
+                this.open_storage_dialog(window, cx);
+                cx.notify();
+            });
+            let result = cx.background_executor().spawn(async move {
+                inspect_relocation(&state, &library_id, &destination)
+            }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.storage_ui.generation != generation {
+                    return;
+                }
+                let result = result.and_then(|located| {
+                    ensure!(!this.closing && !cancel.load(Ordering::Relaxed), "已取消重新定位，原保存位置保持不变");
+                    ensure!(this.job.is_none() && this.preview_workers == 0, "内容仍在处理中，请停止后重新定位");
+                    this.workspace.as_mut().context("课程库登记记录暂时不可用")?
+                        .transaction(|state| publish_relocation(state, &located))?;
+                    Ok(located)
+                });
+                this.storage_ui.busy = false;
+                this.storage_ui.cancel = None;
+                this.storage_ui.progress = Progress::default();
+                match result {
+                    Ok(located) => {
+                        if this.library_root == located.previous_root {
+                            this.library_root = located.destination.clone();
+                        }
+                        this.read_generation = this.read_generation.wrapping_add(1);
+                        this.reading = false;
+                        if let Some(preview) = &mut this.preview {
+                            let was_inside = preview.course.dir.starts_with(&located.previous_root);
+                            relocate_preview(preview, &located.previous_root, &located.destination);
+                            if was_inside {
+                                this.restore_reading_position(cx);
+                            }
+                        }
+                        let settings = this.relocate_settings_paths(&located.previous_root, &located.destination, cx);
+                        this.storage_ui.error = settings.err().map(|error| format!("课程库已重新定位，模型位置尚未保存。请在生成笔记设置中重试保存：{error:#}"));
+                        this.storage_ui.progress = Progress {
+                            message: format!("已找到课程库：{}。已有文件保留在所选位置。", located.destination.display()),
+                            completed: 1,
+                            total: 1,
+                        };
+                        this.workspace_error = None;
+                        this.restore_draft(window, cx);
+                        this.refresh_library(cx);
+                        if this.storage_ui.error.is_none() {
+                            window.close_dialog(cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.storage_ui.error = Some(format!("尚未重新定位：{error:#}。原登记和文件保持不变。"));
+                    }
+                }
+                this.start_next_task(cx);
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
     pub fn begin_library_reassociation(
         &mut self,
         library_id: String,
@@ -394,6 +628,7 @@ impl Desktop {
         if self.storage_ui.busy {
             return;
         }
+        self.storage_ui.relocation = None;
         let Some(location) = self
             .workspace
             .as_ref()
@@ -673,6 +908,7 @@ impl Desktop {
         if self.storage_ui.busy {
             return;
         }
+        self.storage_ui.relocation = None;
         self.storage_ui.association = false;
         let Some(location) = self
             .workspace
@@ -736,6 +972,7 @@ impl Desktop {
         if self.storage_ui.busy || !self.save_current_draft(cx) {
             return;
         }
+        self.storage_ui.relocation = None;
         self.storage_ui.association = false;
         let valid = self
             .workspace
@@ -1022,6 +1259,8 @@ impl Desktop {
                     .loading(cancelling)
                     .label(if cancelling {
                         "正在结束…"
+                    } else if self.storage_ui.relocation.is_some() {
+                        "取消重新定位"
                     } else if self.storage_ui.association {
                         "取消重新关联"
                     } else if self.storage_ui.cleanup {
@@ -1033,18 +1272,33 @@ impl Desktop {
                         if let Some(cancel) = &this.storage_ui.cancel {
                             cancel.store(true, Ordering::Relaxed);
                         }
-                        this.storage_ui.progress.message = if this.storage_ui.association {
-                            "正在结束读取，现有文件会保留…"
-                        } else if this.storage_ui.cleanup {
-                            "正在结束清理操作…"
-                        } else {
-                            "正在结束迁移，原课程库会保留…"
-                        }
-                        .into();
+                        this.storage_ui.progress.message =
+                            if this.storage_ui.relocation.is_some() {
+                                "正在结束核对，原保存位置保持不变…"
+                            } else if this.storage_ui.association {
+                                "正在结束读取，现有文件会保留…"
+                            } else if this.storage_ui.cleanup {
+                                "正在结束清理操作…"
+                            } else {
+                                "正在结束迁移，原课程库会保留…"
+                            }
+                            .into();
                         cx.notify();
                     })),
             );
         } else {
+            if let Some(id) = self.storage_ui.relocation.clone().filter(|_| {
+                self.storage_ui.error.is_some() && self.storage_ui.progress.completed == 0
+            }) {
+                view = view.child(
+                    primary_pill("retry-library-relocation")
+                        .label("重新选择课程库…")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            window.close_dialog(cx);
+                            this.begin_library_relocation(id.clone(), window, cx);
+                        })),
+                );
+            }
             view = view.child(
                 control("close-storage-operation")
                     .icon(icons::close())
@@ -1057,6 +1311,34 @@ impl Desktop {
 
     pub fn storage_status_panel(&self, cx: &mut Context<Self>) -> Div {
         let mut view = v_flex().gap_3();
+        if self.storage_ui.relocation.is_some()
+            && !self.storage_ui.busy
+            && self.storage_ui.error.is_none()
+            && self.storage_ui.progress.completed > 0
+            && self.storage_ui.progress.completed == self.storage_ui.progress.total
+        {
+            view = view.child(
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .child(
+                        icons::check_circle()
+                            .size_4()
+                            .flex_shrink_0()
+                            .text_color(color(SUCCESS)),
+                    )
+                    .child(
+                        accessible_text(
+                            "storage-relocation-success",
+                            self.storage_ui.progress.message.clone(),
+                        )
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_sm(),
+                    ),
+            );
+        }
         if let Some(access) = self.cached_library_access() {
             let message = match access.coverage() {
                 storage::LibraryCoverage::Unavailable => Some(
@@ -1225,6 +1507,7 @@ impl Desktop {
         if self.storage_ui.busy {
             return;
         }
+        self.storage_ui.relocation = None;
         self.storage_ui.association = false;
         let Some(backup) = self
             .workspace
@@ -1333,8 +1616,8 @@ impl Desktop {
 #[cfg(test)]
 mod tests {
     use super::{
-        LocationChecks, inspect_location, publish_location, scan_locations,
-        validate_registered_destination,
+        LocationChecks, inspect_location, inspect_relocation, publish_location, publish_relocation,
+        relocate_preview, scan_locations, validate_registered_destination,
     };
     use crate::{ConversionOptions, source, storage, workspace};
     use std::{path::PathBuf, sync::atomic::AtomicBool};
@@ -1346,6 +1629,265 @@ mod tests {
             root,
             previous_roots: Vec::new(),
         }
+    }
+
+    #[test]
+    fn locating_a_moved_library_reopens_notes_and_preserves_task_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("old");
+        let new = directory.path().join("moved");
+        std::fs::create_dir_all(old.join("note")).unwrap();
+        std::fs::write(
+            old.join("note/structured.json"),
+            include_str!("../../tests/fixtures/legacy/json/structured.json"),
+        )
+        .unwrap();
+        std::fs::write(old.join("video.mp4"), "original video").unwrap();
+        let old = old.canonicalize().unwrap();
+        let record = directory.path().join("workspace.json");
+        let mut workspace = workspace::Workspace::open_at(
+            record.clone(),
+            old.clone(),
+            ConversionOptions::default(),
+        )
+        .unwrap();
+        let id = workspace.state.default_library.clone();
+        let source = source::Source {
+            input: old.join("video.mp4").display().to_string(),
+            identity: "local:original-video".into(),
+            title: "Original title".into(),
+            online: false,
+            ..Default::default()
+        };
+        let draft = workspace.state.draft_mut().unwrap();
+        draft.input = source.input.clone();
+        draft.online = false;
+        draft.source = Some(source.clone());
+        draft.title = "Keep my custom title".into();
+        draft.custom_title = true;
+        draft.folder = Some(7);
+        let draft_id = draft.id.clone();
+        let plan = workspace::TaskPlan {
+            operation: course2md::execution::Operation::Generate,
+            source: source.clone(),
+            source_id: source.identity.clone(),
+            title: "Frozen task".into(),
+            library_id: id.clone(),
+            folder: Some(7),
+            options: ConversionOptions::default(),
+            subtitle: None,
+            config: course2md::settings::ConfigFile::default(),
+            asr_service: Some("fixed-service-version".into()),
+            ai_service: None,
+        };
+        let (task_id, _) = workspace.state.enqueue(plan, None).unwrap();
+        let task = workspace.state.task_mut(&task_id).unwrap();
+        task.state = workspace::TaskState::Uncertain;
+        task.intent = workspace::Intent::Pause;
+        let work = task.work_dir.clone();
+        workspace
+            .state
+            .reader_sources
+            .insert("inside".into(), old.join("video.mp4"));
+        let external = directory.path().join("external.mp4");
+        workspace
+            .state
+            .reader_sources
+            .insert("outside".into(), external.clone());
+        let mut preview =
+            crate::notes::read_preview(crate::notes::scan_library(&old).unwrap().courses.remove(0))
+                .unwrap();
+        let original_text = preview.plain_text.clone();
+        workspace.state.task_mut(&task_id).unwrap().artifact = Some(preview.course.dir.clone());
+        workspace.transaction(|_| Ok(())).unwrap();
+        let binding = br#"{"task_id":"kept","source_id":"kept"}"#;
+        std::fs::write(work.join("task-identity.json"), binding).unwrap();
+        std::fs::write(
+            work.join("control.json"),
+            br#"{"intent":"pause","resend":[]}"#,
+        )
+        .unwrap();
+        std::fs::rename(&old, &new).unwrap();
+        let new = new.canonicalize().unwrap();
+        assert!(!old.exists());
+
+        let located = inspect_relocation(&workspace.state, &id, &new).unwrap();
+        workspace
+            .transaction(|state| publish_relocation(state, &located))
+            .unwrap();
+        let state = &workspace.state;
+        assert_eq!(state.library(&id).unwrap().root, new);
+        assert_eq!(state.default_library, id);
+        assert_eq!(state.current_draft, draft_id);
+        assert_eq!(state.draft().unwrap().title, "Keep my custom title");
+        assert_eq!(state.draft().unwrap().folder, Some(7));
+        assert_eq!(
+            state.draft().unwrap().input,
+            new.join("video.mp4").display().to_string()
+        );
+        let task = state.task(&task_id).unwrap();
+        assert_eq!(task.state, workspace::TaskState::Uncertain);
+        assert_eq!(task.intent, workspace::Intent::Pause);
+        assert_eq!(
+            task.plan.asr_service.as_deref(),
+            Some("fixed-service-version")
+        );
+        assert_eq!(state.reader_sources["inside"], new.join("video.mp4"));
+        assert_eq!(state.reader_sources["outside"], external);
+        assert!(
+            state.storage_backups.is_empty(),
+            "locating must not invent a verified backup"
+        );
+        assert_eq!(
+            std::fs::read(task.work_dir.join("task-identity.json")).unwrap(),
+            binding
+        );
+        assert_eq!(
+            std::fs::read(task.work_dir.join("control.json")).unwrap(),
+            br#"{"intent":"pause","resend":[]}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(new.join(".course2md-library-id")).unwrap(),
+            id
+        );
+        relocate_preview(&mut preview, &old, &new);
+        assert_eq!(preview.plain_text, original_text);
+        assert!(preview.course.dir.starts_with(&new));
+        let reread = crate::notes::read_preview(preview.course).unwrap();
+        assert_eq!(reread.plain_text, original_text);
+        let reopened =
+            workspace::Workspace::open_at(record, old.clone(), ConversionOptions::default())
+                .unwrap();
+        assert_eq!(reopened.state.library(&id).unwrap().root, new);
+        assert!(
+            reopened
+                .state
+                .library(&id)
+                .unwrap()
+                .previous_roots
+                .contains(&old)
+        );
+        assert!(
+            !old.exists(),
+            "recovery must not recreate the missing original directory"
+        );
+    }
+
+    #[test]
+    fn locating_rejects_missing_wrong_and_overlapping_library_identity_without_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("old");
+        let target = directory.path().join("target");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let workspace = workspace::Workspace::open_at(
+            directory.path().join("workspace.json"),
+            old,
+            ConversionOptions::default(),
+        )
+        .unwrap();
+        workspace.save().unwrap();
+        let id = workspace.state.default_library.clone();
+        let before = std::fs::read(workspace.storage_path()).unwrap();
+        assert!(inspect_relocation(&workspace.state, &id, &target).is_err());
+        assert!(!target.join(".course2md-library-id").exists());
+        std::fs::write(target.join(".course2md-library-id"), "another-library").unwrap();
+        assert!(inspect_relocation(&workspace.state, &id, &target).is_err());
+        assert_eq!(
+            std::fs::read_to_string(target.join(".course2md-library-id")).unwrap(),
+            "another-library"
+        );
+        std::fs::write(target.join(".course2md-library-id"), &id).unwrap();
+        let mut state = workspace.state.clone();
+        state.libraries.push(workspace::LibraryLocation {
+            id: "other".into(),
+            name: "Other".into(),
+            root: target.clone(),
+            previous_roots: Vec::new(),
+        });
+        assert!(inspect_relocation(&state, &id, &target).is_err());
+        assert_eq!(std::fs::read(workspace.storage_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn locating_rechecks_registry_and_selected_directory_before_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("old");
+        let target = directory.path().join("target");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let mut workspace = workspace::Workspace::open_at(
+            directory.path().join("workspace.json"),
+            old,
+            ConversionOptions::default(),
+        )
+        .unwrap();
+        let id = workspace.state.default_library.clone();
+        std::fs::write(target.join(".course2md-library-id"), &id).unwrap();
+        let located = inspect_relocation(&workspace.state, &id, &target).unwrap();
+        let mut changed = workspace.state.clone();
+        changed.libraries[0].root = directory.path().join("another-location");
+        let before = changed.clone();
+        assert!(publish_relocation(&mut changed, &located).is_err());
+        assert!(changed == before);
+        std::fs::rename(&target, directory.path().join("original-selected")).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join(".course2md-library-id"), &id).unwrap();
+        let before = workspace.state.clone();
+        assert!(
+            workspace
+                .transaction(|state| publish_relocation(state, &located))
+                .is_err()
+        );
+        assert!(workspace.state == before);
+        let located = inspect_relocation(&workspace.state, &id, &target).unwrap();
+        std::fs::write(target.join(".course2md-library-id"), "different-library").unwrap();
+        assert!(
+            workspace
+                .transaction(|state| publish_relocation(state, &located))
+                .is_err()
+        );
+        assert!(workspace.state == before);
+    }
+
+    #[test]
+    fn locating_keeps_the_original_registry_when_publication_cannot_be_saved() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("old");
+        let target = directory.path().join("target");
+        std::fs::create_dir(&old).unwrap();
+        let record = directory.path().join("workspace.json");
+        let mut workspace = workspace::Workspace::open_at(
+            record.clone(),
+            old.clone(),
+            ConversionOptions::default(),
+        )
+        .unwrap();
+        workspace.save().unwrap();
+        let id = workspace.state.default_library.clone();
+        let before = workspace.state.clone();
+        let record_bytes = std::fs::read(&record).unwrap();
+        std::fs::rename(&old, &target).unwrap();
+        let located = inspect_relocation(&workspace.state, &id, &target).unwrap();
+        // A directory at the output file is a portable publication failure, not
+        // a chmod assertion that would silently pass under a privileged runner.
+        std::fs::rename(&record, directory.path().join("original-record.json")).unwrap();
+        std::fs::create_dir(&record).unwrap();
+        assert!(
+            workspace
+                .transaction(|state| publish_relocation(state, &located))
+                .is_err()
+        );
+        assert!(workspace.state == before);
+        assert_eq!(
+            std::fs::read(directory.path().join("original-record.json")).unwrap(),
+            record_bytes
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join(".course2md-library-id")).unwrap(),
+            id
+        );
+        assert!(!old.exists());
     }
 
     #[test]
