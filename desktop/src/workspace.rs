@@ -162,6 +162,16 @@ impl Draft {
         }
         v.resume = true;
     }
+
+    /// Resume inheriting AI processing choices without changing other task choices.
+    pub fn reset_ai_overrides(&mut self, defaults: &ConversionOptions) {
+        self.options.llm = defaults.llm;
+        self.options.summarize = defaults.summarize;
+        self.options.vision = defaults.vision;
+        for field in [Override::Proofread, Override::Summary, Override::Vision] {
+            self.overrides.remove(&field);
+        }
+    }
 }
 
 /// Extra defense at the persistence boundary: even a caller-provided resolved
@@ -418,7 +428,7 @@ impl State {
         })
     }
 
-    /// Start a new note by replacing the one input form; task plans stay frozen.
+    /// Replace the current input; submitted task plans stay frozen.
     pub fn reset_input(
         &mut self,
         online: bool,
@@ -442,6 +452,14 @@ impl State {
         if previous.online == online {
             return;
         }
+        if previous.submitted_task.is_some() {
+            let mut input = Draft::new(online, self.default_library.clone(), options);
+            if previous.library_id == input.library_id {
+                input.folder = previous.folder;
+            }
+            self.replace_input(input);
+            return;
+        }
         // Source modes belong to the same form. Keep common choices, clear the
         // incompatible source and detach any submitted/retry task association.
         let mut input = Draft::new(
@@ -455,6 +473,31 @@ impl State {
         input.ai_service = previous.ai_service.clone();
         input.base_config = previous.base_config.clone();
         self.replace_input(input);
+    }
+
+    /// Replacing a submitted source starts another conversion with saved defaults.
+    /// Edits to an unsubmitted source keep the user's in-progress choices.
+    pub fn prepare_next_import(&mut self, value: &str, defaults: ConversionOptions) -> bool {
+        let Some(previous) = self.draft() else {
+            return false;
+        };
+        if previous.submitted_task.is_none() || previous.input == value {
+            return false;
+        }
+        let submitted = previous.submitted_task.clone();
+        let mut input = Draft::new(previous.online, self.default_library.clone(), defaults);
+        if previous.library_id == input.library_id {
+            input.folder = previous.folder;
+        }
+        input.change_source(value.to_owned());
+        if let Some(task) = submitted.as_deref().and_then(|id| self.task_mut(id))
+            && task.state == TaskState::Complete
+        {
+            // Choosing the next video acknowledges the result just presented.
+            task.unread = false;
+        }
+        self.replace_input(input);
+        true
     }
 
     /// Replace the current form with a task's options without mutating that task.
@@ -1872,8 +1915,168 @@ mod tests {
         draft.inherit(&defaults);
         assert!(draft.options.llm && draft.options.summarize);
     }
+
     #[test]
-    fn new_note_replaces_the_form_and_keeps_submitted_task_plans() {
+    fn resetting_ai_choices_resumes_inheritance_without_changing_other_overrides_or_services() {
+        let mut draft = Draft::new(true, "lib".into(), Default::default());
+        draft.change_source("current-video".into());
+        draft.title = "Current note".into();
+        draft.custom_title = true;
+        draft.folder = Some(42);
+        draft.options.provider = 2;
+        draft.options.source_mode = 1;
+        draft.options.keep_video = true;
+        draft.options.formats = [true, false, true];
+        draft.options.llm = true;
+        draft.options.summarize = false;
+        draft.options.vision = true;
+        draft.asr_service = Some("fixed-speech-service".into());
+        draft.ai_service = Some("fixed-ai-service".into());
+        draft.overrides = [
+            Override::Provider,
+            Override::TextSource,
+            Override::Proofread,
+            Override::Summary,
+            Override::Vision,
+            Override::KeepVideo,
+            Override::Formats,
+        ]
+        .into_iter()
+        .collect();
+        let defaults = ConversionOptions {
+            llm: false,
+            summarize: true,
+            vision: false,
+            ..Default::default()
+        };
+        let mut expected = draft.clone();
+        expected.options.llm = false;
+        expected.options.summarize = true;
+        expected.options.vision = false;
+        expected.overrides = [
+            Override::Provider,
+            Override::TextSource,
+            Override::KeepVideo,
+            Override::Formats,
+        ]
+        .into_iter()
+        .collect();
+        draft.reset_ai_overrides(&defaults);
+        assert_eq!(draft, expected);
+
+        let later_defaults = ConversionOptions {
+            llm: true,
+            summarize: false,
+            vision: true,
+            ..Default::default()
+        };
+        draft.inherit(&later_defaults);
+        expected.options.llm = true;
+        expected.options.summarize = false;
+        expected.options.vision = true;
+        expected.options.resume = true;
+        assert_eq!(draft, expected);
+    }
+
+    #[test]
+    fn a_second_video_uses_defaults_without_mutating_the_submitted_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let submitted = plan(&ws.state.default_library);
+        let task = ws.state.enqueue(submitted.clone(), None).unwrap().0;
+        let input = ws.state.draft_mut().unwrap();
+        input.input = "first.mp4".into();
+        input.title = "Only this video".into();
+        input.custom_title = true;
+        input.folder = Some(42);
+        input.options.llm = true;
+        input.overrides.insert(Override::Proofread);
+        input.ai_service = Some("task-specific-service".into());
+        input.base_config = Some(ConfigFile::default());
+        input.submitted_task = Some(task.clone());
+        let first_id = input.id.clone();
+        let defaults = ConversionOptions::default();
+        assert!(!ws.state.prepare_next_import("first.mp4", defaults.clone()));
+        assert_eq!(ws.state.draft().unwrap().id, first_id);
+        assert!(ws.state.prepare_next_import("second.mp4", defaults.clone()));
+        let input = ws.state.draft().unwrap();
+        assert_ne!(input.id, first_id);
+        assert_eq!(input.input, "second.mp4");
+        assert_eq!(input.options, defaults);
+        assert_eq!(input.folder, Some(42));
+        assert!(input.overrides.is_empty());
+        assert!(input.ai_service.is_none() && input.base_config.is_none());
+        assert!(input.title.is_empty() && !input.custom_title);
+        assert!(ws.state.task(&task).unwrap().plan == submitted);
+        let input = ws.state.draft_mut().unwrap();
+        input.options.llm = true;
+        input.overrides.insert(Override::Proofread);
+        assert!(!ws.state.prepare_next_import("revised-second.mp4", defaults));
+        assert!(ws.state.draft().unwrap().options.llm);
+    }
+
+    #[test]
+    fn submitted_input_routes_use_the_new_default_without_moving_existing_tasks() {
+        let original_root = tempfile::tempdir().unwrap();
+        let next_root = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(original_root.path());
+        let original_library = ws.state.default_library.clone();
+        let mut submitted = plan(&original_library);
+        submitted.folder = Some(42);
+        let task = ws.state.enqueue(submitted.clone(), None).unwrap().0;
+        let input = ws.state.draft_mut().unwrap();
+        input.input = "first.mp4".into();
+        input.folder = Some(42);
+        input.submitted_task = Some(task.clone());
+        let next_library = ws
+            .register_library(next_root.path().to_owned(), "Next library".into(), true)
+            .unwrap();
+        let unchanged_input = ws.state.draft().unwrap().clone();
+        assert!(
+            !ws.state
+                .prepare_next_import("first.mp4", Default::default())
+        );
+        assert_eq!(ws.state.draft().unwrap(), &unchanged_input);
+
+        for switch_kind in [false, true] {
+            let mut state = ws.state.clone();
+            if switch_kind {
+                state.switch_source_kind(!unchanged_input.online, Default::default());
+            } else {
+                assert!(state.prepare_next_import("second.mp4", Default::default()));
+            }
+            let next = state.draft().unwrap();
+            assert_eq!(next.library_id, next_library);
+            assert_eq!(next.folder, None, "folder IDs belong to their library");
+            assert!(state.task(&task).unwrap().plan == submitted);
+        }
+    }
+
+    #[test]
+    fn changing_the_default_keeps_an_unsubmitted_destination_and_folder() {
+        let original_root = tempfile::tempdir().unwrap();
+        let next_root = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(original_root.path());
+        let original_library = ws.state.default_library.clone();
+        let input = ws.state.draft_mut().unwrap();
+        input.input = "current.mp4".into();
+        input.folder = Some(42);
+        let online = input.online;
+        ws.register_library(next_root.path().to_owned(), "Next library".into(), true)
+            .unwrap();
+        assert!(
+            !ws.state
+                .prepare_next_import("revised.mp4", Default::default())
+        );
+        assert_eq!(ws.state.draft().unwrap().library_id, original_library);
+        assert_eq!(ws.state.draft().unwrap().folder, Some(42));
+        ws.state.switch_source_kind(!online, Default::default());
+        assert_eq!(ws.state.draft().unwrap().library_id, original_library);
+        assert_eq!(ws.state.draft().unwrap().folder, Some(42));
+    }
+
+    #[test]
+    fn replacing_the_form_keeps_submitted_task_plans() {
         let dir = tempfile::tempdir().unwrap();
         let mut ws = test_workspace(dir.path());
         let library = ws.state.default_library.clone();
@@ -1915,7 +2118,7 @@ mod tests {
     }
 
     #[test]
-    fn source_mode_switch_clears_only_the_source_and_never_revives_an_old_form() {
+    fn source_mode_switch_preserves_unsubmitted_choices_but_resets_submitted_overrides() {
         let mut state = State::initial("/tmp/library".into(), Default::default());
         let input = state.draft_mut().unwrap();
         input.change_source("https://example.test/online-a".into());
@@ -1929,7 +2132,6 @@ mod tests {
         input.overrides.insert(Override::Formats);
         input.ai_service = Some("ai-service".into());
         input.retry_of = Some("older-task".into());
-        input.submitted_task = Some("submitted-task".into());
         let before = input.clone();
         state.switch_source_kind(true, Default::default());
         assert_eq!(state.draft().unwrap(), &before);
@@ -1953,6 +2155,14 @@ mod tests {
         assert!(state.draft().unwrap().online);
         assert!(state.draft().unwrap().input.is_empty());
         assert_eq!(state.draft().unwrap().options, before.options);
+        state.draft_mut().unwrap().submitted_task = Some("submitted-task".into());
+        let defaults = ConversionOptions::default();
+        state.switch_source_kind(false, defaults.clone());
+        let fresh = state.draft().unwrap();
+        assert_eq!(fresh.options, defaults);
+        assert!(fresh.overrides.is_empty() && fresh.ai_service.is_none());
+        assert!(fresh.retry_of.is_none() && fresh.submitted_task.is_none());
+        assert_eq!(fresh.folder, before.folder);
     }
 
     #[test]
