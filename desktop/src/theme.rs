@@ -303,7 +303,38 @@ pub fn semantic_label(
         )
 }
 
-/// Supporting guidance is grouped separately from the label and action.
+/// Short supporting text inside an existing setting or resource boundary.
+/// The enclosing item supplies the surface; a second frame would compete with it.
+pub fn supporting_info(
+    id: impl Into<gpui::ElementId>,
+    text: impl Into<gpui::SharedString>,
+) -> gpui::Div {
+    use gpui::{prelude::*, *};
+    div()
+        .flex()
+        .w_full()
+        .min_w_0()
+        .items_start()
+        .gap(rems(8. / 14.))
+        .child(
+            crate::icons::info()
+                .size(rems(16. / 14.))
+                .mt(rems(1. / 14.))
+                .flex_shrink_0()
+                .text_color(color(GRAY)),
+        )
+        .child(
+            accessible_text(id, text)
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .text_size(TEXT_AUX)
+                .line_height(rems(18. / 14.))
+                .text_color(color(GRAY)),
+        )
+}
+
+/// Standalone guidance has its own boundary. Inside a setting, use supporting_info.
 pub fn info_callout(
     id: impl Into<gpui::ElementId>,
     text: impl Into<gpui::SharedString>,
@@ -608,6 +639,19 @@ pub fn quiet(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
         .ghost()
         .rounded(RADIUS_PILL)
         .text_color(color(GRAY))
+}
+
+/// An icon action inside a field shares that field's boundary. Its compact
+/// target leaves room for the input's text and focus ring at every text scale.
+pub fn input_action(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
+    use gpui::Styled;
+    let size = rems(28. / 14.);
+    quiet(id)
+        .h(size)
+        .min_h(size)
+        .w(size)
+        .min_w(size)
+        .px_0()
 }
 
 /// Inset note for supporting information.

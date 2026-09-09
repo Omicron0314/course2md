@@ -421,18 +421,67 @@ pub fn model_field_with_error(
     let selected = input.read(cx).value().to_string();
     let field = input.clone();
     let status = match state.status() {
-        Status::Idle => None,
-        Status::Loading => Some("正在获取可用模型…".into()),
-        Status::Ready(models) if models.is_empty() => {
-            Some("服务未返回模型，可手动填写模型 ID".into())
+        Status::Idle => "可手动填写模型 ID，或点击右侧获取候选。".into(),
+        Status::Loading => "正在获取候选模型，仍可手动填写。".into(),
+        Status::Ready(models) if models.is_empty() => "服务未返回模型，可手动填写模型 ID。".into(),
+        Status::Ready(models) => {
+            format!("服务返回 {} 个候选，可展开选择或手动填写。", models.len())
         }
-        Status::Ready(models) => Some(format!("{} 个可选模型", models.len())),
-        Status::Failed(error) => Some(error.message()),
+        Status::Failed(error) => error.message(),
     };
-    let field_input = v_flex()
-        .flex_1()
-        .flex_basis(gpui::rems(240. / 14.))
-        .max_w_full()
+    let suffix = h_flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .child(
+            input_action(SharedString::from(format!("{id}-fetch")))
+                .icon(icons::refresh())
+                .tooltip(if matches!(state.status(), Status::Ready(_)) {
+                    "刷新模型列表"
+                } else {
+                    "获取模型列表"
+                })
+                .accessibility_label(if matches!(state.status(), Status::Ready(_)) {
+                    "刷新模型列表"
+                } else {
+                    "获取模型列表"
+                })
+                .loading(state.loading())
+                .disabled(disabled || state.loading())
+                .on_click(on_fetch),
+        )
+        .when(!models.is_empty(), |row| {
+            row.child(
+                input_action(SharedString::from(format!("{id}-choose")))
+                    .icon(icons::chevron_down())
+                    .tooltip("选择模型")
+                    .accessibility_label("从服务返回的候选中选择模型")
+                    .disabled(disabled)
+                    .dropdown_menu(move |menu, _, _| {
+                        models.iter().fold(menu, |menu, model| {
+                            let value = model.clone();
+                            let field = field.clone();
+                            let choices_current = choices_current.clone();
+                            menu.item(
+                                PopupMenuItem::new(model.clone())
+                                    .checked(*model == selected)
+                                    .on_click(move |_, window, cx| {
+                                        if choices_current.as_ref().is_none_or(|cancelled| {
+                                            cancelled.load(Ordering::Acquire)
+                                        }) {
+                                            return;
+                                        }
+                                        field.update(cx, |input, cx| {
+                                            input.set_value(value.clone(), window, cx)
+                                        });
+                                    }),
+                            )
+                        })
+                    }),
+            )
+        });
+    v_flex()
+        .w_full()
         .min_w_0()
         .gap_2()
         .child(
@@ -440,6 +489,7 @@ pub fn model_field_with_error(
                 .w_full()
                 .min_w_0()
                 .disabled(disabled)
+                .suffix(suffix)
                 .aria_label(
                     error
                         .map(|error| format!("模型 ID，{error}"))
@@ -459,88 +509,19 @@ pub fn model_field_with_error(
                 .text_size(TEXT_AUX)
                 .text_color(color(DANGER)),
             )
-        });
-    v_flex()
-        .w_full()
-        .min_w_0()
-        .gap_2()
+        })
         .child(
-            h_flex()
+            accessible_text(SharedString::from(format!("{id}-status")), status)
                 .w_full()
                 .min_w_0()
-                .gap_2()
-                .items_start()
-                .flex_wrap()
-                .child(field_input)
-                .child(
-                    h_flex()
-                        .max_w_full()
-                        .flex_shrink_0()
-                        .gap_2()
-                        .flex_wrap()
-                        .when(!models.is_empty(), |row| {
-                            row.child(
-                                outline_pill(SharedString::from(format!("{id}-choose")))
-                                    .icon(icons::chevron_down())
-                                    .label("选择模型")
-                                    .disabled(disabled)
-                                    .dropdown_menu(move |menu, _, _| {
-                                        models.iter().fold(menu, |menu, model| {
-                                            let value = model.clone();
-                                            let field = field.clone();
-                                            let choices_current = choices_current.clone();
-                                            menu.item(
-                                                PopupMenuItem::new(model.clone())
-                                                    .checked(*model == selected)
-                                                    .on_click(move |_, window, cx| {
-                                                        if choices_current.as_ref().is_none_or(
-                                                            |cancelled| {
-                                                                cancelled.load(Ordering::Acquire)
-                                                            },
-                                                        ) {
-                                                            return;
-                                                        }
-                                                        field.update(cx, |input, cx| {
-                                                            input.set_value(
-                                                                value.clone(),
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        });
-                                                    }),
-                                            )
-                                        })
-                                    }),
-                            )
-                        })
-                        .child(
-                            outline_pill(SharedString::from(format!("{id}-fetch")))
-                                .icon(icons::refresh())
-                                .label(if matches!(state.status(), Status::Ready(_)) {
-                                    "刷新模型"
-                                } else {
-                                    "获取模型"
-                                })
-                                .loading(state.loading())
-                                .disabled(disabled || state.loading())
-                                .on_click(on_fetch),
-                        ),
-                ),
+                .whitespace_normal()
+                .text_size(TEXT_AUX)
+                .text_color(color(if matches!(state.status(), Status::Failed(_)) {
+                    DANGER
+                } else {
+                    MUTED
+                })),
         )
-        .when_some(status, |view, status| {
-            view.child(
-                accessible_text(SharedString::from(format!("{id}-status")), status)
-                    .w_full()
-                    .min_w_0()
-                    .whitespace_normal()
-                    .text_size(TEXT_AUX)
-                    .text_color(color(if matches!(state.status(), Status::Failed(_)) {
-                        DANGER
-                    } else {
-                        MUTED
-                    })),
-            )
-        })
 }
 
 #[cfg(test)]

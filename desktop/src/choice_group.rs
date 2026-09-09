@@ -461,7 +461,13 @@ impl RenderOnce for SingleChoiceGroup {
             .child(lane);
         let reveal_id = SharedString::from(format!("choice-reveal-{:?}", self.id));
         if let Some(scroll) = self.reveal_in {
-            crate::focus_scroll::RevealFocus::new(reveal_id, group, scroll).into_any_element()
+            let reveal = crate::focus_scroll::RevealFocus::new(reveal_id, group, scroll);
+            if self.full_width {
+                reveal
+            } else {
+                reveal.inline()
+            }
+            .into_any_element()
         } else {
             group.into_any_element()
         }
