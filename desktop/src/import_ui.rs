@@ -264,6 +264,7 @@ fn conversion_gate(
     has_source: bool,
     needs_text_choice: bool,
     environment_ready: bool,
+    library_ready: bool,
     existing_note: bool,
 ) -> ConversionGate {
     if requested_revision != current_revision {
@@ -272,7 +273,7 @@ fn conversion_gate(
         ConversionGate::Wait
     } else if !has_source {
         ConversionGate::Stop
-    } else if needs_text_choice || !environment_ready {
+    } else if needs_text_choice || !environment_ready || !library_ready {
         ConversionGate::Wait
     } else if existing_note {
         ConversionGate::Stop
@@ -361,6 +362,7 @@ impl Desktop {
             self.source_preview.is_some(),
             self.subtitle_attention_required(),
             self.environment.is_some(),
+            !self.loading,
             self.existing_source_note().is_some(),
         ) {
             ConversionGate::Wait => cx.notify(),
@@ -2383,12 +2385,27 @@ impl Desktop {
         let existing_note_decision = linked_task.is_none()
             && self.matching_current_task().is_none()
             && self.existing_source_note().is_some();
+        let cancelled_notice = self
+            .current_input_task(cx)
+            .filter(|task| task.state == workspace::TaskState::Cancelled)
+            .map(|task| {
+                (
+                    task.id.clone(),
+                    crate::task_ui::task_attention_summary(task),
+                )
+            });
         let mut input = v_flex()
             .w_full()
             .min_w_0()
             .gap_4()
             .child(self.source_kind_tabs(cx))
             .child(self.box_source_input(window, cx));
+        if let Some((id, message)) = cancelled_notice {
+            input = input.child(info_callout(
+                SharedString::from(format!("cancelled-input-task-{id}")),
+                message,
+            ));
+        }
         if existing_note_decision {
             input = input.child(self.conversion_recovery(cx));
         }
@@ -2710,26 +2727,92 @@ mod tests {
             (false, true, true, true),
         ] {
             assert_eq!(
-                conversion_gate(start, 7, reading, source, text_choice, environment, false),
+                conversion_gate(
+                    start,
+                    7,
+                    reading,
+                    source,
+                    text_choice,
+                    environment,
+                    true,
+                    false
+                ),
                 ConversionGate::Wait,
             );
         }
         assert_eq!(
-            conversion_gate(start, 7, false, true, false, true, false),
+            conversion_gate(start, 7, false, true, false, true, true, false),
             ConversionGate::Submit
         );
         // Source replacement and duplicate content require a fresh intent/choice.
         assert_eq!(
-            conversion_gate(start, 8, true, false, false, true, false),
+            conversion_gate(start, 8, true, false, false, true, true, false),
             ConversionGate::Stop
         );
         assert_eq!(
-            conversion_gate(start, 7, false, true, false, true, true),
+            conversion_gate(start, 7, false, true, false, true, true, true),
             ConversionGate::Stop
         );
         assert_eq!(
-            conversion_gate(start, 7, false, false, false, true, false),
+            conversion_gate(start, 7, false, false, false, true, true, false),
             ConversionGate::Stop
+        );
+    }
+
+    #[test]
+    fn first_start_waits_for_library_scan_before_existing_note_decision() {
+        // A restored source and the environment can be ready before the async
+        // library scan replaces its initially empty (or stale) note list.
+        let start = 7;
+        for cached_note in [false, true] {
+            assert_eq!(
+                conversion_gate(start, 7, false, true, false, true, false, cached_note),
+                ConversionGate::Wait,
+            );
+        }
+        // The original Start is still pending when the scan reports a result.
+        assert_eq!(
+            conversion_gate(start, 7, false, true, false, true, true, true),
+            ConversionGate::Stop,
+        );
+        assert_eq!(
+            conversion_gate(start, 7, false, true, false, true, true, false),
+            ConversionGate::Submit,
+        );
+        assert_eq!(
+            conversion_gate(start, 8, false, true, false, true, false, false),
+            ConversionGate::Stop,
+        );
+    }
+
+    #[test]
+    fn explicit_new_version_follows_new_task_instead_of_previous_result() {
+        let (mut draft, mut tasks) = submitted_recovery_chain();
+        tasks[0].state = workspace::TaskState::Complete;
+        tasks[0].artifact = Some("versions/previous".into());
+        tasks[0].handled_by = None;
+        tasks[0].error = None;
+        tasks[1].id = "new-version".into();
+        tasks[1].parent = None;
+        tasks[1].plan.operation = Default::default();
+        draft.submitted_task = Some(tasks[1].id.clone());
+        let following = ConversionFollow::Preparing(7)
+            .submitted(7, tasks[1].id.clone())
+            .unwrap();
+        // The old version remains readable but is not the explicit new intent.
+        assert!(
+            following
+                .completed_task(true, 7, &draft, &tasks, &draft.input)
+                .is_none()
+        );
+        tasks[1].state = workspace::TaskState::Complete;
+        tasks[1].artifact = Some("versions/new-version".into());
+        assert_eq!(
+            following
+                .completed_task(true, 7, &draft, &tasks, &draft.input)
+                .unwrap()
+                .id,
+            "new-version",
         );
     }
 
@@ -2965,6 +3048,18 @@ mod tests {
                 .id,
             "final-attempt"
         );
+        // A cancelled recovery still belongs to this input for inline feedback,
+        // but must not fall back to an older readable result or follow new input.
+        tasks[2].state = workspace::TaskState::Cancelled;
+        tasks[2].artifact = None;
+        assert_eq!(
+            submitted_input_task(&draft, &tasks, &draft.input)
+                .unwrap()
+                .id,
+            "final-attempt"
+        );
+        assert!(completed_input_task(&draft, &tasks, &draft.input).is_none());
+        assert!(submitted_input_task(&draft, &tasks, "another-video").is_none());
         assert!(tasks[0] == original);
         assert_eq!(draft.submitted_task.as_deref(), Some("original"));
     }

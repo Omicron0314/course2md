@@ -1863,28 +1863,38 @@ impl Desktop {
                 if matches!(task.state, TaskState::Running | TaskState::Queued)
                     || (self.active_task.as_deref() == Some(&id) && self.job.is_some())
                 {
+                    let cancelling =
+                        task.state == TaskState::Pausing && task.intent == Intent::Cancel;
                     actions = actions
-                        .child(
-                            control(SharedString::from(format!("pause-{id}")))
-                                .label(if task.state == TaskState::Pausing {
-                                    "正在暂停…"
-                                } else {
-                                    "暂停"
-                                })
-                                .icon(icons::pause())
-                                .loading(task.state == TaskState::Pausing)
-                                .disabled(task.state == TaskState::Pausing)
-                                .on_click(cx.listener({
-                                    let id = id.clone();
-                                    move |this, _, _, cx| {
-                                        this.set_task_intent(id.clone(), Intent::Pause, cx)
-                                    }
-                                })),
-                        )
+                        .when(!cancelling, |actions| {
+                            actions.child(
+                                control(SharedString::from(format!("pause-{id}")))
+                                    .label(if task.state == TaskState::Pausing {
+                                        "正在暂停…"
+                                    } else {
+                                        "暂停"
+                                    })
+                                    .icon(icons::pause())
+                                    .loading(task.state == TaskState::Pausing)
+                                    .disabled(task.state == TaskState::Pausing)
+                                    .on_click(cx.listener({
+                                        let id = id.clone();
+                                        move |this, _, _, cx| {
+                                            this.set_task_intent(id.clone(), Intent::Pause, cx)
+                                        }
+                                    })),
+                            )
+                        })
                         .child(
                             control(SharedString::from(format!("cancel-{id}")))
                                 .icon(icons::close())
-                                .label("取消任务")
+                                .label(if cancelling {
+                                    "正在取消…"
+                                } else {
+                                    "取消任务"
+                                })
+                                .loading(cancelling)
+                                .disabled(cancelling)
                                 .on_click(cx.listener({
                                     let id = id.clone();
                                     move |this, _, _, cx| {
@@ -2366,28 +2376,37 @@ impl Desktop {
             TaskState::Running | TaskState::Queued | TaskState::Pausing
         ) || active
         {
+            let cancelling = task.state == TaskState::Pausing && task.intent == Intent::Cancel;
             actions = actions
-                .child(
-                    outline_pill(SharedString::from(format!("box-pause-{id}")))
-                        .icon(icons::pause())
-                        .label(if task.state == TaskState::Pausing {
-                            "正在暂停…"
-                        } else {
-                            "暂停生成"
-                        })
-                        .loading(task.state == TaskState::Pausing)
-                        .disabled(task.state == TaskState::Pausing)
-                        .on_click(cx.listener({
-                            let id = id.clone();
-                            move |this, _, _, cx| {
-                                this.set_task_intent(id.clone(), Intent::Pause, cx)
-                            }
-                        })),
-                )
+                .when(!cancelling, |actions| {
+                    actions.child(
+                        outline_pill(SharedString::from(format!("box-pause-{id}")))
+                            .icon(icons::pause())
+                            .label(if task.state == TaskState::Pausing {
+                                "正在暂停…"
+                            } else {
+                                "暂停生成"
+                            })
+                            .loading(task.state == TaskState::Pausing)
+                            .disabled(task.state == TaskState::Pausing)
+                            .on_click(cx.listener({
+                                let id = id.clone();
+                                move |this, _, _, cx| {
+                                    this.set_task_intent(id.clone(), Intent::Pause, cx)
+                                }
+                            })),
+                    )
+                })
                 .child(
                     quiet(SharedString::from(format!("box-cancel-{id}")))
                         .icon(icons::close())
-                        .label("取消任务")
+                        .label(if cancelling {
+                            "正在取消…"
+                        } else {
+                            "取消任务"
+                        })
+                        .loading(cancelling)
+                        .disabled(cancelling)
                         .on_click(cx.listener({
                             let id = id.clone();
                             move |this, _, _, cx| {
@@ -2879,6 +2898,10 @@ mod tests {
         let paused = "生成已暂停，进度已保留 / Generation paused; progress retained";
         assert!(matches!(
             task_feedback(TaskState::Paused, Some(paused)),
+            Some(TaskFeedback::Information(_))
+        ));
+        assert!(matches!(
+            task_feedback(TaskState::Cancelled, Some("任务已取消 / Task cancelled")),
             Some(TaskFeedback::Information(_))
         ));
         assert_eq!(
