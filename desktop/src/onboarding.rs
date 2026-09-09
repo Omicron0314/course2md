@@ -2170,11 +2170,7 @@ impl Desktop {
     fn setup_model_progress(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         // Reserve the phase, detail and bar region before the first worker sample.
         // Incoming progress must not move the pause or continue actions.
-        let mut view = v_flex()
-            .w_full()
-            .min_w_0()
-            .min_h(rems(80. / 14.))
-            .gap_3();
+        let mut view = v_flex().w_full().min_w_0().min_h(rems(80. / 14.)).gap_3();
         let mut has_phase = false;
         for (index, (stage, progress)) in self
             .progress

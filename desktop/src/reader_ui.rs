@@ -331,26 +331,40 @@ fn note_position_index(
     blocks: &[PreviewBlock],
     position: &workspace::ReadingPosition,
 ) -> Option<usize> {
-    position.paragraph.as_ref().and_then(|anchor| {
-        blocks.iter().enumerate()
-            .position(|(index, block)| block_anchor(block, index) == *anchor)
-    }).or_else(|| {
-        position.seconds.and_then(|seconds| {
-            nav::nearest_time(blocks.iter().enumerate().map(|(index, block)| {
-                (index, match block {
-                    PreviewBlock::Heading { seconds, .. } => *seconds,
-                    _ => None,
-                })
-            }), seconds).map(|(index, _)| index)
+    position
+        .paragraph
+        .as_ref()
+        .and_then(|anchor| {
+            blocks
+                .iter()
+                .enumerate()
+                .position(|(index, block)| block_anchor(block, index) == *anchor)
         })
-    })
+        .or_else(|| {
+            position.seconds.and_then(|seconds| {
+                nav::nearest_time(
+                    blocks.iter().enumerate().map(|(index, block)| {
+                        (
+                            index,
+                            match block {
+                                PreviewBlock::Heading { seconds, .. } => *seconds,
+                                _ => None,
+                            },
+                        )
+                    }),
+                    seconds,
+                )
+                .map(|(index, _)| index)
+            })
+        })
 }
 fn restored_reader_offset(
     layout: &nav::ReadingLayout,
     index: Option<usize>,
     position: &workspace::ReadingPosition,
 ) -> f32 {
-    index.and_then(|index| layout.restore(index, position.fraction, position.within))
+    index
+        .and_then(|index| layout.restore(index, position.fraction, position.within))
         .unwrap_or(position.offset.min(0.))
 }
 fn frame_label(title: &str, frame: &Frame, index: usize) -> String {
@@ -589,11 +603,16 @@ impl Desktop {
             |index| {
                 if self.result_tab == 0 {
                     (
-                        preview.blocks.get(index).map(|block| block_anchor(block, index)),
+                        preview
+                            .blocks
+                            .get(index)
+                            .map(|block| block_anchor(block, index)),
                         block_time(&preview.blocks, index),
                     )
                 } else {
-                    self.reader_ui.frames.get(index)
+                    self.reader_ui
+                        .frames
+                        .get(index)
                         .map(|frame| (Some(frame.anchor.clone()), frame.seconds))
                         .unwrap_or((None, None))
                 }
@@ -1474,9 +1493,7 @@ impl Desktop {
                         .w_full()
                         .min_w_0()
                         .whitespace_normal()
-                        .when(!compact, |title| {
-                            title.text_size(TEXT_DISPLAY)
-                        })
+                        .when(!compact, |title| title.text_size(TEXT_DISPLAY))
                         .when(compact, |title| {
                             title
                                 .text_ellipsis()
@@ -1560,15 +1577,23 @@ impl Desktop {
                             ))
                         })
                         .when(!exists, |row| {
-                            row.child(theme::accessible_text(
-                                "missing-original-video",
-                                "原视频暂不可用，笔记仍可阅读",
-                            ).text_size(TEXT_AUX).text_color(color(GRAY)))
+                            row.child(
+                                theme::accessible_text(
+                                    "missing-original-video",
+                                    "原视频暂不可用，笔记仍可阅读",
+                                )
+                                .text_size(TEXT_AUX)
+                                .text_color(color(GRAY)),
+                            )
                             .child(reveal(
                                 "reveal-relocate-reader-source",
                                 quiet("relocate-reader-source")
                                     .icon(IconName::FolderOpen)
-                                    .label(if self.reader_ui.source_loading { "正在核对视频…" } else { "重新定位原视频" })
+                                    .label(if self.reader_ui.source_loading {
+                                        "正在核对视频…"
+                                    } else {
+                                        "重新定位原视频"
+                                    })
                                     .loading(self.reader_ui.source_loading)
                                     .disabled(self.reader_ui.source_loading)
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1673,7 +1698,11 @@ impl Desktop {
                     } else {
                         "生成信息"
                     })
-                    .tooltip(if self.reader_ui.info_open { "收起生成信息" } else { "生成信息" })
+                    .tooltip(if self.reader_ui.info_open {
+                        "收起生成信息"
+                    } else {
+                        "生成信息"
+                    })
                     .when(!compact, |button| {
                         button.label(if self.reader_ui.info_open {
                             "收起生成信息"
@@ -2641,7 +2670,8 @@ impl Desktop {
                             .role(Role::Heading)
                             .text_size(TEXT_TITLE)
                             .font_weight(FontWeight::SEMIBOLD),
-                    ).into_any_element();
+                    )
+                    .into_any_element();
                 let summary_label = if let Some(index) = preview.blocks.iter().position(|block| {
                     matches!(block, PreviewBlock::Heading { anchor, .. } if anchor == "summary")
                 }) {
@@ -3487,20 +3517,23 @@ impl Desktop {
                     .child(
                         control("image-previous")
                             .icon(IconName::ChevronLeft)
-                            .w(CONTROL_HEIGHT).px_0()
+                            .w(CONTROL_HEIGHT)
+                            .px_0()
                             .accessibility_label("上一张")
                             .tooltip("上一张 · ←")
                             .disabled(index == 0)
                             .on_click(cx.listener(|this, _, _, cx| this.move_reader_image(-1, cx))),
                     )
-                    .child(theme::accessible_text(
-                        "image-number",
-                        format!("{} / {count}", index + 1),
-                    ).whitespace_nowrap().text_size(TEXT_BODY))
+                    .child(
+                        theme::accessible_text("image-number", format!("{} / {count}", index + 1))
+                            .whitespace_nowrap()
+                            .text_size(TEXT_BODY),
+                    )
                     .child(
                         control("image-next")
                             .icon(IconName::ChevronRight)
-                            .w(CONTROL_HEIGHT).px_0()
+                            .w(CONTROL_HEIGHT)
+                            .px_0()
                             .accessibility_label("下一张")
                             .tooltip("下一张 · →")
                             .disabled(index + 1 >= count)
@@ -3509,7 +3542,8 @@ impl Desktop {
                     .child(
                         control("image-zoom-out")
                             .icon(icons::zoom_out())
-                            .w(CONTROL_HEIGHT).px_0()
+                            .w(CONTROL_HEIGHT)
+                            .px_0()
                             .accessibility_label("缩小")
                             .tooltip("缩小 · −")
                             .disabled(scale <= 0.1)
@@ -3517,14 +3551,23 @@ impl Desktop {
                                 this.zoom_reader_image(Some(0.8), window, cx)
                             })),
                     )
-                    .child(theme::accessible_text(
-                        "image-scale",
-                        if scale > 0. { format!("{}%", (scale * 100.).round() as u32) } else { "—".into() },
-                    ).whitespace_nowrap().text_size(TEXT_BODY))
+                    .child(
+                        theme::accessible_text(
+                            "image-scale",
+                            if scale > 0. {
+                                format!("{}%", (scale * 100.).round() as u32)
+                            } else {
+                                "—".into()
+                            },
+                        )
+                        .whitespace_nowrap()
+                        .text_size(TEXT_BODY),
+                    )
                     .child(
                         control("image-zoom-in")
                             .icon(icons::zoom_in())
-                            .w(CONTROL_HEIGHT).px_0()
+                            .w(CONTROL_HEIGHT)
+                            .px_0()
                             .accessibility_label("放大")
                             .tooltip("放大 · +")
                             .disabled(scale >= 4.)
@@ -3535,7 +3578,8 @@ impl Desktop {
                     .child(
                         control("image-fit")
                             .icon(icons::fit_screen())
-                            .w(CONTROL_HEIGHT).px_0()
+                            .w(CONTROL_HEIGHT)
+                            .px_0()
                             .accessibility_label("适合窗口")
                             .tooltip("适合窗口 · 0")
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -3636,33 +3680,39 @@ impl Desktop {
             .overflow_y_scroll()
             .track_scroll(&viewer.scroll);
         if let Some(caption) = frame.caption {
-            details = details.child(paragraph(
-                "image-caption",
-                format!("原图说明：{caption}"),
-                0,
-                Vec::new(),
-            ).flex_shrink_0());
+            details = details.child(
+                paragraph(
+                    "image-caption",
+                    format!("原图说明：{caption}"),
+                    0,
+                    Vec::new(),
+                )
+                .flex_shrink_0(),
+            );
         }
         if !frame.transcript.is_empty() {
-            details = details.child(paragraph(
-                "image-transcript",
-                format!(
-                    "{}：{}",
-                    if frame.seconds.is_some() {
-                        "同期转录"
-                    } else {
-                        "相邻正文"
-                    },
-                    frame.transcript
-                ),
-                1,
-                Vec::new(),
-            ).flex_shrink_0());
+            details = details.child(
+                paragraph(
+                    "image-transcript",
+                    format!(
+                        "{}：{}",
+                        if frame.seconds.is_some() {
+                            "同期转录"
+                        } else {
+                            "相邻正文"
+                        },
+                        frame.transcript
+                    ),
+                    1,
+                    Vec::new(),
+                )
+                .flex_shrink_0(),
+            );
         }
         if has_details && Self::image_details_open(viewer, window) {
-            body = body.child(details).child(
-                Scrollbar::vertical(&viewer.scroll).mode(ScrollbarMode::Always),
-            );
+            body = body
+                .child(details)
+                .child(Scrollbar::vertical(&viewer.scroll).mode(ScrollbarMode::Always));
         }
         body.into_any_element()
     }
@@ -4050,10 +4100,24 @@ mod tests {
 
     fn reading_blocks() -> Vec<PreviewBlock> {
         vec![
-            PreviewBlock::Heading { text: "摘要".into(), anchor: "summary".into(), seconds: None },
-            PreviewBlock::Paragraph { text: "摘要正文".into(), anchor: "summary-tldr".into() },
-            PreviewBlock::Heading { text: "第一节".into(), anchor: "section-1".into(), seconds: Some(5.) },
-            PreviewBlock::Paragraph { text: "可在放大字号后继续阅读的长正文".into(), anchor: "section-1-text".into() },
+            PreviewBlock::Heading {
+                text: "摘要".into(),
+                anchor: "summary".into(),
+                seconds: None,
+            },
+            PreviewBlock::Paragraph {
+                text: "摘要正文".into(),
+                anchor: "summary-tldr".into(),
+            },
+            PreviewBlock::Heading {
+                text: "第一节".into(),
+                anchor: "section-1".into(),
+                seconds: Some(5.),
+            },
+            PreviewBlock::Paragraph {
+                text: "可在放大字号后继续阅读的长正文".into(),
+                anchor: "section-1-text".into(),
+            },
         ]
     }
 
@@ -4063,15 +4127,22 @@ mod tests {
         let mut initial = nav::ReadingLayout::default();
         initial.record(1, 48., 60.);
         let position = capture_reader_position(&initial, 0., |index| {
-            (Some(block_anchor(&blocks[index], index)), block_time(&blocks, index))
-        }).unwrap();
+            (
+                Some(block_anchor(&blocks[index], index)),
+                block_time(&blocks, index),
+            )
+        })
+        .unwrap();
         // Loading initially exposes only the paragraph. Its later measured
         // heading and a larger type scale must not replace the document top.
         let mut resized = nav::ReadingLayout::default();
         resized.record(0, 12., 36.);
         resized.record(1, 64., 120.);
         assert!(position.paragraph.is_none());
-        assert_eq!(restored_reader_offset(&resized, note_position_index(&blocks, &position), &position), 0.);
+        assert_eq!(
+            restored_reader_offset(&resized, note_position_index(&blocks, &position), &position),
+            0.
+        );
     }
 
     #[test]
@@ -4099,11 +4170,16 @@ mod tests {
         let mut initial = nav::ReadingLayout::default();
         initial.record(3, 220., 200.);
         let position = capture_reader_position(&initial, -270., |index| {
-            (Some(block_anchor(&blocks[index], index)), block_time(&blocks, index))
-        }).unwrap();
+            (
+                Some(block_anchor(&blocks[index], index)),
+                block_time(&blocks, index),
+            )
+        })
+        .unwrap();
         let mut resized = nav::ReadingLayout::default();
         resized.record(3, 400., 400.);
-        let offset = restored_reader_offset(&resized, note_position_index(&blocks, &position), &position);
+        let offset =
+            restored_reader_offset(&resized, note_position_index(&blocks, &position), &position);
         assert_eq!(offset, -500.);
         let (index, within, height) = resized.top_item(offset).unwrap();
         assert_eq!(index, 3);
