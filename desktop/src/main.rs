@@ -244,6 +244,7 @@ struct Desktop {
     preview: Option<backend::Preview>,
     read_generation: u64,
     reading: bool,
+    reader_failure_notice: Option<String>,
     reader_scroll: ScrollHandle,
     reader_saved_offset: f32,
     exporting: bool,
@@ -522,6 +523,7 @@ impl Desktop {
             preview: None,
             read_generation: 0,
             reading: false,
+            reader_failure_notice: None,
             reader_scroll: ScrollHandle::new(),
             reader_saved_offset: f32::NAN,
             exporting: false,
@@ -1096,6 +1098,12 @@ impl Desktop {
         self.read_generation = self.read_generation.wrapping_add(1);
         let generation = self.read_generation;
         let origin = self.page;
+        let followed_notice = follow.as_ref().and_then(|_| {
+            self.message
+                .as_ref()
+                .filter(|message| message.starts_with("已加入任务"))
+                .cloned()
+        });
         self.result_origin = if origin == Page::Result {
             if self.result_origin == Page::Result {
                 Page::Library
@@ -1138,13 +1146,11 @@ impl Desktop {
                                 this.workspace_error = Some(format!("阅读状态尚未保存：{error:#}"));
                             }
                         }
-                        if this
-                            .message
-                            .as_deref()
-                            .is_some_and(|m| m.starts_with("已加入任务"))
-                        {
-                            this.message = None;
-                        }
+                        settle_reader_notice(
+                            &mut this.message,
+                            &mut this.reader_failure_notice,
+                            followed_notice.as_deref(),
+                        );
                         this.result_tab = 0;
                         this.preview = Some(preview);
                         this.apply_course_title_aliases();
@@ -1169,12 +1175,79 @@ impl Desktop {
                             _ =>
                                 "这份笔记暂时无法读取。请检查保存位置中的文件，恢复可读版本后再次阅读，也可刷新课程库。",
                         }.into());
+                        this.reader_failure_notice = this.message.clone();
                     }
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+}
+
+/// A completed read owns only its previous failure and the notice captured
+/// when following this conversion. Newer, unrelated feedback stays visible.
+fn settle_reader_notice(
+    current: &mut Option<String>,
+    failure: &mut Option<String>,
+    followed_notice: Option<&str>,
+) {
+    let failed_notice = failure.take();
+    if current.as_deref().is_some_and(|message| {
+        Some(message) == failed_notice.as_deref() || Some(message) == followed_notice
+    }) {
+        *current = None;
+    }
+}
+
+#[cfg(test)]
+mod reader_notice_tests {
+    use super::settle_reader_notice;
+
+    #[test]
+    fn successful_retry_clears_its_failed_read_notice() {
+        let mut message = Some("笔记文件暂时无法访问".into());
+        let mut failure = message.clone();
+        settle_reader_notice(&mut message, &mut failure, None);
+        assert!(message.is_none());
+        assert!(failure.is_none());
+    }
+
+    #[test]
+    fn successful_retry_preserves_newer_unrelated_feedback() {
+        for newer in ["分类已恢复", "已加入任务：另一份笔记"] {
+            let mut message = Some(newer.into());
+            let mut failure = Some("笔记文件暂时无法访问".into());
+            settle_reader_notice(&mut message, &mut failure, None);
+            assert_eq!(message.as_deref(), Some(newer));
+            assert!(failure.is_none());
+        }
+    }
+
+    #[test]
+    fn followed_completion_only_clears_its_captured_notice() {
+        let followed = "已加入任务：当前笔记";
+        for (current, expected) in [
+            (followed, None),
+            ("已加入任务：另一份笔记", Some("已加入任务：另一份笔记")),
+        ] {
+            let mut message = Some(current.into());
+            settle_reader_notice(&mut message, &mut None, Some(followed));
+            assert_eq!(message.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn success_does_not_recreate_dismissed_or_clear_unowned_messages() {
+        let mut dismissed = None;
+        let mut failure = Some("笔记文件暂时无法访问".into());
+        settle_reader_notice(&mut dismissed, &mut failure, None);
+        assert!(dismissed.is_none());
+        assert!(failure.is_none());
+
+        let mut unowned = Some("笔记文件暂时无法访问".into());
+        settle_reader_notice(&mut unowned, &mut None, None);
+        assert!(unowned.is_some());
     }
 }
 
