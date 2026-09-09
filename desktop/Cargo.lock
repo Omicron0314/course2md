@@ -1409,6 +1409,7 @@ dependencies = [
  "gpui_platform",
  "image",
  "libc",
+ "same-file",
  "security-framework",
  "serde",
  "serde_json",

@@ -74,6 +74,10 @@ pub struct PreparedMove {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryStamp {
     canonical: PathBuf,
+    // Keep the Windows handle alive so its volume/file identity cannot be
+    // recycled while the user is confirming this directory.
+    #[cfg(windows)]
+    identity: std::sync::Arc<same_file::Handle>,
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -84,12 +88,19 @@ pub struct DirectoryStamp {
 /// even if a removable disk or a directory at that path changes meanwhile.
 pub fn directory_stamp(path: &Path) -> Result<DirectoryStamp> {
     let canonical = std::fs::canonicalize(path).context("保存位置暂时不可访问")?;
+    #[cfg(windows)]
+    let identity = std::sync::Arc::new(same_file::Handle::from_path(&canonical)?);
+    #[cfg(windows)]
+    let metadata = identity.as_file().metadata()?;
+    #[cfg(not(windows))]
     let metadata = std::fs::metadata(&canonical)?;
     ensure!(metadata.is_dir(), "保存位置不是文件夹");
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     Ok(DirectoryStamp {
         canonical,
+        #[cfg(windows)]
+        identity,
         #[cfg(unix)]
         device: metadata.dev(),
         #[cfg(unix)]
@@ -669,13 +680,15 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn association_confirmation_detects_a_replaced_directory() {
         let temp = tempfile::tempdir().unwrap();
         let location = temp.path().join("library");
         std::fs::create_dir(&location).unwrap();
         std::fs::write(location.join("note.md"), "saved notes").unwrap();
         let stamp = directory_stamp(&location).unwrap();
+        assert_eq!(stamp, directory_stamp(&location).unwrap());
+        std::fs::write(location.join("another-note.md"), "new notes").unwrap();
+        assert_eq!(stamp, directory_stamp(&location).unwrap());
         std::fs::rename(&location, temp.path().join("original-library")).unwrap();
         std::fs::create_dir(&location).unwrap();
         assert_ne!(stamp, directory_stamp(&location).unwrap());
