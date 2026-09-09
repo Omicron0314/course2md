@@ -23,13 +23,13 @@ Reserve common action/value slots across a collection. A short title must not pu
 
 ### A form grid is not two distant edges
 
-Use one content width for a form group. Choose its label and control columns from the longest actual label and required control width, with a consistent gap. Wide windows may leave quiet outer space; they do not require labels and switches at opposite ends of a very wide pane.
+Bound the whole setting unit to a useful content width. Inside it, align trailing switches and associated actions to the item edge; keep the label and explanation together. For choices that need more space, allow the value region to reflow below its label. Input editors can use top labels. A global fixed label width or control cap is not an alternative to understanding the content type.
 
 If `usable width < label minimum + gap + control minimum`, put the control under the label at the same text ruler. Recompute from current font measurement. Do not create an arbitrary 520px subcolumn or breakpoint that ignores 200% text. A selector's required width includes icons, labels, gaps, segment padding, outer track padding and borders.
 
 Groups have a closer internal rhythm than their external separation. Start with 8px inside icon/label clusters, 12–16px between related rows, and 24–32px between meaningful groups. These are project starting tokens; adjust the shared role when content requires it. Do not separate an explanation from its action to fill spare height.
 
-Cards hold independent subjects or entry points. A form section usually needs a heading and spacing. Information panels grow to fit a short explanation and stay next to its decision. A screen crowded by help may need shorter help or progressive disclosure, not smaller type.
+Cards hold independent subjects or entry points. A setting may own a surface containing its label, value, effect and action; a section around such items usually needs only heading and spacing. Information panels grow to fit a short explanation. Within a setting surface, use the information icon and supporting text without another frame. A screen crowded by help may need shorter help or progressive disclosure, not smaller type.
 
 ## Type and weight
 
