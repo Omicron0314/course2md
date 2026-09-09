@@ -6,19 +6,15 @@ use crate::preferences::{
     ServiceDraft, ServicePurpose, ServiceTestEvidence, ServiceVersion, TestOutcome,
 };
 use crate::service_test::{self, TestKind};
-use crate::settings_ui::{
-    field_label, settings_detail_row, settings_field_row, settings_row, settings_value,
-};
+use crate::settings_ui::{field_label, settings_detail_row, settings_value};
 use crate::theme::*;
 use crate::*;
 use course2md::{
     config::{AsrProvider, model_dir_from},
     models::status::CacheState,
 };
-use gpui_component::{
-    menu::{DropdownMenu, PopupMenuItem},
-    switch::Switch,
-};
+use gpui_component::switch::Switch;
+use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -28,6 +24,7 @@ use std::sync::{
 enum Step {
     Engine,
     Ai,
+    Account,
     Model,
 }
 
@@ -49,6 +46,7 @@ struct ServiceSetup {
     test_serial: u64,
     details_open: bool,
     show_key: bool,
+    models: crate::model_discovery::State,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -86,13 +84,15 @@ impl ServiceSetup {
             })
             .collect();
         let subscriptions = inputs
-            .values()
-            .map(|input| {
+            .iter()
+            .map(|(field, input)| {
+                let field = *field;
                 cx.subscribe_in(input, window, move |this, _, event, _, cx| {
                     if matches!(event, InputEvent::Change) && this.onboarding.active {
                         let service = this.onboarding.service_mut(purpose);
                         service.errors.clear();
                         service.evidence.clear();
+                        if matches!(field, InputField::Address | InputField::Key) { service.models.invalidate(); }
                         this.onboarding.notice = None;
                         cx.notify();
                     }
@@ -110,6 +110,7 @@ impl ServiceSetup {
             test_serial: 0,
             details_open: false,
             show_key: false,
+            models: crate::model_discovery::State::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -146,6 +147,7 @@ pub(crate) struct State {
     step: Step,
     session: u64,
     provider: Option<AsrProvider>,
+    local_provider: Option<AsrProvider>,
     model: String,
     ai_proofread: bool,
     ai_summary: bool,
@@ -154,6 +156,7 @@ pub(crate) struct State {
     notice: Option<(String, bool)>,
     finish_failed: bool,
     model_details_open: bool,
+    engine_details_open: bool,
     model_preparation: Option<ModelPreparation>,
     model_status_request: Option<ModelRequest>,
     model_return_page: Option<Page>,
@@ -167,6 +170,7 @@ impl State {
             step: Step::Engine,
             session: 0,
             provider: None,
+            local_provider: None,
             model: "qwen3-1.7b".into(),
             ai_proofread: true,
             ai_summary: false,
@@ -175,6 +179,7 @@ impl State {
             notice: None,
             finish_failed: false,
             model_details_open: false,
+            engine_details_open: false,
             model_preparation: None,
             model_status_request: None,
             model_return_page: None,
@@ -204,6 +209,111 @@ fn provider_label(provider: Option<AsrProvider>) -> &'static str {
         Some(AsrProvider::Npu) => "Intel NPU",
         Some(AsrProvider::Api) => "语音服务",
     }
+}
+
+#[derive(Clone, Copy)]
+enum ProviderChoice {
+    Local,
+    Online,
+    Engine(Option<AsrProvider>),
+}
+
+/// Ask the same validator used before transcription. Explicit scratch paths and
+/// a provider keep this check independent of user files, devices and environment.
+fn setup_model_supported(provider: AsrProvider, model: &str) -> bool {
+    if provider == AsrProvider::Api || model.trim().is_empty() {
+        return false;
+    }
+    let mut file = course2md::settings::ConfigFile::default();
+    file.defaults.provider = Some(provider);
+    file.defaults.asr_model = Some(model.to_owned());
+    file.defaults.out = Some(PathBuf::from("."));
+    file.defaults.model_dir = Some(PathBuf::from("."));
+    course2md::options::resolve(String::new(), &Default::default(), &file)
+        .is_ok_and(|config| config.validate_asr_with_auth(false, false).is_ok())
+}
+
+/// Cache inspection uses canonical names, while the saved selection can retain
+/// a compatible alias. Never normalize an unsupported value into another model.
+fn setup_cache_model(provider: AsrProvider, model: &str) -> String {
+    if !setup_model_supported(provider, model) {
+        return model.to_owned();
+    }
+    match provider {
+        AsrProvider::Cpu | AsrProvider::Gpu => "qwen3-1.7b".into(),
+        AsrProvider::Coreml => course2md::apple::resolve_model(Some(model))
+            .unwrap_or_else(|_| model.to_owned()),
+        _ => model.to_owned(),
+    }
+}
+
+fn apply_provider_choice(
+    provider: &mut Option<AsrProvider>,
+    local_provider: &mut Option<AsrProvider>,
+    model: &mut String,
+    choice: ProviderChoice,
+    recommended: AsrProvider,
+) -> Option<String> {
+    let next = match choice {
+        ProviderChoice::Online | ProviderChoice::Engine(Some(AsrProvider::Api)) => {
+            if *provider != Some(AsrProvider::Api) {
+                *local_provider = *provider;
+            }
+            Some(AsrProvider::Api)
+        }
+        ProviderChoice::Local => *local_provider,
+        ProviderChoice::Engine(selected) => {
+            *local_provider = selected;
+            selected
+        }
+    };
+    *provider = next;
+    if next == Some(AsrProvider::Api) {
+        return None;
+    }
+    let resolved = next.unwrap_or(recommended);
+    if setup_model_supported(resolved, model) {
+        return None;
+    }
+    let previous = std::mem::replace(model, "qwen3-1.7b".into());
+    Some(format!(
+        "{} 不支持“{}”，已改用 Qwen3 1.7B。",
+        provider_label(Some(resolved)), previous
+    ))
+}
+
+/// A pre-existing alias or repository remains an explicit, visible choice.
+fn local_model_choices(provider: AsrProvider, current: &str) -> Vec<(String, String, String)> {
+    let mut choices = vec![(
+        "qwen3-1.7b".to_owned(),
+        "Qwen3 1.7B".to_owned(),
+        "推荐 · 优先识别质量，资源占用较高".to_owned(),
+    )];
+    if matches!(provider, AsrProvider::Coreml | AsrProvider::Npu) {
+        choices.extend([
+            ("qwen3-0.6b".into(), "Qwen3 0.6B".into(), "轻量 · 下载与内存占用更少".into()),
+            ("whisper".into(), "Whisper".into(), "兼容 Whisper 模型".into()),
+        ]);
+    }
+    if provider == AsrProvider::Npu {
+        choices.extend([
+            ("whisper-tiny".into(), "Whisper Tiny".into(), "轻量版本".into()),
+            ("whisper-base".into(), "Whisper Base".into(), "基础版本".into()),
+            ("whisper-small".into(), "Whisper Small".into(), "较大版本".into()),
+        ]);
+    }
+    if !choices.iter().any(|(id, _, _)| id == current) {
+        choices.push((
+            current.to_owned(),
+            current.to_owned(),
+            if setup_model_supported(provider, current) {
+                "当前配置 · 已保留"
+            } else {
+                "当前配置不适用于此引擎，请选择其他模型"
+            }.into(),
+        ));
+    }
+    choices
 }
 
 fn engine_preferences(
@@ -311,6 +421,9 @@ impl Desktop {
         self.onboarding.session += 1;
         let generation = self.preferences.generation();
         self.onboarding.provider = generation.options.provider;
+        if generation.options.provider != Some(AsrProvider::Api) {
+            self.onboarding.local_provider = generation.options.provider;
+        }
         self.onboarding.model = generation
             .options
             .asr_model
@@ -325,12 +438,49 @@ impl Desktop {
             self.onboarding.ai_proofread = true;
         }
         self.onboarding.model_details_open = false;
+        self.onboarding.engine_details_open = self.onboarding.provider.is_some_and(|provider| provider != AsrProvider::Api);
         self.onboarding.finish_failed = false;
         self.onboarding.model_status_request = None;
         self.onboarding.model_return_page = None;
         self.onboarding.active = true;
         self.setup_step(Step::Engine, cx);
         self.root_focus.focus(window, cx);
+    }
+
+    fn select_setup_route(&mut self, local: bool, cx: &mut Context<Self>) {
+        self.apply_setup_provider_choice(
+            if local { ProviderChoice::Local } else { ProviderChoice::Online },
+            cx,
+        );
+    }
+
+    fn select_setup_provider(&mut self, provider: Option<AsrProvider>, cx: &mut Context<Self>) {
+        self.apply_setup_provider_choice(ProviderChoice::Engine(provider), cx);
+    }
+
+    fn apply_setup_provider_choice(&mut self, choice: ProviderChoice, cx: &mut Context<Self>) {
+        let recommended = self.recommended_local_provider();
+        let state = &mut self.onboarding;
+        let notice = apply_provider_choice(
+            &mut state.provider,
+            &mut state.local_provider,
+            &mut state.model,
+            choice,
+            recommended,
+        );
+        state.notice = notice.map(|message| (message, false));
+        cx.notify();
+    }
+
+    fn select_setup_model(&mut self, model: &str, cx: &mut Context<Self>) {
+        let provider = self.onboarding.provider.unwrap_or_else(|| self.recommended_local_provider());
+        if setup_model_supported(provider, model) {
+            self.onboarding.model = model.to_owned();
+            self.onboarding.notice = None;
+        } else {
+            self.onboarding.notice = Some(("此模型不适用于当前引擎，请选择其他模型。".into(), true));
+        }
+        cx.notify();
     }
 
     fn hydrate_setup_service(
@@ -353,6 +503,7 @@ impl Desktop {
         service.draft = draft.clone();
         service.original = original;
         service.pending_version = None;
+        service.models.invalidate();
         service.errors.clear();
         service.evidence.clear();
         service.details_open = false;
@@ -374,6 +525,9 @@ impl Desktop {
         if step != Step::Model {
             self.onboarding.model_status_request = None;
             self.onboarding.model_return_page = None;
+        }
+        if step == Step::Account {
+            self.refresh_account(cx);
         }
         self.onboarding.step = step;
         self.onboarding.notice = None;
@@ -617,7 +771,7 @@ impl Desktop {
             if purpose == ServicePurpose::Speech {
                 Step::Ai
             } else {
-                Step::Model
+                Step::Account
             },
             cx,
         );
@@ -626,6 +780,12 @@ impl Desktop {
     fn save_setup_engine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.onboarding.provider == Some(AsrProvider::Api) {
             self.continue_setup_service(ServicePurpose::Speech, window, cx);
+            return;
+        }
+        let provider = self.onboarding.provider.unwrap_or_else(|| self.recommended_local_provider());
+        if !setup_model_supported(provider, &self.onboarding.model) {
+            self.onboarding.notice = Some(("当前模型不适用于所选引擎，请选择其他模型。".into(), true));
+            cx.notify();
             return;
         }
         let next = engine_preferences(
@@ -645,7 +805,7 @@ impl Desktop {
         self.onboarding.ai.cancel();
         // Keep this private edit valid when the user returns within the guide.
         // Only finishing the guide discards unpublished service drafts.
-        self.setup_step(Step::Model, cx);
+        self.setup_step(Step::Account, cx);
     }
 
     fn setup_model_request(&self) -> ModelRequest {
@@ -657,7 +817,7 @@ impl Desktop {
                     .onboarding
                     .provider
                     .unwrap_or_else(|| self.recommended_local_provider()),
-                model: self.onboarding.model.clone(),
+                model: setup_cache_model(self.onboarding.provider.unwrap_or_else(|| self.recommended_local_provider()), &self.onboarding.model),
                 root: model_dir_from(self.preferences.generation().options.model_dir.as_deref()),
             })
     }
@@ -721,6 +881,7 @@ impl Desktop {
     fn leave_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for purpose in [ServicePurpose::Speech, ServicePurpose::Ai] {
             self.onboarding.service(purpose).cancel();
+            self.onboarding.service_mut(purpose).models.invalidate();
             let id = self.onboarding.service(purpose).draft.id.clone();
             let _ = self.preferences.discard_service_draft(&id);
             self.onboarding.service(purpose).inputs[&InputField::Key]
@@ -746,219 +907,156 @@ impl Desktop {
     ) -> AnyElement {
         self.retain_setup_model_result();
         let step = self.onboarding.step;
-        let (number, title, description) = match step {
-            Step::Engine => (
-                1,
-                "设置默认识别方式",
-                "后续生成笔记会使用这些默认选项。有字幕时优先使用字幕。",
-            ),
-            Step::Ai => (
-                2,
-                "配置 AI 服务",
-                "AI 可以校对文字和生成摘要。没有 AI 服务，也能生成笔记。",
-            ),
-            Step::Model => (
-                3,
-                "准备识别模型",
-                "现在准备模型，或先使用视频字幕，稍后再下载。",
-            ),
+        let (number, title, description, icon) = match step {
+            Step::Engine => (1, "默认识别方式", "用于后续转换；有字幕时优先使用字幕。", icons::microphone()),
+            Step::Ai => (2, "连接 AI 服务", "用于校对文字和生成摘要，也可以稍后配置。", icons::auto_fix()),
+            Step::Account => (3, "连接 Bilibili", "登录后可读取账号有权访问的视频与字幕。", icons::bilibili()),
+            Step::Model if self.onboarding.provider == Some(AsrProvider::Api) => (4, "准备就绪", "转换时将使用已保存的语音服务。", icons::circle_check()),
+            Step::Model => (4, "准备识别模型", "模型保存在本机。下载期间也可以使用已有字幕。", icons::download()),
         };
         let content = match step {
             Step::Engine => self.setup_engine_content(window, cx),
             Step::Ai => self.setup_service_content(ServicePurpose::Ai, window, cx),
+            Step::Account => self.account_onboarding_page(window, cx),
             Step::Model => self.setup_model_content(window, cx),
         };
-        let compact = f32::from(window.viewport_size().height) < f32::from(window.rem_size()) * 32.;
-        let heading = v_flex()
-            .flex_shrink_0()
-            .gap_2()
-            .when(!compact, |view| {
-                view.child(
-                    help("setup-step", format!("使用引导 · {number} / 3")).text_size(TEXT_AUX),
-                )
-            })
-            .child(
-                settings_value("setup-title", title)
-                    .role(Role::Heading)
-                    .text_size(TEXT_DISPLAY)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
-            .when(!compact, |view| {
-                view.child(help("setup-description", description))
-            });
-        let scrolling_content = v_flex()
-            .w_full()
-            .min_w_0()
-            .gap_4()
-            .child(heading)
-            .child(content.pb_4())
+        let scale = f32::from(window.rem_size()) / 14.;
+        let width = (760. * scale.min(1.5)).min(f32::from(window.viewport_size().width) - 48.).max(280.);
+        let available_height = (f32::from(window.viewport_size().height) - (40. * scale + 16.) - 48.).max(160.);
+        let compact = available_height < 540. * scale;
+        let steps = ["识别方式", "AI 服务", "Bilibili", "识别模型"];
+        let heading = v_flex().w_full().min_w_0().gap_3()
+            .when(!compact, |heading| heading.child(h_flex().w_full().min_w_0().items_center().gap_2()
+                .children(steps.into_iter().enumerate().map(|(index, label)| {
+                    let current = index + 1 == number;
+                    h_flex().flex_1().min_w_0().gap_2().items_center()
+                        .child(div().size(rems(24. / 14.)).flex_shrink_0().rounded_full()
+                            .flex().items_center().justify_center()
+                            .bg(color(if current { ACCENT } else { INSET }))
+                            .text_color(color(if current { ON_PRIMARY } else { GRAY }))
+                            .text_size(TEXT_AUX).child((index + 1).to_string()))
+                        .when(!compact, |v| v.child(div().min_w_0().text_size(TEXT_AUX)
+                            .text_color(color(if current { INK } else { GRAY })).child(label)))
+                }))))
+            .child(h_flex().w_full().min_w_0().gap_3().items_center()
+                .child(icon.size(rems(if compact { 20. } else { 28. } / 14.)).flex_shrink_0().when(step != Step::Account, |icon| icon.text_color(color(ACCENT))))
+                .child(settings_value("setup-title", title).role(Role::Heading)
+                    .flex_1().min_w_0()
+                    .text_size(if compact { TEXT_TITLE } else { TEXT_DISPLAY }).font_weight(FontWeight::SEMIBOLD))
+                .when(compact, |row| row.child(div().flex_shrink_0().text_size(TEXT_AUX)
+                    .text_color(color(GRAY)).child(format!("{number} / 4")))))
+            .when(!compact, |view| view.child(help("setup-description", description)));
+        let scrolling_content = v_flex().w_full().min_w_0().gap(px(if compact { 16. } else { 24. }))
+            .child(heading).child(content)
             .when_some(self.onboarding.notice.clone(), |view, (message, error)| {
-                view.child(
-                    settings_value("setup-notice", message)
-                        .role(Role::Status)
-                        .text_color(color(if error { DANGER } else { MUTED })),
-                )
+                view.child(settings_value("setup-notice", message).role(Role::Status)
+                    .text_color(color(if error { DANGER } else { MUTED })))
             });
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .max_w(rems(44.))
-            .mx_auto()
-            .px_6()
-            .py_4()
-            .gap_4()
-            .child(
-                v_flex()
-                    .id("setup-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.onboarding.scroll)
-                    .child(scrolling_content),
-            )
-            .child(self.setup_footer(compact, cx))
-            .into_any_element()
+        // The scroll viewport owns generous inner gutters, including the input's
+        // exterior focus ring. Natural height keeps the footer near the task.
+        let footer = self.setup_footer(compact, cx);
+        let panel = v_flex().relative().w(px(width)).max_w_full().min_w_0()
+            .max_h(px(available_height))
+            .bg(color(SURFACE)).rounded(RADIUS_HERO).border_1().border_color(color(HAIRLINE))
+            .shadow(shadow_popover())
+            .child(v_flex().id("setup-scroll").flex_initial().w_full().min_w_0().min_h_0()
+                .overflow_y_scroll().track_scroll(&self.onboarding.scroll)
+                .p(px(if compact { 20. } else { 32. }))
+                .child(scrolling_content))
+            .child(Scrollbar::vertical(&self.onboarding.scroll).mode(ScrollbarMode::Always))
+            .child(footer.px(px(if compact { 20. } else { 32. })).py_4()
+                .border_t_1().border_color(color(HAIRLINE)));
+        v_flex().flex_1().w_full().min_h_0().items_center().justify_start().p(px(24.))
+            .child(panel).into_any_element()
     }
 
     fn setup_engine_content(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let selected = self.onboarding.provider;
-        let weak = cx.weak_entity();
-        let picker = control("setup-engine")
-            .w_full()
-            .label(provider_label(selected))
-            .child(icons::chevron_down().size_4().flex_shrink_0())
-            .dropdown_menu(move |menu, _, _| {
-                [
-                    None,
-                    Some(AsrProvider::Coreml),
-                    Some(AsrProvider::Gpu),
-                    Some(AsrProvider::Cpu),
-                    Some(AsrProvider::Npu),
-                    Some(AsrProvider::Api),
-                ]
-                .into_iter()
-                .fold(menu, |menu, provider| {
-                    let weak = weak.clone();
-                    menu.item(
-                        PopupMenuItem::new(provider_label(provider))
-                            .checked(provider == selected)
-                            .on_click(move |_, _, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    this.onboarding.provider = provider;
-                                    this.onboarding.notice = None;
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                })
+        let scale = f32::from(window.rem_size()) / 14.;
+        let width = (760. * scale.min(1.5)).min(f32::from(window.viewport_size().width) - 48.) - 64.;
+        let columns = if width >= 630. * scale { 3 } else if width >= 430. * scale { 2 } else { 1 };
+        let recommended = self.recommended_local_provider();
+        let local = selected != Some(AsrProvider::Api);
+        let routes = div().grid().grid_cols(if width >= 430. * scale { 2 } else { 1 }).gap_3().w_full().min_w_0()
+            .child(self.setup_reveal("setup-local-route-reveal", described_choice("setup-local-route", "本机识别", "推荐 · 课程音频在这台电脑上处理", icons::computer(), local, window, cx)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.select_setup_route(true, cx);
+                }))))
+            .child(self.setup_reveal("setup-cloud-route-reveal", described_choice("setup-cloud-route", "在线语音服务", "使用你配置的服务，无需下载模型", icons::cloud(), !local, window, cx)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.select_setup_route(false, cx);
+                }))));
+        let mut body = v_flex().w_full().min_w_0().gap_4().child(routes);
+        if !local {
+            return body.child(self.setup_service_content(ServicePurpose::Speech, window, cx));
+        }
+        let engines = [
+            (None, "自动选择", "使用本机适合的引擎", icons::auto_fix()),
+            (Some(AsrProvider::Coreml), "Apple 原生", "使用 Apple 芯片", icons::computer()),
+            (Some(AsrProvider::Gpu), "GPU", "使用图形处理器", icons::computer()),
+            (Some(AsrProvider::Cpu), "CPU", "无需独立显卡", icons::computer()),
+            (Some(AsrProvider::Npu), "Intel NPU", "需要 Intel NPU 设备", icons::computer()),
+        ];
+        let mut choices = div().grid().grid_cols(columns).gap_3().w_full().min_w_0();
+        for (index, (provider, label, description, icon)) in engines.into_iter().enumerate() {
+            choices = choices.child(self.setup_reveal(("setup-engine-choice-reveal", index), described_choice(("setup-engine-choice", index), label, description, icon, selected == provider, window, cx)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_setup_provider(provider, cx);
+                }))));
+        }
+        body = body.child(v_flex().w_full().min_w_0().gap_2()
+            .child(h_flex().w_full().min_w_0().items_center().flex_wrap().gap_2()
+                .child(help("setup-current-engine", format!("{} · {}", if selected.is_none() { "自动选择" } else { "当前引擎" }, provider_label(Some(selected.unwrap_or(recommended))))).w_auto().flex_1())
+                .child(quiet("setup-show-engines").icon(icons::tune()).label(if self.onboarding.engine_details_open { "收起引擎" } else { "更换引擎" })
+                    .on_click(cx.listener(|this, _, _, cx| { this.onboarding.engine_details_open = !this.onboarding.engine_details_open; cx.notify(); }))))
+            .child(motion::disclosure("setup-engines", self.onboarding.engine_details_open, v_flex().child(choices), window, cx)));
+        let provider = selected.unwrap_or(recommended);
+        let models = local_model_choices(provider, &self.onboarding.model);
+        let mut model_grid = div().grid().grid_cols(columns.min(models.len() as u16)).gap_3().w_full().min_w_0();
+        for (index, (id, label, description)) in models.into_iter().enumerate() {
+            model_grid = model_grid.child(self.setup_reveal(("setup-model-choice-reveal", index), described_choice(("setup-model-choice", index), label, description,
+                icons::microphone(), self.onboarding.model == id, window, cx)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_setup_model(&id, cx);
+                }))));
+        }
+        body = body.child(v_flex().w_full().min_w_0().gap_3()
+            .child(field_label("setup-model-label", "识别模型")).child(model_grid));
+        body
+    }
+
+    fn setup_reveal(&self, id: impl Into<ElementId>, child: impl IntoElement) -> AnyElement {
+        crate::focus_scroll::RevealFocus::new(id, child, self.onboarding.scroll.clone()).into_any_element()
+    }
+
+    fn fetch_setup_models(&mut self, purpose: ServicePurpose, cx: &mut Context<Self>) {
+        let service = self.onboarding.service(purpose);
+        let draft = service.current_draft(cx);
+        let typed_key = Secret::new(service.value(InputField::Key, cx));
+        let request = match crate::model_discovery::Request::from_draft(&draft, typed_key) {
+            Ok(request) => request,
+            Err(error) => {
+                self.onboarding.service_mut(purpose).models.reject(error);
+                cx.notify();
+                return;
+            }
+        };
+        let session = self.onboarding.session;
+        let ticket = self.onboarding.service_mut(purpose).models.begin(&request);
+        let vault = self.preferences.vault();
+        let task = cx.background_executor().spawn(crate::model_discovery::discover(request, vault));
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.onboarding.active || this.onboarding.session != session { return; }
+                let service = this.onboarding.service(purpose);
+                let current = crate::model_discovery::RequestKey::from_draft(
+                    &service.current_draft(cx), &service.value(InputField::Key, cx)).ok();
+                this.onboarding.service_mut(purpose).models.complete(ticket, current.as_ref(), result);
+                cx.notify();
             });
-        let mut body = v_flex().w_full().min_w_0().gap_4().child(settings_row(
-            "setup-engine-label",
-            "识别方式",
-            "",
-            picker,
-        ));
-        if selected == Some(AsrProvider::Api) {
-            return body
-                .child(help(
-                    "setup-speech-help",
-                    "音频会发送到你配置的语音服务；无需下载本机模型。",
-                ))
-                .child(self.setup_service_content(ServicePurpose::Speech, window, cx));
-        }
-        body = body.child(if let Some(environment) = &self.environment {
-            let provider = selected.unwrap_or_else(|| self.recommended_local_provider());
-            let available = match provider {
-                AsrProvider::Coreml => environment.apple,
-                AsrProvider::Gpu => environment.llama && environment.gpu.is_some(),
-                AsrProvider::Cpu => environment.llama,
-                AsrProvider::Npu => environment.npu,
-                AsrProvider::Api => true,
-            } && environment.engine;
-            help(
-                "setup-detected-engine",
-                format!(
-                    "{}{}{}",
-                    if selected.is_none() {
-                        "本机会选择 "
-                    } else {
-                        "已选择 "
-                    },
-                    provider_label(Some(provider)),
-                    if available {
-                        "。运行环境可用。"
-                    } else {
-                        "。运行环境仍需准备，可在模型步骤查看原因。"
-                    }
-                ),
-            )
-            .into_any_element()
-        } else {
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(motion::spinner("setup-engine-detecting", cx))
-                .child(help(
-                    "setup-engine-detecting-label",
-                    "正在检测本机可用引擎…",
-                ))
-                .into_any_element()
-        });
-        let provider = selected.unwrap_or_else(|| self.recommended_local_provider());
-        let mut models = vec![("qwen3-1.7b".to_owned(), "Qwen3 1.7B".to_owned())];
-        if matches!(provider, AsrProvider::Coreml | AsrProvider::Npu) {
-            models.extend([
-                ("qwen3-0.6b".into(), "Qwen3 0.6B".into()),
-                ("whisper".into(), "Whisper".into()),
-            ]);
-        }
-        if provider == AsrProvider::Npu {
-            models.extend([
-                ("whisper-tiny".into(), "Whisper Tiny".into()),
-                ("whisper-base".into(), "Whisper Base".into()),
-                ("whisper-small".into(), "Whisper Small".into()),
-            ]);
-        }
-        let model = self.onboarding.model.clone();
-        let label = models
-            .iter()
-            .find(|(id, _)| id == &model)
-            .map(|(_, label)| label.clone())
-            .unwrap_or_else(|| format!("当前模型：{model}"));
-        let weak = cx.weak_entity();
-        body.child(settings_row(
-            "setup-model-label",
-            "识别模型",
-            "",
-            control("setup-model-choice")
-                .w_full()
-                .label(label)
-                .child(icons::chevron_down().size_4().flex_shrink_0())
-                .dropdown_menu(move |menu, _, _| {
-                    models.iter().fold(menu, |menu, (id, label)| {
-                        let id = id.clone();
-                        let weak = weak.clone();
-                        menu.item(
-                            PopupMenuItem::new(label.clone())
-                                .checked(id == model)
-                                .on_click(move |_, _, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.onboarding.model = id.clone();
-                                        this.onboarding.notice = None;
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                    })
-                }),
-        ))
-        .child(help(
-            "setup-model-choice-help",
-            "模型在最后一步准备，也可以稍后下载。",
-        ))
+        }).detach();
+        cx.notify();
     }
 
     fn setup_input_row(
@@ -1020,6 +1118,12 @@ impl Desktop {
                     .text_size(TEXT_AUX),
                 );
             }
+        } else if field == InputField::Model {
+            field_column = field_column.child(crate::model_discovery::model_field(
+                if purpose == ServicePurpose::Ai { "setup-ai-model" } else { "setup-speech-model" },
+                &service.inputs[&field], &service.models,
+                service.running.is_some() || service.pending_version.is_some(),
+                cx.listener(move |this, _, _, cx| this.fetch_setup_models(purpose, cx)), cx));
         } else {
             field_column = field_column.child(input);
         }
@@ -1037,7 +1141,8 @@ impl Desktop {
                     .text_color(color(DANGER))
                 }),
         );
-        let row = settings_field_row(SharedString::from(id.clone()), label, "", field_column);
+        let icon = match field { InputField::Address => icons::link(), InputField::Model => icons::storage(), InputField::Key => icons::shield() };
+        let row = stacked_field(SharedString::from(id.clone()), label, icon, field_column);
         crate::focus_scroll::RevealFocus::new(
             SharedString::from(format!("{id}-reveal")),
             row,
@@ -1056,10 +1161,10 @@ impl Desktop {
         let busy = service.running.is_some() || service.pending_version.is_some();
         let mut body = v_flex().w_full().min_w_0().gap_4();
         if purpose == ServicePurpose::Speech {
-            body = body.child(settings_row(
+            body = body.child(self.setup_reveal("setup-speech-protocol-reveal", stacked_field(
                 "setup-speech-protocol-label",
                 "接口类型",
-                "",
+                icons::cloud(),
                 SingleChoiceGroup::new("setup-speech-protocol", "语音接口类型")
                     .full_width()
                     .options([("transcriptions", "语音转录"), ("chat", "音频聊天")])
@@ -1078,17 +1183,17 @@ impl Desktop {
                             preferences::ServiceProtocol::SpeechTranscriptions
                         };
                         this.onboarding.speech.evidence.clear();
+                        this.onboarding.speech.models.invalidate();
                         cx.notify();
                     })),
-            ));
+            )));
         }
         body = body
             .child(self.setup_input_row(purpose, InputField::Address, "服务地址", cx))
-            .child(self.setup_input_row(purpose, InputField::Model, "模型 ID", cx))
-            .child(settings_row(
+            .child(self.setup_reveal(format!("setup-auth-reveal-{}", purpose as usize), stacked_field(
                 format!("setup-auth-label-{}", purpose as usize),
                 "认证方式",
-                "",
+                icons::shield(),
                 SingleChoiceGroup::new(format!("setup-auth-{}", purpose as usize), "服务认证")
                     .full_width()
                     .options([("key", "API Key"), ("none", "无需认证")])
@@ -1107,72 +1212,33 @@ impl Desktop {
                         };
                         service.evidence.clear();
                         service.errors.clear();
+                        service.models.invalidate();
                         cx.notify();
                     })),
-            ));
+            )));
         if service.draft.authentication == Authentication::ApiKey {
             body = body.child(self.setup_input_row(purpose, InputField::Key, "API Key", cx));
         }
+        body = body.child(self.setup_input_row(purpose, InputField::Model, "模型", cx));
         if purpose == ServicePurpose::Ai {
-            for (id, label, checked) in [
-                ("proofread", "自动校对文字", self.onboarding.ai_proofread),
-                ("summary", "生成课程摘要", self.onboarding.ai_summary),
+            let mut uses = h_flex().w_full().min_w_0().flex_wrap().gap_4();
+            for (id, label, checked, icon) in [
+                ("proofread", "自动校对文字", self.onboarding.ai_proofread, icons::auto_fix()),
+                ("summary", "生成课程摘要", self.onboarding.ai_summary, icons::summarize()),
             ] {
-                body = body.child(settings_row(
-                    format!("setup-ai-{id}-label"),
-                    label,
-                    "",
-                    crate::focus_scroll::FocusRing::new(
-                        format!("setup-ai-{id}-focus"),
-                        Switch::new(format!("setup-ai-{id}"))
-                            .checked(checked)
-                            .disabled(busy)
+                uses = uses.child(h_flex().flex_1().flex_basis(rems(240. / 14.)).min_w_0().min_h(CONTROL_HEIGHT).items_center().gap_2()
+                    .child(icon.size_4().flex_shrink_0().text_color(color(GRAY)))
+                    .child(field_label(format!("setup-ai-{id}-label"), label).min_w_0())
+                    .child(crate::focus_scroll::FocusRing::new(format!("setup-ai-{id}-focus"),
+                        Switch::new(format!("setup-ai-{id}")).checked(checked).disabled(busy)
                             .on_click(cx.listener(move |this, enabled, _, cx| {
-                                if id == "proofread" {
-                                    this.onboarding.ai_proofread = *enabled;
-                                } else {
-                                    this.onboarding.ai_summary = *enabled;
-                                }
+                                if id == "proofread" { this.onboarding.ai_proofread = *enabled; }
+                                else { this.onboarding.ai_summary = *enabled; }
                                 cx.notify();
-                            })),
-                    ),
-                ));
+                            })))));
             }
+            body = body.child(self.setup_reveal("setup-ai-uses-reveal", uses));
         }
-        let required = self.setup_required_tests(purpose, cx);
-        let optional_recheck = required.is_empty();
-        let required = if optional_recheck {
-            self.setup_tests(purpose)
-        } else {
-            required
-        };
-        body = body
-            .child(
-                help(
-                    format!("setup-test-notice-{}", purpose as usize),
-                    service_test::TEST_NOTICE,
-                )
-                .text_size(TEXT_AUX),
-            )
-            .child(
-                help(
-                    format!("setup-test-scope-{}", purpose as usize),
-                    format!(
-                        "{}：{}",
-                        if optional_recheck {
-                            "可重新检查"
-                        } else {
-                            "检查内容"
-                        },
-                        required
-                            .iter()
-                            .map(|kind| kind.label())
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    ),
-                )
-                .text_size(TEXT_AUX),
-            );
         if let Some(cancel) = &service.running {
             let stopping = cancel.load(Ordering::Acquire);
             body = body
@@ -1208,47 +1274,31 @@ impl Desktop {
                             cx.notify();
                         })),
                 );
-        } else if self.setup_service_passed(purpose, cx) {
-            body = body.child(
-                quiet(format!("setup-recheck-service-{}", purpose as usize))
-                    .self_start()
-                    .icon(icons::refresh())
-                    .label(if service.evidence.is_empty() {
-                        "检查当前配置"
-                    } else {
-                        "重新检查"
-                    })
-                    .disabled(service.pending_version.is_some())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_setup_test(purpose, window, cx)
-                    })),
-            );
-        }
-        for (index, (kind, evidence)) in service.evidence.iter().enumerate() {
-            body = body.child(settings_field_row(
-                format!("setup-test-result-{}-{index}", purpose as usize),
-                kind.label(),
-                "",
-                settings_value(
-                    format!("setup-test-message-{}-{index}", purpose as usize),
-                    evidence.message.clone(),
-                )
-                .text_color(color(if evidence.outcome == TestOutcome::Passed {
-                    INK
-                } else {
-                    DANGER
-                })),
-            ));
         }
         if !service.evidence.is_empty() {
+            let mut feedback = v_flex().w_full().min_w_0().gap_2().p_3()
+                .bg(color(INSET)).rounded(RADIUS_CARD);
+            for (index, (_, evidence)) in service.evidence.iter().enumerate() {
+                let passed = evidence.outcome == TestOutcome::Passed;
+                feedback = feedback.child(h_flex().w_full().min_w_0().items_start().gap_2()
+                    .child(if passed { icons::circle_check() } else { icons::warning() }
+                        .size_4().mt_1().flex_shrink_0().text_color(color(if passed { SUCCESS } else { DANGER })))
+                    .child(settings_value(format!("setup-test-message-{}-{index}", purpose as usize), evidence.message.clone())
+                        .flex_1().min_w_0().text_color(color(if passed { INK } else { DANGER }))));
+            }
             let details = service
                 .evidence
                 .iter()
                 .flat_map(|(_, evidence)| evidence.details.iter().cloned())
                 .collect::<Vec<_>>()
                 .join("\n");
-            body = body
-                .child(
+            feedback = feedback
+                .child(h_flex().w_full().min_w_0().gap_2().flex_wrap()
+                    .when(self.setup_service_passed(purpose, cx), |row| row.child(
+                        quiet(format!("setup-recheck-service-{}", purpose as usize))
+                            .icon(icons::refresh()).label("重新检查").disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| this.start_setup_test(purpose, window, cx)))))
+                    .child(
                     quiet(format!("setup-test-details-{}", purpose as usize))
                         .self_start()
                         .icon(icons::info())
@@ -1262,7 +1312,7 @@ impl Desktop {
                             service.details_open = !service.details_open;
                             cx.notify();
                         })),
-                )
+                ))
                 .child(motion::disclosure(
                     format!("setup-test-detail-content-{}", purpose as usize),
                     service.details_open,
@@ -1276,6 +1326,7 @@ impl Desktop {
                     window,
                     cx,
                 ));
+            body = body.child(feedback);
         }
         body
     }
@@ -1338,13 +1389,8 @@ impl Desktop {
             .result
             .as_ref()
             .and_then(|result| result.as_ref().ok());
-        let mut body = v_flex().w_full().min_w_0().gap_4().child(
-            settings_value(
-                "setup-model-identity",
-                format!("{} · {model}", provider_label(Some(provider))),
-            )
-            .font_weight(FontWeight::MEDIUM),
-        );
+        let mut body = v_flex().w_full().min_w_0().gap_4();
+        let mut actions = h_flex().w_full().min_w_0().gap_2().items_center().flex_wrap();
         let (label, hint) = if snapshot.preparing {
             ("正在准备模型", "下载、文件检查和加载验证会按实际进度更新。")
         } else if cancelled {
@@ -1373,22 +1419,26 @@ impl Desktop {
                 None => ("模型检查未完成", "可以重新检查；详细原因保留在下方。"),
             }
         };
-        body = body
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .when(
-                        (snapshot.checking && !cancelled) || snapshot.preparing,
-                        |row| row.child(motion::spinner("setup-model-spinner", cx)),
-                    )
-                    .child(
-                        settings_value("setup-model-state", label).font_weight(FontWeight::MEDIUM),
-                    ),
-            )
-            .child(help("setup-model-state-hint", hint));
+        let model_title = match model.as_str() {
+            "qwen3-1.7b" => "Qwen3 1.7B",
+            "qwen3-0.6b" => "Qwen3 0.6B",
+            "whisper" => "Whisper",
+            other => other,
+        };
+        body = body.child(v_flex().w_full().min_w_0().p_4().gap_3().rounded(RADIUS_CARD).bg(color(INSET))
+            .child(h_flex().w_full().min_w_0().items_center().gap_3()
+                .child(icons::microphone().size(rems(32. / 14.)).flex_shrink_0().text_color(color(ACCENT)))
+                .child(v_flex().flex_1().min_w_0().gap_1()
+                    .child(settings_value("setup-model-identity", model_title.to_owned()).text_size(TEXT_TITLE).font_weight(FontWeight::SEMIBOLD))
+                    .child(help("setup-model-engine", provider_label(Some(provider))).text_size(TEXT_AUX))))
+            .child(v_flex().w_full().min_w_0().gap_1()
+                .child(h_flex().w_full().min_w_0().gap_2().items_center()
+                    .when((snapshot.checking && !cancelled) || snapshot.preparing, |v| v.child(motion::spinner("setup-model-spinner", cx)))
+                    .child(settings_value("setup-model-state", label).font_weight(FontWeight::MEDIUM)))
+                .child(help("setup-model-state-hint", hint))));
         if snapshot.preparing {
-            body = body.child(self.setup_model_progress(window, cx)).child(
+            body = body.child(self.setup_model_progress(window, cx));
+            actions = actions.child(
                 outline_pill("setup-pause-model")
                     .self_start()
                     .icon(icons::pause())
@@ -1420,7 +1470,7 @@ impl Desktop {
                     outline_pill("setup-prepare-model")
                 };
                 let target = root.clone();
-                body = body.child(
+                actions = actions.child(
                     button
                         .self_start()
                         .icon(icons::download())
@@ -1449,7 +1499,7 @@ impl Desktop {
                         })),
                 );
             }
-            body = body.child(
+            actions = actions.child(
                 quiet("setup-recheck-model")
                     .self_start()
                     .icon(icons::refresh())
@@ -1510,34 +1560,15 @@ impl Desktop {
                 ));
             }
         }
-        body.child(
-            quiet("setup-model-details")
-                .self_start()
-                .icon(icons::info())
-                .label(if self.onboarding.model_details_open {
-                    "收起模型详情"
-                } else {
-                    "模型详情"
-                })
+        actions = actions.child(
+            quiet("setup-model-details").icon(icons::info())
+                .label(if self.onboarding.model_details_open { "收起详情" } else { "模型详情" })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.onboarding.model_details_open = !this.onboarding.model_details_open;
                     cx.notify();
-                })),
-        )
-        .child(motion::disclosure(
-            "setup-model-detail-content",
-            self.onboarding.model_details_open,
-            details,
-            window,
-            cx,
-        ))
-        .child(
-            help(
-                "setup-download-scope",
-                "准备模型可能下载文件，课程内容不会上传。",
-            )
-            .text_size(TEXT_AUX),
-        )
+                })));
+        body.child(v_flex().w_full().min_w_0().gap_2().child(self.setup_reveal("setup-model-actions-reveal", actions))
+            .child(motion::disclosure("setup-model-detail-content", self.onboarding.model_details_open, details, window, cx)))
     }
 
     fn setup_model_progress(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -1594,7 +1625,7 @@ impl Desktop {
         }
     }
 
-    fn setup_footer(&self, compact: bool, cx: &mut Context<Self>) -> Div {
+    fn setup_footer(&self, _compact: bool, cx: &mut Context<Self>) -> Div {
         if self.onboarding.finish_failed {
             return v_flex()
                 .w_full()
@@ -1666,6 +1697,7 @@ impl Desktop {
             }
             Step::Engine => "保存并继续",
             Step::Ai => self.setup_service_action_label(ServicePurpose::Ai, cx),
+            Step::Account => if self.account_connected() { "继续" } else { "跳过登录" },
             Step::Model if model_review => "返回应用",
             Step::Model if model_running => "继续使用",
             Step::Model if emphasize_model_preparation => "稍后准备",
@@ -1677,7 +1709,7 @@ impl Desktop {
             .gap_2()
             .items_center()
             .flex_wrap();
-        if step != Step::Ai && !model_review {
+        if step == Step::Engine && !model_review {
             row = row.child(
                 quiet("setup-later")
                     .label(if step == Step::Model {
@@ -1695,12 +1727,17 @@ impl Desktop {
                     })),
             );
         }
-        if step == Step::Ai {
+        if step != Step::Engine && !model_review {
             row = row.child(
                 quiet("setup-back")
                     .icon(icons::arrow_left())
                     .label("上一步")
-                    .on_click(cx.listener(|this, _, _, cx| this.setup_step(Step::Engine, cx))),
+                    .disabled(step == Step::Model && model_running)
+                    .on_click(cx.listener(move |this, _, _, cx| this.setup_step(match step {
+                        Step::Ai => Step::Engine,
+                        Step::Account => Step::Ai,
+                        _ => Step::Account,
+                    }, cx))),
             );
         }
         row = row.child(div().flex_1());
@@ -1723,28 +1760,17 @@ impl Desktop {
                 .on_click(cx.listener(move |this, _, window, cx| match step {
                     Step::Engine => this.save_setup_engine(window, cx),
                     Step::Ai => this.continue_setup_service(ServicePurpose::Ai, window, cx),
+                    Step::Account => this.setup_step(Step::Model, cx),
                     Step::Model if model_review => this.leave_onboarding(window, cx),
                     Step::Model => this.finish_onboarding(window, cx),
                 })),
         );
-        let hint = if model_running {
-            "继续使用后，模型仍会在后台准备；可随时查看进度。".to_owned()
-        } else if compact {
-            let number = match step {
-                Step::Engine => 1,
-                Step::Ai => 2,
-                Step::Model => 3,
-            };
-            format!("使用引导 · {number} / 3 · 可在设置中重新开始")
-        } else {
-            "以后可在设置中重新开始引导；已保存的配置会保留。".to_owned()
-        };
-        v_flex()
-            .w_full()
-            .flex_shrink_0()
-            .gap_2()
+        v_flex().w_full().flex_shrink_0().gap_2()
+            .when(step == Step::Ai || (step == Step::Engine && self.onboarding.provider == Some(AsrProvider::Api)), |v| {
+                v.child(help("setup-test-notice", "检查仅发送内置示例，服务商可能计费").text_size(TEXT_AUX))
+            })
             .child(row)
-            .child(help("setup-return-hint", hint).text_size(TEXT_AUX))
+            .when(model_running, |v| v.child(help("setup-return-hint", "模型会继续在后台准备").text_size(TEXT_AUX)))
     }
 
     pub(crate) fn onboarding_background_notice(
@@ -1852,13 +1878,119 @@ impl Desktop {
 
 #[cfg(test)]
 mod tests {
-    use super::{engine_preferences, evidence_covers, newly_enabled_ai_tests, requested_tests};
+    use super::{
+        ProviderChoice, apply_provider_choice, engine_preferences, evidence_covers,
+        local_model_choices, newly_enabled_ai_tests, requested_tests, setup_cache_model,
+        setup_model_supported,
+    };
     use crate::preferences::{
         Authentication, GenerationPreferences, ServiceConfiguration, ServiceProtocol,
         ServicePurpose, ServiceTestEvidence, TestOutcome,
     };
     use crate::service_test::TestKind;
     use course2md::config::AsrProvider;
+
+    #[test]
+    fn online_route_round_trip_preserves_explicit_local_engine_and_alias() {
+        for (engine, initial_model) in [
+            (Some(AsrProvider::Cpu), "QWEN3-ASR-1.7B"),
+            (Some(AsrProvider::Gpu), "qwen3-asr-1.7b-q8_0.gguf"),
+            (Some(AsrProvider::Coreml), "whisper-large-v3-turbo"),
+            (Some(AsrProvider::Npu), "Fixture/Custom-Whisper"),
+            (None, "qwen3-0.6b"),
+        ] {
+            let mut provider = engine;
+            let mut local = engine;
+            let mut model = initial_model.to_owned();
+            // Re-clicking the online route must not replace the remembered engine with Api.
+            for _ in 0..2 {
+                assert!(apply_provider_choice(
+                    &mut provider, &mut local, &mut model, ProviderChoice::Online,
+                    AsrProvider::Coreml,
+                ).is_none());
+                assert_eq!(provider, Some(AsrProvider::Api));
+                assert_eq!(local, engine);
+            }
+            assert!(apply_provider_choice(
+                &mut provider, &mut local, &mut model, ProviderChoice::Local,
+                AsrProvider::Coreml,
+            ).is_none());
+            assert_eq!(provider, engine);
+            assert_eq!(model, initial_model);
+            let saved = engine_preferences(&GenerationPreferences::default(), provider, &model);
+            assert_eq!(saved.options.provider, engine);
+            assert_eq!(saved.options.asr_model.as_deref(), Some(initial_model));
+        }
+    }
+
+    #[test]
+    fn switching_to_an_incompatible_engine_selects_a_supported_model_with_notice() {
+        let mut provider = Some(AsrProvider::Npu);
+        let mut local = provider;
+        let mut model = "whisper-tiny".to_owned();
+        let notice = apply_provider_choice(
+            &mut provider, &mut local, &mut model,
+            ProviderChoice::Engine(Some(AsrProvider::Coreml)), AsrProvider::Coreml,
+        ).unwrap();
+        assert_eq!(provider, Some(AsrProvider::Coreml));
+        assert_eq!(local, provider);
+        assert_eq!(model, "qwen3-1.7b");
+        assert!(notice.contains("whisper-tiny"));
+        assert!(notice.contains("Apple 原生"));
+        assert!(setup_model_supported(AsrProvider::Coreml, &model));
+        assert_eq!(local_model_choices(AsrProvider::Coreml, &model)
+            .iter().filter(|(id, _, _)| id == &model).count(), 1);
+
+        model = "qwen3-0.6b".into();
+        assert!(apply_provider_choice(
+            &mut provider, &mut local, &mut model,
+            ProviderChoice::Engine(Some(AsrProvider::Cpu)), AsrProvider::Coreml,
+        ).is_some());
+        assert_eq!(model, "qwen3-1.7b");
+        assert!(setup_model_supported(AsrProvider::Cpu, &model));
+    }
+
+    #[test]
+    fn current_alias_repository_and_invalid_value_remain_visible_in_model_choices() {
+        for (provider, current, supported) in [
+            (AsrProvider::Coreml, "whisper-large-v3-turbo", true),
+            (AsrProvider::Npu, "Fixture/Custom-Whisper", true),
+            (AsrProvider::Npu, "whisper-large", true),
+            (AsrProvider::Coreml, "whisper-tiny", false),
+        ] {
+            let choices = local_model_choices(provider, current);
+            let selected: Vec<_> = choices.iter().filter(|(id, _, _)| id == current).collect();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].1, current);
+            assert_eq!(setup_model_supported(provider, current), supported);
+            if !supported {
+                assert!(selected[0].2.contains("不适用"));
+            }
+        }
+    }
+
+    #[test]
+    fn cache_names_normalize_compatible_aliases_without_rewriting_saved_values() {
+        for (provider, current, cache) in [
+            (AsrProvider::Coreml, "whisper-large-v3-turbo", "whisper"),
+            (AsrProvider::Coreml, "qwen3-asr-0.6b", "qwen3-0.6b"),
+            (AsrProvider::Cpu, "qwen3-asr-1.7b-q8_0.gguf", "qwen3-1.7b"),
+            (AsrProvider::Npu, "Fixture/Custom-Whisper", "Fixture/Custom-Whisper"),
+        ] {
+            assert_eq!(setup_cache_model(provider, current), cache);
+            let saved = engine_preferences(&GenerationPreferences::default(), Some(provider), current);
+            assert_eq!(saved.options.asr_model.as_deref(), Some(current));
+        }
+        // Apple's permissive normalizer alone would turn this NPU model into Whisper.
+        // The shared backend compatibility check must reject that silent substitution.
+        assert!(!setup_model_supported(AsrProvider::Coreml, "whisper-tiny"));
+        assert_eq!(setup_cache_model(AsrProvider::Coreml, "whisper-tiny"), "whisper-tiny");
+        for provider in [AsrProvider::Cpu, AsrProvider::Gpu, AsrProvider::Coreml, AsrProvider::Npu] {
+            for (id, _, _) in local_model_choices(provider, "qwen3-1.7b") {
+                assert!(setup_model_supported(provider, &id), "{provider:?}: {id}");
+            }
+        }
+    }
 
     #[test]
     fn existing_ai_configuration_checks_only_new_capabilities_and_never_disabled_ones() {

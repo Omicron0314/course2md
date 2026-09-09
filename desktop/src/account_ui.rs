@@ -27,6 +27,63 @@ enum QrDialogState {
     Error(String),
     Success(AccountProfile),
 }
+
+#[derive(Clone, Copy, Debug)]
+struct QrLayout {
+    dialog_width: f32,
+    content_width: f32,
+    content_height: f32,
+    side_by_side: bool,
+    code_size: f32,
+    text_height: f32,
+    gap: f32,
+}
+
+/// Match the dialog's 16px padding and 1px border, reserving its existing
+/// title/footer budget. The QR itself never belongs to a scrolling region.
+fn qr_layout(viewport_width: f32, viewport_height: f32, rem_size: f32) -> QrLayout {
+    let scale = rem_size / 14.;
+    let dialog_width = (420. * scale).min((viewport_width - 48.).max(0.));
+    let content_width = (dialog_width - 34.).max(0.);
+    let content_height = (viewport_height - rem_size * (180. / 14.) - 64.).max(80.);
+    let gap = 16. * scale;
+    let preferred_code = 260_f32.min(content_width);
+    let text_reserve = rem_size * 4.5;
+    let side_by_side = content_height < preferred_code + gap + text_reserve
+        && content_width >= preferred_code.min(content_height) + gap + rem_size * 12.;
+    let code_size = if side_by_side {
+        preferred_code.min(content_height)
+    } else {
+        preferred_code.min((content_height - gap - text_reserve).max(0.))
+    }
+    .floor();
+    let text_height = if side_by_side {
+        content_height
+    } else {
+        (content_height - code_size - gap).max(0.)
+    };
+    QrLayout {
+        dialog_width,
+        content_width,
+        content_height,
+        side_by_side,
+        code_size,
+        text_height,
+        gap,
+    }
+}
+
+/// Whole physical pixels avoid blurry modules. Centering includes at least
+/// four white modules on every side, even when the available size is fractional.
+fn qr_raster(code_size: f32, module_count: usize, scale: f32) -> (f32, f32) {
+    let total = (module_count + 8) as f32;
+    // Keep a pixel of slack at each edge so snapping a fractional window origin
+    // cannot take part of the four-module quiet zone away.
+    let unit = ((code_size * scale - 2.).max(0.) / total).floor() / scale;
+    let offset = (code_size - unit * total) / 2. + unit * 4.;
+    (unit, offset)
+}
+
 impl AccountUi {
     fn current(&self, generation: u64) -> bool {
         self.generation == generation && self.dialog.is_some()
@@ -36,41 +93,101 @@ impl AccountUi {
         self.dialog = None;
         self.modules = None;
     }
+
+    fn close(&mut self) {
+        self.invalidate();
+        self.retry_source = None;
+    }
+
+    fn apply_status(
+        &mut self,
+        generation: u64,
+        has_saved_login: bool,
+        result: Result<AccountStatus, String>,
+    ) -> bool {
+        if self.status_generation != generation {
+            return false;
+        }
+        self.checking = false;
+        self.has_saved_login = has_saved_login;
+        match result {
+            Ok(status) => {
+                // A removed credential file must not keep the previous "saved" badge.
+                self.has_saved_login = !matches!(status, AccountStatus::Disconnected);
+                self.status = Some(status);
+                self.status_error = None;
+            }
+            Err(error) => self.status_error = Some(error),
+        }
+        true
+    }
+
+    fn login_action(&self) -> Option<&'static str> {
+        if matches!(self.status, Some(AccountStatus::Connected(_)))
+            && self.has_saved_login
+            && self.status_error.is_none()
+        {
+            None
+        } else if self.has_saved_login || matches!(self.status, Some(AccountStatus::Expired)) {
+            Some("重新登录 Bilibili")
+        } else {
+            Some("登录 Bilibili")
+        }
+    }
+
+    fn can_resume_source(&self, generation: u64, input: &str, in_source: bool) -> bool {
+        in_source
+            && self
+                .retry_source
+                .as_ref()
+                .is_some_and(|(saved_generation, saved_input)| {
+                    *saved_generation == generation && saved_input == input
+                })
+    }
 }
 
 struct AccountDialog {
     desktop: Entity<Desktop>,
     _observation: Subscription,
+    footer: bool,
 }
 impl Render for AccountDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.desktop
-            .update(cx, |desktop, cx| desktop.account_dialog_content(window, cx))
+        self.desktop.update(cx, |desktop, cx| {
+            if self.footer {
+                desktop.account_dialog_actions(cx).into_any_element()
+            } else {
+                desktop.account_dialog_content(window, cx)
+            }
+        })
     }
 }
 
 impl Desktop {
+    pub(crate) fn account_connected(&self) -> bool {
+        matches!(self.account.status, Some(AccountStatus::Connected(_)))
+    }
+
     pub fn refresh_account(&mut self, cx: &mut Context<Self>) {
+        if self.account.checking {
+            return;
+        }
         self.account.status_generation = self.account.status_generation.wrapping_add(1);
         let generation = self.account.status_generation;
-        self.account.has_saved_login = course2md::auth::cookie_path().is_file();
         self.account.checking = true;
         self.account.status_error = None;
-        let task = cx
-            .background_executor()
-            .spawn(async { course2md::auth::bilibili_account_status() });
+        let task = cx.background_executor().spawn(async {
+            let saved = course2md::auth::cookie_path().is_file();
+            let status =
+                course2md::auth::bilibili_account_status().map_err(|error| error.to_string());
+            (saved, status)
+        });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let (saved, result) = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.account.status_generation != generation {
-                    return;
+                if this.account.apply_status(generation, saved, result) {
+                    cx.notify();
                 }
-                this.account.checking = false;
-                match result {
-                    Ok(status) => this.account.status = Some(status),
-                    Err(error) => this.account.status_error = Some(error.to_string()),
-                }
-                cx.notify();
             });
         })
         .detach();
@@ -78,10 +195,23 @@ impl Desktop {
     }
 
     pub fn account_settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.account_summary(false, cx).into_any_element()
+    }
+
+    /// Shared account state and actions only; the guide owns its heading and footer.
+    pub(crate) fn account_onboarding_page(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.account_summary(true, cx)
+    }
+
+    fn account_summary(&self, onboarding: bool, cx: &mut Context<Self>) -> Div {
         let status = self.account_status_text();
         let saved = self.account.has_saved_login;
         let expired = matches!(self.account.status, Some(AccountStatus::Expired));
-        let show_login = !saved || expired;
+        let login_action = self.account.login_action();
         let connected = matches!(self.account.status, Some(AccountStatus::Connected(_)));
         let (kind, label) = if self.account.checking {
             (BadgeKind::Progress, "验证中")
@@ -124,15 +254,37 @@ impl Desktop {
                         )
                     }),
             )
-            .child(accessible_text("bilibili-account-policy", if saved {
-                "获取字幕和视频将使用此账号的访问权限。退出登录后停止后续使用，课程和笔记保留。"
-            } else {
-                "公开课程可以直接读取；遇到账号权限限制时，再登录继续。"
-            }).text_sm().text_color(color(MUTED)))
+            .child(
+                accessible_text(
+                    "bilibili-account-policy",
+                    if saved {
+                        "读取字幕和视频时使用此账号的权限。退出登录不会删除课程和笔记。"
+                    } else if onboarding {
+                        "可跳过，之后在设置中登录。"
+                    } else {
+                        "公开内容可以先尝试读取；遇到账号权限限制时，登录后继续。"
+                    },
+                )
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .text_sm()
+                .text_color(color(MUTED)),
+            )
             .child(
                 h_flex()
                     .gap_2()
                     .flex_wrap()
+                    .when_some(login_action, |view, label| {
+                        view.child(
+                            outline_pill("account-login")
+                                .icon(icons::bilibili())
+                                .label(label)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_account_dialog(window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         control("account-refresh")
                             .ghost()
@@ -140,19 +292,6 @@ impl Desktop {
                             .disabled(self.account.checking)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_account(cx))),
                     )
-                    .when(show_login, |view| {
-                        view.child(
-                            control("account-login")
-                                .icon(icons::login()).outline().label(if expired {
-                                    "重新登录 Bilibili"
-                                } else {
-                                    "登录 Bilibili"
-                                })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_account_dialog(window, cx)
-                                })),
-                        )
-                    })
                     .when(saved, |view| {
                         view.child(
                             control("account-logout")
@@ -162,7 +301,6 @@ impl Desktop {
                         )
                     }),
             )
-            .into_any_element()
     }
 
     fn account_status_text(&self) -> String {
@@ -195,13 +333,12 @@ impl Desktop {
     /// Only rendered inside source details or a permission repair, never a permanent status row.
     pub fn source_account_row(&self, cx: &mut Context<Self>) -> Div {
         let status = self.account_status_text();
-        let temporary = self.account.status_error.is_some() || self.account.checking;
-        let connected = matches!(self.account.status, Some(AccountStatus::Connected(_)));
-        let expired = matches!(self.account.status, Some(AccountStatus::Expired));
+        let login_action = self.account.login_action();
         h_flex()
             .w_full()
             .items_center()
             .gap_3()
+            .flex_wrap()
             .child(
                 div()
                     .id("source-bilibili-account-status")
@@ -210,6 +347,7 @@ impl Desktop {
                     .child(status)
                     .flex_1()
                     .min_w_0()
+                    .whitespace_normal()
                     .text_sm()
                     .text_color(color(MUTED)),
             )
@@ -221,16 +359,12 @@ impl Desktop {
                     .disabled(self.account.checking)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_account(cx))),
             )
-            .when(!temporary && !connected, |view| {
+            .when_some(login_action, |view, label| {
                 view.child(
                     control("source-account-login")
                         .icon(icons::login())
                         .ghost()
-                        .label(if expired {
-                            "重新登录 Bilibili"
-                        } else {
-                            "登录 Bilibili"
-                        })
+                        .label(label)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.open_account_dialog(window, cx)),
                         ),
@@ -239,16 +373,14 @@ impl Desktop {
     }
 
     fn can_retry_account_source(&self, cx: &App) -> bool {
-        self.account
-            .retry_source
-            .as_ref()
-            .is_some_and(|(generation, input)| {
-                *generation == self.preview_generation
-                    && *input == self.value(Field::Source, cx)
-                    && matches!(self.page, Page::New)
-                    && self.online
-                    && (self.preview_error.is_some() || self.subtitle_attention_required())
-            })
+        self.account.can_resume_source(
+            self.preview_generation,
+            &self.value(Field::Source, cx),
+            !self.onboarding.active
+                && matches!(self.page, Page::New)
+                && self.online
+                && (self.preview_error.is_some() || self.subtitle_attention_required()),
+        )
     }
 
     fn clear_account(&mut self, cx: &mut Context<Self>) {
@@ -269,8 +401,7 @@ impl Desktop {
     }
 
     pub fn close_account_dialog(&mut self, cx: &mut Context<Self>) {
-        self.account.invalidate();
-        self.account.retry_source = None;
+        self.account.close();
         cx.notify();
     }
 
@@ -278,7 +409,8 @@ impl Desktop {
         if self.account.dialog.is_some() {
             return;
         }
-        self.account.retry_source = if matches!(self.page, Page::New)
+        self.account.retry_source = if !self.onboarding.active
+            && matches!(self.page, Page::New)
             && self.online
             && (self.preview_error.is_some() || self.subtitle_attention_required())
             && course2md::auth::is_bilibili_url(&self.value(Field::Source, cx))
@@ -292,17 +424,31 @@ impl Desktop {
         let desktop = cx.entity();
         let content = cx.new(|cx| AccountDialog {
             _observation: cx.observe(&desktop, |_, _, cx| cx.notify()),
+            desktop: desktop.clone(),
+            footer: false,
+        });
+        let footer = cx.new(|cx| AccountDialog {
+            _observation: cx.observe(&desktop, |_, _, cx| cx.notify()),
             desktop,
+            footer: true,
         });
         let weak = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let weak = weak.clone();
             let closed = weak.clone();
+            let layout = qr_layout(
+                f32::from(window.bounds().size.width),
+                f32::from(window.bounds().size.height),
+                f32::from(window.rem_size()),
+            );
             dialog
-                .title("登录 Bilibili")
-                .w(px(420.))
+                .title(crate::settings_ui::settings_value("bilibili-dialog-title", "登录 Bilibili")
+                    .text_size(TEXT_TITLE).font_weight(FontWeight::SEMIBOLD))
+                .w(px(layout.dialog_width))
+                .margin_top(task_dialog_top(window))
                 .overlay_closable(false)
                 .child(content.clone())
+                .footer(footer.clone())
                 .on_close(move |_, window, cx| {
                     let _ = closed.update(cx, |this, cx| {
                         this.close_account_dialog(cx);
@@ -393,6 +539,11 @@ impl Desktop {
     }
 
     fn account_dialog_content(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let layout = qr_layout(
+            f32::from(window.bounds().size.width),
+            f32::from(window.bounds().size.height),
+            f32::from(window.rem_size()),
+        );
         let state = self
             .account
             .dialog
@@ -421,10 +572,9 @@ impl Desktop {
         };
         let retry = matches!(state, QrDialogState::Expired | QrDialogState::Error(_));
         let success = matches!(state, QrDialogState::Success(_));
-        let retry_source = success && self.can_retry_account_source(cx);
         let mut visual = v_flex()
-            .w(px(260.))
-            .h(px(260.))
+            .w(px(layout.code_size))
+            .h(px(layout.code_size))
             .flex_shrink_0()
             .items_center()
             .justify_center()
@@ -439,18 +589,17 @@ impl Desktop {
         if let Some(modules) = &self.account.modules {
             let modules = modules.clone();
             // A real QR code intentionally keeps its high-contrast white scanning surface.
-            visual = visual.bg(gpui::rgb(0xffffff)).child(
+            visual = visual.rounded(px(0.)).bg(gpui::rgb(0xffffff)).child(
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
                         // Whole physical-pixel modules and a >=4-module quiet zone keep QR edges crisp.
                         let scale = window.scale_factor();
-                        let unit = ((bounds.size.width.as_f32() * scale)
-                            / (modules.len() + 8) as f32)
-                            .floor()
-                            / scale;
-                        let extent = unit * (modules.len() + 8) as f32;
-                        let offset = (bounds.size.width.as_f32() - extent) / 2. + unit * 4.;
+                        let (unit, offset) = qr_raster(
+                            bounds.size.width.as_f32().min(bounds.size.height.as_f32()),
+                            modules.len(),
+                            scale,
+                        );
                         for (y, row) in modules.iter().enumerate() {
                             for (x, dark) in row.iter().enumerate() {
                                 if *dark {
@@ -493,14 +642,7 @@ impl Desktop {
                 .text_color(color(if success { SUCCESS } else { WARNING })),
             );
         } else {
-            visual = visual
-                .child(crate::motion::spinner("qr-code-generating", cx))
-                .child(
-                    accessible_text("qr-preparing-label", "正在获取二维码…")
-                        .text_sm()
-                        .text_color(color(MUTED))
-                        .mt_3(),
-                );
+            visual = visual.child(crate::motion::spinner("qr-code-generating", cx));
         }
         let phase = match state {
             QrDialogState::Generating => 0,
@@ -510,27 +652,15 @@ impl Desktop {
             QrDialogState::Error(_) => 4,
             QrDialogState::Success(_) => 5,
         };
-        v_flex()
-            .id("account-login-body")
-            .max_h((window.bounds().size.height - px(150.)).max(px(180.)))
+        let explanation = v_flex()
+            .id("account-login-explanation")
+            .min_w_0()
+            .min_h_0()
+            .max_h(px(layout.text_height))
             .overflow_y_scroll()
-            .gap_4()
-            .items_center()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(icons::bilibili().size_6())
-                    .child(
-                        accessible_text("bilibili-login-brand", "Bilibili 账号")
-                            .font_weight(FontWeight::SEMIBOLD),
-                    ),
-            )
-            .child(crate::motion::enter(
-                SharedString::from(format!("qr-visual-{}-{phase}", self.account.generation)),
-                visual,
-                cx,
-            ))
+            .gap_2()
+            .when(layout.side_by_side, |view| view.flex_1())
+            .when(!layout.side_by_side, |view| view.w_full().items_center())
             .child(
                 h_flex()
                     .gap_2()
@@ -540,66 +670,151 @@ impl Desktop {
                     })
                     .child(
                         accessible_text("bilibili-login-step", message)
+                            .min_w_0()
+                            .whitespace_normal()
+                            .when(!layout.side_by_side, |text| text.text_center())
                             .font_weight(FontWeight::SEMIBOLD),
                     ),
             )
             .when(!hint.is_empty(), |view| {
                 view.child(
                     accessible_text("bilibili-login-detail", hint)
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .when(!layout.side_by_side, |text| text.text_center())
                         .text_sm()
                         .text_color(color(MUTED)),
                 )
-            })
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_end()
-                    .gap_3()
-                    .flex_wrap()
-                    .when(retry, |view| {
-                        view.child(
-                            control("account-qr-retry")
-                                .icon(icons::refresh())
-                                .primary()
-                                .label("刷新二维码")
-                                .on_click(cx.listener(|this, _, _, cx| this.start_account_qr(cx))),
-                        )
-                    })
-                    .child(
-                        control("account-qr-close")
-                            .when(success, |button| button.primary())
-                            .icon(if success {
-                                icons::check_circle()
-                            } else {
-                                icons::close()
-                            })
-                            .label(if retry_source {
-                                "继续转换"
-                            } else if success {
-                                "完成"
-                            } else {
-                                "取消"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let retry =
-                                    matches!(this.account.dialog, Some(QrDialogState::Success(_)))
-                                        && this.can_retry_account_source(cx);
-                                this.close_account_dialog(cx);
-                                window.close_dialog(cx);
-                                if retry {
-                                    this.inspect_source(window, cx);
-                                    this.start_conversion(window, cx);
-                                }
-                            })),
-                    ),
-            )
+            });
+        v_flex()
+            .id("account-login-body")
+            .w_full()
+            .max_w(px(layout.content_width))
+            .min_w_0()
+            .min_h_0()
+            .max_h(px(layout.content_height))
+            .gap(px(layout.gap))
+            .items_center()
+            .when(layout.side_by_side, |view| view.flex_row())
+            .child(crate::motion::enter(
+                SharedString::from(format!("qr-visual-{}-{phase}", self.account.generation)),
+                visual,
+                cx,
+            ))
+            .child(explanation)
             .into_any_element()
+    }
+
+    fn account_dialog_actions(&self, cx: &mut Context<Self>) -> Div {
+        let retry = matches!(
+            self.account.dialog,
+            Some(QrDialogState::Expired | QrDialogState::Error(_))
+        );
+        let success = matches!(self.account.dialog, Some(QrDialogState::Success(_)));
+        let retry_source = success && self.can_retry_account_source(cx);
+        h_flex()
+            .w_full()
+            .justify_end()
+            .gap_3()
+            .flex_wrap()
+            .child(
+                control("account-qr-close")
+                    .when(success, |button| button.primary())
+                    .icon(if success {
+                        icons::check_circle()
+                    } else {
+                        icons::close()
+                    })
+                    .label(if retry_source {
+                        "继续转换"
+                    } else if success {
+                        "完成"
+                    } else {
+                        "取消"
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let retry = matches!(this.account.dialog, Some(QrDialogState::Success(_)))
+                            && this.can_retry_account_source(cx);
+                        this.close_account_dialog(cx);
+                        window.close_dialog(cx);
+                        if retry {
+                            this.inspect_source(window, cx);
+                            this.start_conversion(window, cx);
+                        }
+                    })),
+            )
+            .when(retry, |view| {
+                view.child(
+                    primary_pill("account-qr-retry")
+                        .icon(icons::refresh())
+                        .label("刷新二维码")
+                        .on_click(cx.listener(|this, _, _, cx| this.start_account_qr(cx))),
+                )
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountUi, QrDialogState};
+    use super::{AccountUi, QrDialogState, qr_layout, qr_raster};
+    use course2md::auth::{AccountProfile, AccountStatus};
+
+    #[test]
+    fn qr_layout_keeps_the_complete_code_inside_short_and_regular_dialogs() {
+        // The rejected native frame had 196px of body height and a 260px code.
+        let short = qr_layout(860., 620., 28.);
+        assert!(short.side_by_side);
+        assert!(short.code_size <= 196.);
+        assert!(short.code_size + short.gap + 28. * 12. <= short.content_width);
+
+        let regular = qr_layout(1068., 768., 14.);
+        assert!(!regular.side_by_side);
+        assert_eq!(regular.dialog_width, 420.);
+        assert!(regular.code_size >= 240.);
+
+        for (width, height) in [(860., 620.), (1068., 768.), (1600., 1000.)] {
+            for scale in [1., 1.25, 1.5, 2.] {
+                let layout = qr_layout(width, height, 14. * scale);
+                assert!(layout.code_size > 0.);
+                assert!(layout.code_size <= layout.content_width);
+                assert!(layout.code_size <= layout.content_height);
+                if layout.side_by_side {
+                    assert!(layout.code_size + layout.gap < layout.content_width);
+                    assert!(layout.text_height <= layout.content_height);
+                } else {
+                    assert!(
+                        layout.code_size + layout.gap + layout.text_height
+                            <= layout.content_height + 0.001,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn qr_physical_pixels_retain_four_white_modules_after_origin_snapping() {
+        for code_size in [196., 195., 260.] {
+            for module_count in [21, 41, 57, 77] {
+                for scale in [1., 2.] {
+                    let (unit, offset) = qr_raster(code_size, module_count, scale);
+                    assert!(unit > 0.);
+                    assert_eq!((unit * scale).fract(), 0.);
+                    for origin in [0., 0.125, 0.25, 0.5, 0.75] {
+                        let first = ((origin + offset) * scale).round() / scale;
+                        let last = ((origin + offset + (module_count - 1) as f32 * unit)
+                            * scale)
+                            .round()
+                            / scale
+                            + unit;
+                        assert!(first - origin >= unit * 4. - 0.001);
+                        assert!(origin + code_size - last >= unit * 4. - 0.001);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn closing_and_refreshing_reject_late_qr_results() {
         let mut account = AccountUi {
@@ -613,5 +828,71 @@ mod tests {
         account.dialog = Some(QrDialogState::Generating);
         assert!(!account.current(first));
         assert!(account.current(account.generation));
+    }
+
+    #[test]
+    fn temporary_validation_failure_keeps_login_and_allows_repair() {
+        let connected = AccountStatus::Connected(AccountProfile {
+            name: "Fixture account".into(),
+        });
+        let mut account = AccountUi {
+            status_generation: 7,
+            status: Some(connected.clone()),
+            has_saved_login: true,
+            checking: true,
+            ..Default::default()
+        };
+        assert!(account.apply_status(7, true, Err("Network unavailable".into())));
+        assert_eq!(account.status, Some(connected.clone()));
+        assert!(account.has_saved_login);
+        assert!(!account.checking);
+        assert_eq!(account.login_action(), Some("重新登录 Bilibili"));
+
+        assert!(account.apply_status(7, true, Ok(connected)));
+        assert!(account.status_error.is_none());
+        assert_eq!(account.login_action(), None);
+
+        assert!(account.apply_status(7, true, Ok(AccountStatus::Expired)));
+        assert_eq!(account.login_action(), Some("重新登录 Bilibili"));
+        assert!(account.apply_status(7, true, Ok(AccountStatus::Disconnected)));
+        assert!(!account.has_saved_login);
+        assert_eq!(account.login_action(), Some("登录 Bilibili"));
+    }
+
+    #[test]
+    fn late_account_check_cannot_replace_a_newly_authenticated_account() {
+        let connected = AccountStatus::Connected(AccountProfile {
+            name: "New account".into(),
+        });
+        let mut account = AccountUi {
+            status_generation: 4,
+            status: Some(connected.clone()),
+            has_saved_login: true,
+            ..Default::default()
+        };
+        assert!(!account.apply_status(3, false, Ok(AccountStatus::Disconnected)));
+        assert_eq!(account.status, Some(connected));
+        assert!(account.has_saved_login);
+        assert!(account.status_error.is_none());
+    }
+
+    #[test]
+    fn source_continuation_requires_the_same_input_and_origin_after_login() {
+        let input = "https://www.bilibili.com/video/BVfixture";
+        let mut account = AccountUi {
+            retry_source: Some((5, input.into())),
+            dialog: Some(QrDialogState::Waiting(120)),
+            ..Default::default()
+        };
+        assert!(account.can_resume_source(5, input, true));
+        assert!(!account.can_resume_source(6, input, true));
+        assert!(!account.can_resume_source(5, "https://b23.tv/changed", true));
+        // Settings and an active guide are not the originating source view.
+        assert!(!account.can_resume_source(5, input, false));
+        account.invalidate();
+        account.dialog = Some(QrDialogState::Waiting(180));
+        assert!(account.can_resume_source(5, input, true));
+        account.close();
+        assert!(!account.can_resume_source(5, input, true));
     }
 }
