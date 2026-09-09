@@ -4,6 +4,7 @@
 
 #![cfg(apple_native)]
 
+use crate::models::normalize_apple_model as normalize;
 use crate::timeline::TranscriptEvent;
 use anyhow::{Context, Result};
 use std::ffi::{CStr, CString};
@@ -191,24 +192,6 @@ fn migrate_marker(marker: &Path, model: &str) {
         Err(e) => tracing::warn!(
             "无法更新旧模型配置，已保留原设置 / Could not update legacy model settings; original settings kept: {e:#}"
         ),
-    }
-}
-
-/// 模型名归一化。未知名字报错而不是静默归类——与 npu 侧
-/// 「不静默更换模型」原则对齐（静默换模型会让转写来源不可追溯）。
-/// 变体：qwen3-1.7b（默认，MLX/GPU，WER 最低）| qwen3-0.6b（CoreML/ANE，省电）| whisper。
-fn normalize(s: &str) -> Result<String> {
-    let s = s.trim().to_ascii_lowercase();
-    if s.contains("0.6") {
-        Ok("qwen3-0.6b".into())
-    } else if s.contains("whisper") {
-        Ok("whisper".into())
-    } else if s.is_empty() || s.contains("qwen") || s.contains("1.7") {
-        Ok("qwen3-1.7b".into())
-    } else {
-        anyhow::bail!(
-            "未知的 Apple 模型 / Unknown Apple model: `{s}`. 请选择 / Choose: qwen3-1.7b, qwen3-0.6b, whisper"
-        )
     }
 }
 

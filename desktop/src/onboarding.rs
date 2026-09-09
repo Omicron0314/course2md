@@ -246,7 +246,7 @@ fn setup_cache_model(provider: AsrProvider, model: &str) -> String {
     match provider {
         AsrProvider::Cpu | AsrProvider::Gpu => "qwen3-1.7b".into(),
         AsrProvider::Coreml => {
-            course2md::apple::resolve_model(Some(model)).unwrap_or_else(|_| model.to_owned())
+            course2md::models::normalize_apple_model(model).unwrap_or_else(|_| model.to_owned())
         }
         _ => model.to_owned(),
     }

@@ -17,6 +17,25 @@ use std::path::{Path, PathBuf};
 #[path = "model_status.rs"]
 pub mod status;
 
+/// Normalize Apple model names without requiring the native Apple runtime.
+/// Configuration and cache inspection also need these names on other platforms.
+/// Keep legacy aliases compatible; callers must validate backend support before
+/// accepting a user-supplied model for a new conversion.
+pub fn normalize_apple_model(s: &str) -> Result<String> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.contains("0.6") {
+        Ok("qwen3-0.6b".into())
+    } else if s.contains("whisper") {
+        Ok("whisper".into())
+    } else if s.is_empty() || s.contains("qwen") || s.contains("1.7") {
+        Ok("qwen3-1.7b".into())
+    } else {
+        anyhow::bail!(
+            "未知的 Apple 模型 / Unknown Apple model: `{s}`. 请选择 / Choose: qwen3-1.7b, qwen3-0.6b, whisper"
+        )
+    }
+}
+
 /// Retrieve missing local model files before a large media download. Cached weights are
 /// loaded by the later transcription stage; subtitle-only work never calls this function.
 pub async fn ensure_cache(
@@ -448,6 +467,20 @@ pub fn list_models(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apple_model_names_are_available_without_the_native_runtime() {
+        for (alias, canonical) in [
+            ("", "qwen3-1.7b"),
+            (" QWEN3-ASR-1.7B ", "qwen3-1.7b"),
+            ("qwen3-asr-0.6b", "qwen3-0.6b"),
+            ("Whisper-Large-v3-Turbo", "whisper"),
+        ] {
+            assert_eq!(normalize_apple_model(alias).unwrap(), canonical);
+        }
+        assert!(normalize_apple_model("unsupported-model").is_err());
+    }
+
     #[test]
     fn interrupted_and_unknown_size_downloads_only_publish_complete_files() {
         use std::{
