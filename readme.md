@@ -4,7 +4,7 @@ Turn **YouTube, Bilibili, or local videos** into illustrated Markdown / HTML not
 
 **English** · [中文](readme.zh.md) · [GitHub Wiki](https://github.com/mizorewww/course2md/wiki)
 
-**Try 2.0 RC1:** [2.0.0-rc.1 release notes and installation](https://github.com/mizorewww/course2md/releases/tag/v2.0.0-rc.1). Use the `course2md-gui@rc` Homebrew cask; the default installation options below provide the stable release.
+**Try 2.0 RC2:** [2.0.0-rc.2 release notes and installation](https://github.com/mizorewww/course2md/releases/tag/v2.0.0-rc.2). Use the `course2md-gui@rc` Homebrew cask; the default installation options below provide the stable release.
 
 ## Features
 
