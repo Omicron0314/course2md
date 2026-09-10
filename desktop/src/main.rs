@@ -1037,8 +1037,7 @@ impl Desktop {
         } else {
             self.start_next_task(cx);
         }
-        let ticking =
-            save || immediate || self.job.is_some() || self.event_repaint_pending;
+        let ticking = save || immediate || self.job.is_some() || self.event_repaint_pending;
         let interval = if save || self.event_repaint_pending {
             EVENT_REPAINT_INTERVAL
         } else {
@@ -1624,7 +1623,14 @@ mod list_reconcile_tests {
             &state,
             &mut keys,
             &mut focus,
-            vec!["a".into(), "x".into(), "y".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                "a".into(),
+                "x".into(),
+                "y".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+            ],
             cx,
         );
         assert_eq!(state.item_count(), 6);
@@ -1637,7 +1643,14 @@ mod list_reconcile_tests {
             &state,
             &mut keys,
             &mut focus,
-            vec!["a".into(), "x".into(), "y".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                "a".into(),
+                "x".into(),
+                "y".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+            ],
             cx,
         );
         assert_eq!(state.logical_scroll_top().item_ix, 5);
