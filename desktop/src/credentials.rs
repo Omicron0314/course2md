@@ -3,9 +3,12 @@
 //! Tests inject `MemoryCredentialVault`; they never access the user's Keychain.
 
 use anyhow::{Result, anyhow, bail};
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 pub type CredentialRef = String;
@@ -54,19 +57,22 @@ fn validate_reference(reference: &str) -> Result<()> {
     Ok(())
 }
 
-/// In-memory isolated store for tests, preview sessions and caller-controlled temporary use.
+/// In-memory isolated store for tests and caller-controlled temporary use.
 /// It intentionally does not provide a plaintext file fallback.
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemoryCredentialVault {
     values: Mutex<BTreeMap<CredentialRef, Zeroizing<String>>>,
 }
 
+#[cfg(test)]
 impl MemoryCredentialVault {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(test)]
 impl CredentialVault for MemoryCredentialVault {
     fn insert(&self, secret: Secret) -> Result<CredentialRef> {
         if secret.is_empty() {
