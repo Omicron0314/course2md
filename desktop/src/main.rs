@@ -1499,6 +1499,9 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::centered(initial_size, cx)),
                 window_min_size: Some(size(px(860.), px(620.))),
+                // Matches the packaged `course2md.desktop` file so Linux taskbars
+                // (Wayland app_id / X11 WM_CLASS) can resolve the window icon.
+                app_id: Some("course2md".to_string()),
                 titlebar: Some(TitlebarOptions {
                     traffic_light_position: Some(point(px(16.), px(19.))),
                     ..TitleBar::title_bar_options()
