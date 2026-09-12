@@ -105,7 +105,7 @@ def main():
         if system == "Linux":
             (base / "course2md.desktop").write_text(
                 "[Desktop Entry]\nType=Application\nName=course2md\nComment=Turn courses into illustrated notes\n"
-                "Exec=course2md-desktop\nIcon=course2md\nTerminal=false\nCategories=Education;AudioVideo;\n")
+                "Exec=course2md-desktop\nIcon=course2md\nStartupWMClass=course2md\nTerminal=false\nCategories=Education;AudioVideo;\n")
             shutil.copy2(ROOT / "assets/icon.png", base / "course2md.png")
     shutil.copy2(PROJECT / "target" / profile / f"course2md{suffix}", binaries / f"course2md{suffix}")
     shutil.copy2(ROOT / "target" / profile / f"course2md-desktop{suffix}", binaries / f"course2md-desktop{suffix}")
