@@ -34,7 +34,7 @@ install:
         **macos_versions(version),
         "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication",
-        "LSMinimumSystemVersion": "14.0",
+        "LSMinimumSystemVersion": "15.0",
         "CFBundleIconFile": "course2md.icns",
     }, (app / "Contents/Info.plist").open("wb"))
     PY
