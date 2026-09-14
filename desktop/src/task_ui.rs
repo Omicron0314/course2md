@@ -2044,6 +2044,12 @@ impl Desktop {
                 tasks = workspace.state.tasks.clone();
                 tasks.sort_by_key(|task| (task_group(task), std::cmp::Reverse(task.created)));
                 let history_open = window.use_keyed_state("task-history-open", cx, |_, _| false);
+                // 只有一种状态组时组头与页头汇总重复：此时不再重复分组行（M6）
+                let distinct_groups = tasks
+                    .iter()
+                    .map(task_group)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
                 let mut previous_group = None;
                 for (index, task) in tasks.iter().enumerate() {
                     let group = task_group(task);
@@ -2053,14 +2059,14 @@ impl Desktop {
                             .iter()
                             .filter(|task| task_group(task) == group)
                             .count();
-                        items.push(if group == TaskGroup::History {
-                            QueueItem::HistoryToggle {
+                        if group == TaskGroup::History {
+                            items.push(QueueItem::HistoryToggle {
                                 count,
                                 open: history_open.clone(),
-                            }
-                        } else {
-                            QueueItem::GroupLabel { group, count }
-                        });
+                            });
+                        } else if distinct_groups > 1 {
+                            items.push(QueueItem::GroupLabel { group, count });
+                        }
                     }
                     if group == TaskGroup::History && !*history_open.read(cx) {
                         continue;
