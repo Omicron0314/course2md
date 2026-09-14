@@ -144,3 +144,12 @@
   - 点击 GPU：出现聚焦环，识别模型行短暂变为单选宽版，但 `generation.json` 从未写入 provider="gpu"（实证：rev 27 null → rev 28 coreml）。
   - 随后一次 cua-driver scroll（注入 PageDown/方向键）把已聚焦的选择组导航到 coreml 并提交落盘——用户视角为「选 GPU 没反应，过一会儿自己跳回 Apple 原生」。
   - 结论：「不识别 GPU」的表层症状 = GPU 可检测（doctor 证明）但**桌面端选择不持久 + 静默回退**；根因方向：设置渲染期的状态水合/提交链路（H4/H13 区域）与 choice_group 键盘导航提交语义。HEAD 复测后定位到具体代码。
+
+## 后续修复记录（2026-09-15 凌晨）
+
+在终审运行验证中发现并已修复的新问题（均不属于原审计表）：
+
+1. **主线程同步 Keychain 读取可冻结整个应用（高危）** — `start_next_task → request_for → resolve_for_execution → vault.resolve` 在主线程同步读取 macOS 钥匙串；当 SecurityAgent 授权弹窗队列被其他应用占用时，整个界面（调度器、点击、渲染）无限期冻结。已改为先收集所需凭据引用、在专用 OS 线程解析后再回到 UI 线程启动任务（`start_pending` 守卫 + 启动前状态重校验）。
+2. **GPUI background_executor 任务可能在主线程执行（高危）** — 采样冻结进程确认 `dispatch` 到 GCD 全局队列的 Runnable 经由 queue override 跑在 `com.apple.main-thread` 上；`cx.spawn` 更是始终在主线程轮询。凡是含阻塞系统调用（Keychain、同步 HTTP、子进程探测、数 GB 文件的 SHA-256、大目录迁移）的 executor 任务都有冻结界面的风险。新增 `spawn_blocking_io()`（专用 OS 线程 + smol channel），并将全部此类调用点迁移过去：任务凭据解析、服务模型发现（设置页与引导页）、服务连通测试（两处）、环境探测、笔记/阅读器加载、B 站账号状态与扫码轮询、字幕读取/刷新、课程库迁移与重新关联扫描。
+3. **作业监视器 reader 线程无界 join（中危）** — 取消后若管道读取端未随子进程退出而关闭（孙进程继承写端），`t_read.join()` 永久阻塞，`Event::Exit` 永不发送，任务槽被占死（后续任务全部排队、卡片停在"正在停止…"）。已改为最多 3 秒有界等待后再发 `Event::Exit`；reader 线程在管道关闭后自行结束。
+4. **install.sh `set -u` 在收尾提示处中断（低）** — `$BIN_DIR，` 的全角逗号被 bash 并入变量名，安装完成后报 unbound variable。已加花括号。
