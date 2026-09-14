@@ -107,3 +107,9 @@ hover/pressed/键盘焦点组合态、滚动条全状态、浅色主题库/任�
 7. 待补全 → 笔记库卡片/列表/最近笔记行改为 Warning 状态徽章；description() 收缩为 cfg(test)。
 
 可选项顺带修复：技术详情 chevron、收起模型管理图标语义、准备状态行使用显示名。
+
+## 第五、六轮：修复复审与最终复核（独立 subagent，kimi-coding/k3:max）
+
+- 第五轮（/tmp/course2md-design/review5-verify.md）：第 4 轮 7 项应修中 6 项判定已解决；应修 4 判定未解决——滚动条挂到了「笔记详情」面板而非正文容器。另附 Note：import_ui 局部无 ⓘ help。
+- 返工（commit 0619130）：正文两个滚动容器（笔记页签虚拟列表、截图页签）挂载共享滚动条；import_ui help() 归并 supporting_info。
+- 第六轮（/tmp/course2md-design/review6-final.md）：**最终总体结论「通过」**——应修项全部清零，无阻断问题；运行截图证实常显偏好下正文常驻滚动条且内容宽度与换行未移动。
