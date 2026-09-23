@@ -126,11 +126,14 @@ pub(crate) fn chat_body(
     })
 }
 
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PolishReport {
     pub attempted: usize,
     pub succeeded: usize,
     pub failed: usize,
+    /// 首个失败原因（截断），用于结果消息可见性；无失败或纯跳过时为 None
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// 对已合并的 Section 做润色（在 merge 之后调用）。
@@ -155,6 +158,7 @@ pub fn polish_sections_report(
             attempted,
             succeeded: 0,
             failed: attempted,
+            note: Some(brief(&format!("{e:#}"))),
         });
     }
     let total: usize = sections
@@ -191,6 +195,7 @@ pub fn polish_sections_report(
     );
     let succeeded = std::sync::atomic::AtomicUsize::new(0);
     let aborted = std::sync::Mutex::new(None::<anyhow::Error>);
+    let first_error = std::sync::Mutex::new(None::<String>);
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
@@ -210,8 +215,14 @@ pub fn polish_sections_report(
                             let Some(image_b64) = images[si].as_ref() else {
                                 continue; // 截图不可用：整节保留原文（同原实现的提前返回）
                             };
-                            let count =
-                                polish_chunk(&agent, s, chunk, image_b64.as_deref(), &warned);
+                            let count = polish_chunk(
+                                &agent,
+                                s,
+                                chunk,
+                                image_b64.as_deref(),
+                                &warned,
+                                &first_error,
+                            );
                             succeeded.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
                         }
                         Ok(None) => break,
@@ -235,6 +246,7 @@ pub fn polish_sections_report(
         attempted,
         succeeded,
         failed: attempted.saturating_sub(succeeded),
+        note: first_error.lock().unwrap_or_else(|p| p.into_inner()).take(),
     })
 }
 
@@ -285,6 +297,7 @@ fn polish_chunk(
     chunk: &mut [TranscriptEvent],
     image_b64: Option<&str>,
     warned: &std::sync::atomic::AtomicBool,
+    first_error: &std::sync::Mutex<Option<String>>,
 ) -> usize {
     let items: Vec<(usize, &str)> = chunk
         .iter()
@@ -304,6 +317,10 @@ fn polish_chunk(
                     warned,
                     "润色结果与原文段落不匹配，保留原文 / Polished segments do not match the input; keeping original text",
                 );
+                record_first_error(
+                    first_error,
+                    "润色结果与原文段落不匹配 / Polished segments do not match the input".into(),
+                );
                 0
             } else {
                 chunk.len()
@@ -316,9 +333,27 @@ fn polish_chunk(
                     "校对未完成，已保留原文 / Proofreading incomplete; original text retained: {error:#}"
                 ),
             );
+            record_first_error(first_error, format!("{error:#}"));
             0
         }
     }
+}
+
+/// 记录首个失败原因（后续失败不覆盖），截断避免超长错误刷屏。
+fn record_first_error(slot: &std::sync::Mutex<Option<String>>, msg: String) {
+    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+    if guard.is_none() {
+        *guard = Some(brief(&msg));
+    }
+}
+
+fn brief(msg: &str) -> String {
+    const MAX: usize = 160;
+    let mut s: String = msg.chars().take(MAX).collect();
+    if msg.chars().count() > MAX {
+        s.push('…');
+    }
+    s
 }
 
 /// 润色结果的 id 集恰好覆盖 0..expected（无缺失/重复/越界）的判定。

@@ -36,6 +36,39 @@ const VAD_TIMEOUT: Duration = Duration::from_secs(900);
 const CUT_TIMEOUT: Duration = Duration::from_secs(120);
 /// 云端 STT 并发 worker 数：网络往返是主要瓶颈
 const WORKERS: usize = 4;
+/// 空结果熔断：VAD 已判定这些分片含语音，端点却在没有任何成功的情况下
+/// 连续返回空文本——端点实际上无法处理音频输入（配置错误/网关丢音频体），
+/// 继续只会空烧请求。单片为空仍是合法静音（见 record 处注释）。
+const EMPTY_RESULT_TRIPWIRE: usize = 10;
+
+/// 空结果熔断器：缓冲空结果，出现任何非空结果即复位（端点正常，静音属实）；
+/// 空结果连续达到阈值时熔断。缓冲的空结果由调用方在确认不熔断后再落 checkpoint，
+/// 避免熔断后空记录把分片标成"已完成静音"，修好之后重跑也救不回来。
+#[derive(Default)]
+struct EmptyTripwire {
+    pending_empty: usize,
+    seen_success: bool,
+}
+
+impl EmptyTripwire {
+    /// 记录一条结果，返回是否已熔断。
+    fn record(&mut self, empty: bool) -> bool {
+        if empty {
+            self.pending_empty += 1;
+        } else {
+            self.seen_success = true;
+        }
+        !self.seen_success && self.pending_empty >= EMPTY_RESULT_TRIPWIRE
+    }
+
+    fn tripped_error(&self) -> anyhow::Error {
+        anyhow::anyhow!(
+            "语音服务连续 {} 个分片返回空文本；请检查语音服务地址与模型是否支持音频输入 / The speech service returned empty text for {} consecutive segments; check that the endpoint and model support audio input",
+            self.pending_empty,
+            self.pending_empty
+        )
+    }
+}
 /// HTTP 重试：最多 3 次（1 次首发 + 2 次重试），指数退避 1s → 2s；
 /// 4xx 是确定性错误（鉴权/参数）不重试，5xx 与网络错误重试
 const MAX_ATTEMPTS: u32 = 3;
@@ -295,6 +328,8 @@ pub(crate) fn run_chunks(
     ));
 
     let mut err: Option<anyhow::Error> = None;
+    let mut tripwire = EmptyTripwire::default();
+    let mut pending_empty: Vec<(f64, f64)> = Vec::new();
     std::thread::scope(|scope| {
         let mut prefetch: Option<(usize, std::thread::ScopedJoinHandle<'_, Result<()>>)> = None;
         for (i, seg) in segs.iter().copied().enumerate() {
@@ -335,10 +370,32 @@ pub(crate) fn run_chunks(
             }
             match transcribe(i, seg, &chunk) {
                 Ok(text) => {
-                    // 空结果也记录完成；写盘失败则中断且不标记完成
-                    if let Err(e) = cp.record(start, end, text.as_deref().unwrap_or("")) {
-                        err = Some(e);
+                    let text = text.as_deref().unwrap_or("");
+                    let empty = text.trim().is_empty();
+                    if tripwire.record(empty) {
+                        err = Some(tripwire.tripped_error());
                         break;
+                    }
+                    // 空结果先缓冲，出现非空结果（或正常收尾）才落 checkpoint；
+                    // 熔断时不落，避免空记录把分片标成"已完成静音"
+                    if empty {
+                        pending_empty.push((start, end));
+                    } else {
+                        for (s, e) in std::mem::take(&mut pending_empty) {
+                            if let Err(e) = cp.record(s, e, "") {
+                                err = Some(e);
+                                break;
+                            }
+                        }
+                        // 空结果也记录完成；写盘失败则中断且不标记完成
+                        if err.is_none()
+                            && let Err(e) = cp.record(start, end, text)
+                        {
+                            err = Some(e);
+                        }
+                        if err.is_some() {
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
@@ -353,6 +410,15 @@ pub(crate) fn run_chunks(
         Ok::<(), anyhow::Error>(())
     })?;
     pb.finish();
+    // 正常收尾：缓冲的空结果（真实静音）落 checkpoint
+    if err.is_none() {
+        for (start, end) in pending_empty {
+            if let Err(e) = cp.record(start, end, "") {
+                err = Some(e);
+                break;
+            }
+        }
+    }
     if let Some(e) = err {
         return Err(e);
     }
@@ -444,29 +510,58 @@ fn run_api(
         }
         drop(tx);
 
+        let mut tripwire = EmptyTripwire::default();
+        let mut pending_empty: Vec<(f64, f64)> = Vec::new();
         for (i, r) in rx {
             match r {
+                _ if err.is_some() => {} // 已熔断/已出错：丢弃迟到结果
                 Ok(text) => {
-                    // 空结果（None）同样记录完成，避免静音 chunk 反复重跑
-                    if let Err(e) =
-                        cp.record(segs[i].start, segs[i].end, text.as_deref().unwrap_or(""))
-                    {
-                        if err.is_none() {
-                            err = Some(e);
+                    let text = text.as_deref().unwrap_or("");
+                    let empty = text.trim().is_empty();
+                    if tripwire.record(empty) {
+                        err = Some(tripwire.tripped_error());
+                        abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    // 空结果先缓冲，出现非空结果（或正常收尾）才落 checkpoint
+                    if empty {
+                        pending_empty.push((segs[i].start, segs[i].end));
+                        continue;
+                    }
+                    let mut failed = None;
+                    for (start, end) in std::mem::take(&mut pending_empty) {
+                        if let Err(e) = cp.record(start, end, "") {
+                            failed = Some(e);
+                            break;
                         }
+                    }
+                    if failed.is_none()
+                        && let Err(e) = cp.record(segs[i].start, segs[i].end, text)
+                    {
+                        failed = Some(e);
+                    }
+                    if let Some(e) = failed {
+                        err = Some(e);
                         abort.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 Err(e) => {
-                    if err.is_none() {
-                        err = Some(e.context(format!(
-                            "云端语音识别失败 / Cloud transcription failed (segment {i})"
-                        )));
-                        abort.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
+                    err = Some(e.context(format!(
+                        "云端语音识别失败 / Cloud transcription failed (segment {i})"
+                    )));
+                    abort.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             pb.inc(1);
+        }
+        // 正常收尾：缓冲的空结果（真实静音）落 checkpoint，避免静音 chunk 反复重跑
+        if err.is_none() {
+            for (start, end) in pending_empty {
+                if let Err(e) = cp.record(start, end, "") {
+                    err = Some(e);
+                    break;
+                }
+            }
         }
     });
     pb.finish();
@@ -1281,6 +1376,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn empty_tripwire_fires_only_without_any_success() {
+        let mut t = EmptyTripwire::default();
+        for _ in 0..EMPTY_RESULT_TRIPWIRE - 1 {
+            assert!(!t.record(true));
+        }
+        assert!(t.record(true), "连续空结果达到阈值必须熔断");
+        assert!(t.tripped_error().to_string().contains("空文本"));
+
+        // 一旦出现非空结果（端点其实正常），静音属实，不再熔断
+        let mut t = EmptyTripwire::default();
+        assert!(!t.record(true));
+        assert!(!t.record(false));
+        for _ in 0..EMPTY_RESULT_TRIPWIRE * 2 {
+            assert!(!t.record(true));
+        }
+    }
 
     #[test]
     fn transcription_upload_preserves_audio_bytes() {

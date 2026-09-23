@@ -682,32 +682,36 @@ async fn run_prepared(
         async {
             let transcript_work = async {
                 let cache_path = cfg.out_dir.join("transcript.json");
-                let cache = if cache_path.is_file() {
-                    let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
-                        .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
-                    execution::validate_events(&cache.events)?;
-                    cache
-                } else if let Some((events, source)) = selected {
-                    TranscriptCache { source, events }
-                } else {
-                    progress::stage("audio", "start");
-                    let audio = cfg.audio_path();
-                    // A verified marker proves audio extraction completed; a bare WAV may be truncated.
-                    if !verified_file(&audio, &cfg.out_dir.join("audio.sha256"))? {
-                        media::extract_audio(&media_path, &audio).await?;
-                        save_file_digest(&audio, &cfg.out_dir.join("audio.sha256"))?;
-                    }
-                    progress::stage("audio", "done");
-                    crate::dispatch::check_control()?;
-                    progress::stage("transcribe", "start");
-                    let events = asr::run(cfg, &audio).await?;
-                    progress::stage("transcribe", "done");
-                    TranscriptCache {
-                        source: "asr".into(),
-                        events,
+                let cache = match cached_transcript(&cache_path)?.or_else(|| {
+                    selected.map(|(events, source)| TranscriptCache { source, events })
+                }) {
+                    Some(cache) => cache,
+                    None => {
+                        progress::stage("audio", "start");
+                        let audio = cfg.audio_path();
+                        // A verified marker proves audio extraction completed; a bare WAV may be truncated.
+                        if !verified_file(&audio, &cfg.out_dir.join("audio.sha256"))? {
+                            media::extract_audio(&media_path, &audio).await?;
+                            save_file_digest(&audio, &cfg.out_dir.join("audio.sha256"))?;
+                        }
+                        progress::stage("audio", "done");
+                        crate::dispatch::check_control()?;
+                        progress::stage("transcribe", "start");
+                        let events = asr::run(cfg, &audio).await?;
+                        progress::stage("transcribe", "done");
+                        TranscriptCache {
+                            source: "asr".into(),
+                            events,
+                        }
                     }
                 };
-                crate::checkpoint::atomic_write(&cache_path, &serde_json::to_vec_pretty(&cache)?)?;
+                // 全空转写不入缓存：空缓存会在下次运行时挡住重新识别
+                if cache.events.iter().any(|e| !e.text.trim().is_empty()) {
+                    crate::checkpoint::atomic_write(
+                        &cache_path,
+                        &serde_json::to_vec_pretty(&cache)?,
+                    )?;
+                }
                 Ok::<_, anyhow::Error>(cache)
             };
             tokio::select! {
@@ -962,6 +966,25 @@ fn done_stats(sections: &[timeline::Section]) -> (usize, usize) {
     )
 }
 
+/// 读取转写缓存；全空的缓存是上次失败运行的残留（端点持续返回空文本却
+/// 无报错），丢弃并重新识别，而不是用"所选字幕没有可读文字"误导用户。
+fn cached_transcript(cache_path: &Path) -> Result<Option<TranscriptCache>> {
+    if !cache_path.is_file() {
+        return Ok(None);
+    }
+    let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(cache_path)?)
+        .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
+    if cache.events.iter().any(|e| !e.text.trim().is_empty()) {
+        execution::validate_events(&cache.events)?;
+        return Ok(Some(cache));
+    }
+    tracing::warn!(
+        "已保存的文字为空，丢弃并重新识别 / Saved transcript is empty; discarding it and transcribing again"
+    );
+    let _ = std::fs::remove_file(cache_path);
+    Ok(None)
+}
+
 /// Polish off-thread. If the polished body is unreadable, roll back to the
 /// originals and report the whole attempt as failed: nothing was kept.
 async fn polish_with_rollback(
@@ -998,8 +1021,14 @@ impl Outcome {
                 Status::Failed
             },
             message: (report.failed > 0).then(|| {
-                "校对未全部完成，原文已保留 / Proofreading incomplete; original text retained"
-                    .into()
+                let base = format!(
+                    "校对未全部完成（{}/{} 失败），原文已保留 / Proofreading incomplete ({}/{} failed); original text retained",
+                    report.failed, report.attempted, report.failed, report.attempted
+                );
+                match &report.note {
+                    Some(note) => format!("{base}；首个错误 / First error: {note}"),
+                    None => base,
+                }
             }),
             completed: Some(report.succeeded),
             total: Some(report.attempted),
@@ -1250,5 +1279,69 @@ mod tests {
         // 失败发生在 llama-server spawn 之前 → 无 llama_server_args 字段
         assert!(v.get("llama_server_args").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_transcript_cache_is_discarded_and_retried() {
+        use crate::timeline::TranscriptEvent;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.json");
+        let ev = |text: &str| TranscriptEvent {
+            start: 0.0,
+            end: 1.0,
+            text: text.into(),
+            raw: None,
+        };
+
+        // 全空缓存（上次端点故障的残留）→ 丢弃并删除文件，ASR 得以重跑
+        let empty = super::TranscriptCache {
+            source: "asr".into(),
+            events: vec![ev(""), ev("  ")],
+        };
+        std::fs::write(&path, serde_json::to_vec(&empty).unwrap()).unwrap();
+        assert!(super::cached_transcript(&path).unwrap().is_none());
+        assert!(!path.exists());
+
+        // 有可读文字的缓存 → 正常复用
+        let good = super::TranscriptCache {
+            source: "asr".into(),
+            events: vec![ev("你好")],
+        };
+        std::fs::write(&path, serde_json::to_vec(&good).unwrap()).unwrap();
+        assert!(super::cached_transcript(&path).unwrap().is_some());
+
+        // 损坏的缓存 → 报错且原文件保留
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(super::cached_transcript(&path).is_err());
+        assert!(path.exists());
+
+        // 不存在的缓存 → None
+        let missing = dir.path().join("missing.json");
+        assert!(super::cached_transcript(&missing).unwrap().is_none());
+    }
+
+    #[test]
+    fn outcome_from_report_includes_counts_and_first_error() {
+        let report = crate::llm::PolishReport {
+            attempted: 200,
+            succeeded: 63,
+            failed: 137,
+            note: Some("HTTP 404 model not found".into()),
+        };
+        let outcome = super::Outcome::from_report(&report);
+        assert_eq!(outcome.status, crate::artifact::Status::Partial);
+        let msg = outcome.message.unwrap();
+        assert!(msg.contains("137/200"), "应包含失败计数: {msg}");
+        assert!(msg.contains("HTTP 404"), "应包含首个错误原因: {msg}");
+
+        let clean = crate::llm::PolishReport {
+            attempted: 3,
+            succeeded: 3,
+            failed: 0,
+            note: None,
+        };
+        let outcome = super::Outcome::from_report(&clean);
+        assert_eq!(outcome.status, crate::artifact::Status::Succeeded);
+        assert!(outcome.message.is_none());
     }
 }
