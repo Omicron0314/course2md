@@ -1172,13 +1172,13 @@ impl Desktop {
             .child(
                 v_flex()
                     .relative()
-                    .flex_initial()
+                    .flex_1()
                     .w_full()
                     .min_h_0()
                     .child(
                         v_flex()
                             .id("setup-scroll")
-                            .flex_initial()
+                            .flex_1()
                             .w_full()
                             .min_w_0()
                             .min_h_0()
