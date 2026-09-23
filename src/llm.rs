@@ -25,10 +25,41 @@ pub const DEFAULT_PROMPT: &str = "你是视频逐字稿校对器。输入的每�
 /// 每次请求合并的语音段数。
 const BATCH: usize = 20;
 
+/// LLM 服务方言/登录方式。typed enum 取代散落的字符串比较。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LlmProvider {
+    /// OpenAI 兼容 /chat/completions 端点
+    #[default]
+    OpenAiCompatible,
+    /// 本地 Ollama 服务（OpenAI 兼容方言，无需密钥）
+    Ollama,
+    /// OpenAI Codex 订阅登录（ChatGPT 后端 Responses API）
+    Codex,
+}
+
+impl LlmProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "openai-compatible",
+            Self::Ollama => "ollama",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+impl std::fmt::Display for LlmProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmSettings {
     pub enabled: bool,
+    /// 服务方言/登录方式（默认 OpenAI 兼容）
+    pub provider: LlmProvider,
     /// OpenAI 兼容 base URL，如 https://api.deepseek.com/v1
     pub base_url: String,
     pub api_key: String,
@@ -49,6 +80,7 @@ impl Default for LlmSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: LlmProvider::default(),
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -73,13 +105,15 @@ pub fn endpoint(base_url: &str) -> String {
 
 /// 校验配置可直接使用。
 pub fn validate(s: &LlmSettings) -> Result<()> {
-    if s.base_url.trim().is_empty() {
+    if s.provider != LlmProvider::Codex && s.base_url.trim().is_empty() {
         bail!("未配置 LLM 服务地址。 / LLM base URL is missing. Run: course2md llm setup");
     }
     if s.model.trim().is_empty() {
         bail!("未配置 LLM 模型。 / LLM model is missing. Run: course2md llm setup");
     }
-    crate::config::ensure_http_url(&s.base_url)?;
+    if !s.base_url.trim().is_empty() {
+        crate::config::ensure_http_url(&s.base_url)?;
+    }
     Ok(())
 }
 
@@ -437,8 +471,8 @@ fn build_chat_body(
             "image_url": {"url": format!("data:image/jpeg;base64,{b64}")},
         }));
     }
-    Ok(chat_body(
-        &s.model,
+    Ok(crate::provider::chat_body(
+        s,
         &system,
         serde_json::Value::Array(content),
         CHAT_MAX_TOKENS,
@@ -622,13 +656,11 @@ pub(crate) fn send_chat_described(
                 .err
                 .downcast_ref::<crate::dispatch::Failure>()
                 .is_some_and(|failure| failure.unsupported_response_format);
-            if !(degradable && body.get("response_format").is_some()) {
+            if !(degradable && crate::provider::has_structured_format(s, body)) {
                 return Err(first);
             }
             let mut relaxed = body.clone();
-            if let Some(obj) = relaxed.as_object_mut() {
-                obj.remove("response_format");
-            }
+            crate::provider::strip_structured_format(s, &mut relaxed);
             // 降级请求只试一次：原请求已按 MAX_ATTEMPTS 重试过，这里只验证
             // response_format 兼容性，再走完整重试循环会成倍放大等待时间。
             let response = request_chat_once(agent, s, &relaxed, purpose, description)?;
@@ -682,18 +714,40 @@ fn request_chat_once(
     purpose: &str,
     description: &str,
 ) -> std::result::Result<serde_json::Value, ChatFailure> {
-    let url = endpoint(&s.base_url);
+    let url = crate::provider::endpoint(s);
+    let headers = crate::provider::auth_headers(s).map_err(|err| ChatFailure {
+        retryable: false,
+        err,
+    })?;
+    let sse = crate::provider::is_sse(s);
     crate::dispatch::json_request_described("llm", purpose, description, &url, body, || {
-        let request = agent.post(&url).set("Content-Type", "application/json");
-        let request = if s.api_key.is_empty() { request } else { request.set("Authorization", &format!("Bearer {}", s.api_key)) };
-        crate::dispatch::receive(request.send_json(body))
+        let mut request = agent.post(&url).set("Content-Type", "application/json");
+        for (name, value) in &headers {
+            request = request.set(name, value);
+        }
+        let response = crate::dispatch::receive(request.send_json(body))?;
+        // Codex Responses API 只提供 SSE 流：聚合为 chat/completions 形状，
+        // 下游校验与解析不变；非 2xx 原样上交（重试/降级逻辑要看状态码）
+        if sse && (200..300).contains(&response.status) {
+            let canonical = crate::provider::sse_to_chat_json(&response.body).map_err(|e| {
+                crate::dispatch::NetworkFailure {
+                    message: format!("{e:#}"),
+                    definitely_unsent: false,
+                }
+            })?;
+            return Ok(crate::dispatch::HttpResponse {
+                status: response.status,
+                body: serde_json::to_vec(&canonical).unwrap_or_default(),
+            });
+        }
+        Ok(response)
     }, |value| {
         anyhow::ensure!(value.get("error").is_none_or(serde_json::Value::is_null), "AI 服务返回错误内容 / AI service returned an error");
         let content = value["choices"][0]["message"]["content"].as_str().filter(|s| !s.trim().is_empty()).context("AI 服务响应缺少正文 / AI response is missing message.content")?;
         if purpose == "summary" { anyhow::ensure!(crate::summarize::parse_summary(content).is_some(), "服务返回的摘要结构无效 / Invalid summary structure"); }
         if purpose == "proofreading" {
             let parsed = parse_segments(content).context("服务返回的校对结构无效 / Invalid proofreading structure")?;
-            let input = body["messages"][1]["content"][0]["text"].as_str().context("校对输入结构无效 / Invalid proofreading input structure")?;
+            let input = crate::provider::user_input_text(body).context("校对输入结构无效 / Invalid proofreading input structure")?;
             let expected = serde_json::from_str::<Vec<serde_json::Value>>(input)?.len();
             anyhow::ensure!(segment_ids_match(&parsed, expected), "校对结果与原文段落不对应，已保留原文 / Proofread segments do not match the input");
         }
@@ -774,11 +828,7 @@ pub fn test_connection(s: &LlmSettings) -> Result<()> {
     } else {
         serde_json::Value::String("只回复两个字符：ok".into())
     };
-    let body = serde_json::json!({
-        "model": s.model,
-        "max_tokens": 8,
-        "messages": [{"role": "user", "content": user}],
-    });
+    let body = crate::provider::test_body(s, user);
     let fail_hint = if s.vision {
         "连接失败。请确认服务地址、密钥及模型，并检查图片输入支持。 / Connection failed. Check the URL, API key, model, and image input support."
     } else {
@@ -789,18 +839,32 @@ pub fn test_connection(s: &LlmSettings) -> Result<()> {
         .timeout(Duration::from_secs(60))
         .redirects(0)
         .build();
-    let request = agent.post(&endpoint(&s.base_url));
-    let request = if s.api_key.is_empty() {
-        request
-    } else {
-        request.set("Authorization", &format!("Bearer {}", s.api_key))
-    };
+    let mut request = agent.post(&crate::provider::endpoint(s));
+    for (name, value) in crate::provider::auth_headers(s)? {
+        request = request.set(&name, &value);
+    }
     let resp = request.send_json(body).context(fail_hint)?;
-    let v: serde_json::Value = resp
-        .into_json()
-        .context("无法解析响应 / Cannot parse response")?;
-    let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
-    println!("服务响应 / Service response: {}", text.trim());
+    let v: serde_json::Value = if crate::provider::is_sse(s) {
+        let mut bytes = Vec::new();
+        use std::io::Read as _;
+        resp.into_reader()
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .context("服务响应接收中断 / Service response was interrupted")?;
+        crate::provider::sse_to_chat_json(&bytes)?
+    } else {
+        resp.into_json().context("无法解析响应 / Cannot parse response")?
+    };
+    let text = v["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    anyhow::ensure!(
+        !text.is_empty(),
+        "服务返回空响应；请确认模型可用 / The service returned an empty response; make sure the model works"
+    );
+    println!("服务响应 / Service response: {text}");
     if s.vision {
         println!("已测试图片输入。 / Image input tested.");
     }
@@ -882,6 +946,8 @@ pub fn setup_interactive(
             .interact_opt()?
             .ok_or_else(|| anyhow::anyhow!("已取消设置，未保存配置。 / Setup cancelled; no configuration saved."))? == 1;
     }
+    // setup 面向 OpenAI 兼容端点；codex/ollama 登录态由此显式退出
+    cfg.llm.provider = LlmProvider::OpenAiCompatible;
     validate(&cfg.llm)?;
     cfg.llm.disable_hint |= disable_hint;
     cfg.llm.enabled = true;
@@ -902,6 +968,7 @@ pub fn print_status(cfg: &crate::settings::ConfigFile) {
         crate::settings::config_path().display()
     );
     println!("  LLM 润色 / Transcript polish: {}", state(s.enabled));
+    println!("  服务类型 / Provider: {}", s.provider);
     println!(
         "  服务地址 / Base URL: {}",
         if s.base_url.is_empty() {
@@ -982,6 +1049,7 @@ mod tests {
     fn test_settings() -> LlmSettings {
         LlmSettings {
             enabled: true,
+            provider: LlmProvider::OpenAiCompatible,
             base_url: "https://api.x.com/v1".into(),
             api_key: "k".into(),
             model: "m".into(),

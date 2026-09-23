@@ -14,12 +14,22 @@ fn login_is_standalone_or_precedes_video_processing() {
     ])
     .unwrap();
     assert!(login.source.is_some());
-    assert!(
-        Cli::try_parse_from(["course2md", "--logout", "bilibili"])
-            .unwrap()
-            .logout
-            .is_some()
-    );
+    for platform in ["bilibili", "ollama", "codex"] {
+        assert!(
+            Cli::try_parse_from(["course2md", "--login", platform])
+                .unwrap()
+                .login
+                .is_some(),
+            "rejected --login {platform}"
+        );
+        assert!(
+            Cli::try_parse_from(["course2md", "--logout", platform])
+                .unwrap()
+                .logout
+                .is_some(),
+            "rejected --logout {platform}"
+        );
+    }
     for args in [
         vec!["course2md", "--login", "youtube"],
         vec!["course2md", "--login", "bilibili", "--logout", "bilibili"],

@@ -34,7 +34,7 @@ First conversion in a terminal offers setup; scripts should pass options explici
     after_help = QUICK_START
 )]
 pub struct Cli {
-    /// 扫码登录，可接视频地址继续转换 / Log in with a QR code, optionally then process a video
+    /// 登录（bilibili 扫码；ollama 本地服务；codex 订阅），可接视频地址继续转换 / Log in (bilibili QR, ollama local, codex subscription), optionally then process a video
     #[arg(long, value_enum, conflicts_with_all = ["logout", "json"])]
     pub login: Option<LoginPlatform>,
 
@@ -55,6 +55,19 @@ pub struct Cli {
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum LoginPlatform {
     Bilibili,
+    Ollama,
+    Codex,
+}
+
+impl LoginPlatform {
+    /// 登录方法注册表（crate::login::methods）中的稳定标识
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Bilibili => "bilibili",
+            Self::Ollama => "ollama",
+            Self::Codex => "codex",
+        }
+    }
 }
 
 #[derive(Args, Clone, Debug, Default)]

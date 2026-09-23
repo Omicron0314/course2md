@@ -108,15 +108,15 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
-    if cli.logout.is_some() {
-        return course2md::auth::logout_bilibili();
+    if let Some(platform) = cli.logout {
+        return course2md::login::for_platform(platform).logout();
     }
-    if cli.login.is_some() {
+    if let Some(platform) = cli.login {
         anyhow::ensure!(
             cli.source.as_deref().is_none_or(config::looks_like_source),
-            "--login bilibili 后只能跟视频链接或本地视频路径 / After --login bilibili, provide only a video URL or local file path"
+            "--login 后只能跟视频链接或本地视频路径 / After --login, provide only a video URL or local file path"
         );
-        course2md::auth::login_bilibili()?;
+        course2md::login::for_platform(platform).login()?;
         if cli.source.is_none() {
             return Ok(());
         }
@@ -301,6 +301,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cfg.llm.api_key.clear();
             cfg.llm.base_url.clear();
             cfg.llm.model.clear();
+            cfg.llm.provider = course2md::llm::LlmProvider::OpenAiCompatible;
             cfg.llm.enabled = false;
             cfg.llm.summarize = false;
             cfg.llm.prompt = None;

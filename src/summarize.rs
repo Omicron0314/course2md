@@ -144,7 +144,7 @@ fn chat_once(
     user: &str,
     description: &str,
 ) -> Result<String> {
-    let body = llm::chat_body(&s.model, sys, user, llm::CHAT_MAX_TOKENS);
+    let body = crate::provider::chat_body(s, sys, user, llm::CHAT_MAX_TOKENS);
     llm::send_chat_described(agent, s, &body, "summary", description)
         .map_err(|f| f.err)
         .context("LLM 总结请求失败 / LLM summary request failed")
