@@ -5,6 +5,9 @@
 
 ## [未发布]
 
+- 修复纯文本 LLM 校对按 Section 切片导致的请求放大缺陷：跨 Section 统一按 20 条语音合并批次，避免因画面频繁切换导致请求数被放大十几倍。
+- CLI 增加 `--summarize` 与 `--no-summarize` 参数，支持直接在命令行开启或禁用 AI 总结，且支持单独使用 `--summarize` 快速生成视频总结（跳过逐句校对）。
+
 ## [2.0.0-rc.3] — 2026-09-10
 
 - 修复 Linux/Windows 桌面端无法保存 AI 服务 API Key 的问题：优先使用系统钥匙串（Linux Secret Service / Windows 凭据管理器），不可用时回退到文件存储（0600 权限）。

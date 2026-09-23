@@ -35,6 +35,11 @@ fn resolve_llm(opts: &RunOpts, file: &settings::ConfigFile) -> llm::LlmSettings 
     if opts.no_llm_hint {
         s.disable_hint = true;
     }
+    if opts.no_summarize {
+        s.summarize = false;
+    } else if opts.summarize {
+        s.summarize = true;
+    }
     s
 }
 
@@ -194,5 +199,26 @@ mod tests {
             .unwrap()
             .validate()
             .unwrap();
+    }
+
+    #[test]
+    fn cli_summarize_flag_overrides_config() {
+        let mut file = settings::ConfigFile::default();
+        file.llm.summarize = false;
+        let opts = RunOpts {
+            summarize: true,
+            ..Default::default()
+        };
+        let cfg = resolve("video".into(), &opts, &file).unwrap();
+        assert!(cfg.llm.summarize);
+
+        let mut file = settings::ConfigFile::default();
+        file.llm.summarize = true;
+        let opts = RunOpts {
+            no_summarize: true,
+            ..Default::default()
+        };
+        let cfg = resolve("video".into(), &opts, &file).unwrap();
+        assert!(!cfg.llm.summarize);
     }
 }

@@ -230,6 +230,16 @@ pub struct RunOpts {
     #[arg(help_heading = "AI 润色 / AI proofreading")]
     pub no_llm_hint: bool,
 
+    /// 本次生成视频总结并写入笔记 / Generate video summary (TL;DR, key points, outline)
+    #[arg(long)]
+    #[arg(help_heading = "AI 润色 / AI proofreading")]
+    pub summarize: bool,
+
+    /// 本次禁用视频总结 / Disable video summary for this run
+    #[arg(long, conflicts_with = "summarize")]
+    #[arg(help_heading = "AI 润色 / AI proofreading")]
+    pub no_summarize: bool,
+
     /// 显示诊断日志；-vv 显示调试细节 / Diagnostic logs; -vv for debug details
     #[arg(short, long, action = clap::ArgAction::Count)]
     #[arg(help_heading = "终端输出 / Terminal output")]
