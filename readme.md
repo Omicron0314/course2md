@@ -11,7 +11,7 @@ Turn **YouTube, Bilibili, or local videos** into illustrated Markdown / HTML not
 - Slide-style notes: screenshots are captured when the picture changes, the transcript is organized into paragraphs under each screenshot, and everything is exported as `course.md` and `course.html` (add JSON with `--formats`).
 - YouTube, Bilibili and local files. Platform subtitles are preferred; speech recognition runs when no subtitles exist (`--transcript-source subtitle|asr` forces either side).
 - Local speech recognition with a choice of backends: Apple Silicon CoreML (no extra runtime), Intel NPU, llama.cpp GPU/CPU, or a cloud API. Recognition data stays on your machine unless you choose the cloud backend.
-- Optional AI proofreading and summaries through any OpenAI-compatible endpoint — off by default; `course2md llm setup` configures it.
+- Optional AI proofreading and summaries through any OpenAI-compatible endpoint, a local Ollama server (`--login ollama`), or a ChatGPT subscription via Codex login (`--login codex`) — off by default; `course2md llm setup` configures a custom endpoint.
 - Resumable conversions (speech checkpoints, `--resume`) and script-friendly output: NDJSON progress (`--json`), quiet mode, bilingual 中文 / English CLI help.
 - The desktop app adds background tasks with pause and cancel, a course library with folders and search, a reader with outline, find, version history and export, and 10 built-in themes.
 
@@ -97,6 +97,7 @@ The first conversion in a terminal offers interactive setup; scripts should pass
 | --- | --- |
 | `course2md <URL or file>` | Convert a video into notes |
 | `course2md --login bilibili` / `--logout bilibili` | Scan a QR code to log in to Bilibili / remove the saved login |
+| `course2md --login ollama` / `--login codex` | Use a local Ollama server / import the Codex CLI's ChatGPT login (browser authorization offered when absent) |
 | `course2md doctor` | Check tools, speech backends and settings |
 | `course2md config init` / `config show` | Create a configuration template / show the config path and settings |
 | `course2md models list` / `models prepare` | Check downloaded models / pre-download a model |

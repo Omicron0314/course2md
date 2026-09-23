@@ -11,7 +11,7 @@
 - 幻灯片式笔记：画面变化时自动截图，文字稿按截图组织成段落，导出 `course.md` 与 `course.html`（`--formats` 可加 JSON）。
 - 支持 YouTube、Bilibili 与本地文件。默认优先使用平台字幕，无字幕时自动语音识别（`--transcript-source subtitle|asr` 可强制指定）。
 - 本地语音识别可选后端：Apple Silicon CoreML（零额外运行时）、Intel NPU、llama.cpp GPU/CPU 或云端 API；除云端后端外，识别数据不出本机。
-- 可选 AI 润色与总结，兼容任意 OpenAI 接口，默认关闭；`course2md llm setup` 一键配置。
+- 可选 AI 润色与总结：兼容任意 OpenAI 接口，也可用本地 Ollama（`--login ollama`）或 ChatGPT 订阅（`--login codex` 导入 codex CLI 登录态），默认关闭；`course2md llm setup` 配置自定义端点。
 - 转换可从检查点恢复（`--resume`），对脚本友好：NDJSON 进度（`--json`）、静默模式、「中文 / English」双语 CLI 帮助。
 - 桌面应用提供可暂停、取消的后台任务，支持文件夹与搜索的课程库，带目录、查找、版本与导出的阅读器，以及 10 套内置主题。
 
@@ -97,6 +97,7 @@ course2md ./lecture.mp4 -o ./notes             # 指定输出根目录
 | --- | --- |
 | `course2md <链接或文件>` | 把视频转换成笔记 |
 | `course2md --login bilibili` / `--logout bilibili` | 扫码登录 Bilibili / 清除保存的登录 |
+| `course2md --login ollama` / `--login codex` | 使用本地 Ollama 服务 / 导入 codex CLI 的 ChatGPT 登录态（未安装时可用浏览器授权） |
 | `course2md doctor` | 检查依赖、识别后端和配置 |
 | `course2md config init` / `config show` | 生成配置模板 / 显示配置路径和文件设置 |
 | `course2md models list` / `models prepare` | 检查已下载模型 / 预先下载模型 |

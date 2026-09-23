@@ -5,6 +5,9 @@
 
 ## [未发布]
 
+- 新增插件化登录框架：登录方法实现统一 trait 后一行注册即可接入 `--login/--logout`；新增 `--login ollama`（本地 Ollama 服务发现与模型选择）与 `--login codex`（导入 codex CLI 的 ChatGPT 登录态，token 自动刷新；无 codex CLI 时可浏览器 PKCE 授权）。桌面端 AI 服务同样支持 Ollama 本地与 Codex 订阅登录。
+- 修复语音端点持续返回空文本时的静默失败：连续空分片现在提前熔断并明确报错（此前约 200 次请求全部记为"静音"且不产出笔记）；全空转写缓存不再毒化后续重跑；润色失败的结果消息带失败计数与首个错误原因。
+
 ## [2.0.0-rc.3] — 2026-09-10
 
 - 修复 Linux/Windows 桌面端无法保存 AI 服务 API Key 的问题：优先使用系统钥匙串（Linux Secret Service / Windows 凭据管理器），不可用时回退到文件存储（0600 权限）。
