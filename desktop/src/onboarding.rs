@@ -602,6 +602,11 @@ impl Desktop {
         if step == Step::Account {
             self.refresh_account(cx);
         }
+        if step == Step::Ai
+            && self.onboarding.ai.draft.protocol == preferences::ServiceProtocol::CodexResponses
+        {
+            self.codex_refresh_status(crate::codex_ui::CodexSurface::Onboarding, cx);
+        }
         self.onboarding.step = step;
         self.onboarding.notice = None;
         self.onboarding.scroll.set_offset(point(px(0.), px(0.)));
@@ -724,9 +729,14 @@ impl Desktop {
             smol::block_on(async move {
                 let mut results = Vec::new();
                 for kind in required {
-                    let evidence =
+                    // Codex 订阅服务走 CLI 方言（Responses/SSE）检查登录态与模型
+                    let evidence = if config.protocol == preferences::ServiceProtocol::CodexResponses
+                    {
+                        service_test::test_codex_blocking(&config, kind, &cancel)
+                    } else {
                         service_test::test_service(config.clone(), kind, vault.clone(), cancel.clone())
-                            .await;
+                            .await
+                    };
                     let passed = evidence.outcome == TestOutcome::Passed;
                     results.push((kind, evidence));
                     if !passed || cancel.load(Ordering::Acquire) {
@@ -1495,7 +1505,115 @@ impl Desktop {
             .into_any_element()
     }
 
+    /// 引导的 AI 服务类型切换：无密钥协议收起认证编辑，并按协议预填/替换固定地址。
+    fn setup_ai_kind_switched(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let protocol = match kind {
+            "ollama" => preferences::ServiceProtocol::OllamaChat,
+            "codex" => preferences::ServiceProtocol::CodexResponses,
+            _ => preferences::ServiceProtocol::AiChat,
+        };
+        {
+            let current = self.onboarding.ai.value(InputField::Address, cx);
+            let service = self.onboarding.service_mut(ServicePurpose::Ai);
+            // 派生名称（空或与旧地址主机一致）跟随新类型重新生成；手动命名保留
+            let previous_host = preferences::service_host(&current, service.draft.protocol);
+            if service.draft.name.trim().is_empty()
+                || Some(service.draft.name.trim()) == previous_host.as_deref()
+            {
+                service.draft.name.clear();
+            }
+            service.draft.protocol = protocol;
+            service.evidence.clear();
+            service.errors.clear();
+            service.models.invalidate();
+            if protocol.keyless() {
+                service.draft.authentication = Authentication::None;
+                service.inputs[&InputField::Key].update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
+            }
+        }
+        let codex_addresses = [
+            preferences::CODEX_ADDRESS,
+            course2md::provider::CODEX_RESPONSES_URL,
+        ];
+        let current = self.onboarding.ai.value(InputField::Address, cx);
+        let current = current.trim().trim_end_matches('/').to_string();
+        let is_codex_address = codex_addresses.contains(&current.as_str());
+        let next = match protocol {
+            preferences::ServiceProtocol::CodexResponses => Some(preferences::CODEX_ADDRESS),
+            preferences::ServiceProtocol::OllamaChat if current.is_empty() || is_codex_address => {
+                Some(preferences::OLLAMA_DEFAULT_ADDRESS)
+            }
+            // 离开 Codex 时清掉固定地址（非用户数据），其余输入保留
+            _ if is_codex_address => Some(""),
+            _ => None,
+        };
+        if let Some(next) = next {
+            let service = self.onboarding.service_mut(ServicePurpose::Ai);
+            // set_value 不触发 Change 事件，草稿在此同步
+            service.inputs[&InputField::Address].update(cx, |input, cx| {
+                input.set_value(next, window, cx);
+            });
+            service.draft.address = next.to_string();
+        }
+        if protocol == preferences::ServiceProtocol::CodexResponses {
+            self.codex_refresh_status(crate::codex_ui::CodexSurface::Onboarding, cx);
+        }
+        cx.notify();
+    }
+
+    /// codex_ui 的引导钩子：仅在 AI 步骤仍在编辑 Codex 服务时落目录/错误。
+    pub(super) fn onboarding_codex_models_loading(&mut self) -> bool {
+        if !self.onboarding.active {
+            return false;
+        }
+        let service = self.onboarding.service_mut(ServicePurpose::Ai);
+        if service.draft.protocol != preferences::ServiceProtocol::CodexResponses {
+            return false;
+        }
+        service.models.begin_external();
+        true
+    }
+    pub(super) fn onboarding_codex_models_failed(&mut self, message: String) {
+        let service = self.onboarding.service_mut(ServicePurpose::Ai);
+        if service.draft.protocol == preferences::ServiceProtocol::CodexResponses {
+            service
+                .models
+                .reject(crate::model_discovery::Error::Custom(message));
+        }
+    }
+    pub(super) fn onboarding_codex_catalog(
+        &mut self,
+        models: Vec<String>,
+        suggested: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.onboarding.active {
+            return;
+        }
+        let service = self.onboarding.service_mut(ServicePurpose::Ai);
+        if service.draft.protocol != preferences::ServiceProtocol::CodexResponses {
+            return;
+        }
+        service.models.prime(models);
+        let input = service.inputs[&InputField::Model].clone();
+        crate::codex_ui::autofill_input(input, suggested, cx);
+    }
+    pub(super) fn onboarding_codex_logged_out(&mut self) {
+        let service = self.onboarding.service_mut(ServicePurpose::Ai);
+        if service.draft.protocol == preferences::ServiceProtocol::CodexResponses {
+            service.models.invalidate();
+        }
+    }
+
     fn fetch_setup_models(&mut self, purpose: ServicePurpose, cx: &mut Context<Self>) {
+        if self.onboarding.service(purpose).draft.protocol
+            == preferences::ServiceProtocol::CodexResponses
+        {
+            self.codex_refresh_models(crate::codex_ui::CodexSurface::Onboarding, cx);
+            return;
+        }
         let service = self.onboarding.service(purpose);
         let draft = service.current_draft(cx);
         let typed_key = Secret::new(service.value(InputField::Key, cx));
@@ -1689,9 +1807,50 @@ impl Desktop {
                 ),
             );
         }
-        body = body
-            .child(self.setup_input_row(purpose, InputField::Address, "服务地址", cx))
-            .child(
+        if purpose == ServicePurpose::Ai {
+            body = body.child(
+                self.setup_reveal(
+                    "setup-ai-kind-reveal",
+                    stacked_field(
+                        "setup-ai-kind-label",
+                        "服务类型",
+                        icons::cloud(),
+                        SingleChoiceGroup::new("setup-ai-kind", "AI 服务类型")
+                            .full_width()
+                            .options([
+                                ("openai", "OpenAI 兼容服务"),
+                                ("ollama", "Ollama 本地服务"),
+                                ("codex", "OpenAI Codex 订阅"),
+                            ])
+                            .selected(match service.draft.protocol {
+                                preferences::ServiceProtocol::OllamaChat => "ollama",
+                                preferences::ServiceProtocol::CodexResponses => "codex",
+                                _ => "openai",
+                            })
+                            .disabled(busy)
+                            .on_change(cx.listener(
+                                |this, value: &SharedString, window, cx| {
+                                    this.setup_ai_kind_switched(value.as_ref(), window, cx)
+                                },
+                            )),
+                    ),
+                ),
+            );
+        }
+        let codex = service.draft.protocol == preferences::ServiceProtocol::CodexResponses;
+        if !codex {
+            body = body.child(self.setup_input_row(purpose, InputField::Address, "服务地址", cx));
+        } else {
+            body = body.child(
+                help(
+                    "setup-codex-endpoint",
+                    "请求固定发往 OpenAI Codex 后端；无需服务地址与 API Key。",
+                )
+                .text_size(TEXT_AUX),
+            );
+        }
+        if !service.draft.protocol.keyless() {
+            body = body.child(
                 self.setup_reveal(
                     format!("setup-auth-reveal-{}", purpose as usize),
                     stacked_field(
@@ -1727,8 +1886,16 @@ impl Desktop {
                     ),
                 ),
             );
-        if service.draft.authentication == Authentication::ApiKey {
+        }
+        if !service.draft.protocol.keyless() && service.draft.authentication == Authentication::ApiKey {
             body = body.child(self.setup_input_row(purpose, InputField::Key, "API Key", cx));
+        }
+        if codex {
+            body = body.child(self.codex_account_section(
+                crate::codex_ui::CodexSurface::Onboarding,
+                busy,
+                cx,
+            ));
         }
         body = body.child(self.setup_input_row(purpose, InputField::Model, "模型", cx));
         if purpose == ServicePurpose::Ai {

@@ -56,7 +56,8 @@ impl TestKind {
                 protocol,
                 ServiceProtocol::SpeechTranscriptions | ServiceProtocol::SpeechChat
             ),
-            _ => protocol == ServiceProtocol::AiChat,
+            // Ollama 与 AiChat 同为 chat/completions 方言；Codex 由 test_codex_blocking 覆盖
+            _ => matches!(protocol, ServiceProtocol::AiChat | ServiceProtocol::OllamaChat),
         }
     }
 }
@@ -108,6 +109,67 @@ pub fn test_service_blocking(
     cancelled: &AtomicBool,
 ) -> ServiceTestEvidence {
     run_test(config, kind, vault, cancelled, &HttpTransport)
+}
+
+/// Codex 订阅服务的检查：复用 CLI 的 Responses/SSE 方言（course2md::llm::test_connection），
+/// 桌面自带的 chat/completions 传输不适用于 Codex。证据模型与其他服务一致；
+/// 校对结构契约由转换流程在运行时复核（失败保留原文）。
+pub fn test_codex_blocking(
+    config: &ServiceConfiguration,
+    kind: TestKind,
+    cancelled: &AtomicBool,
+) -> ServiceTestEvidence {
+    let mut evidence = ServiceTestEvidence {
+        fingerprint: config.fingerprint(kind.contract()),
+        contract: kind.contract().into(),
+        tested_at: now_seconds(),
+        outcome: TestOutcome::NotSent,
+        message: String::new(),
+        details: vec![
+            format!("用途：{}；Codex 连接检查（登录态与模型可用性）", kind.label()),
+            format!("请求模型：{}", config.model),
+        ],
+    };
+    if cancelled.load(Ordering::Acquire) {
+        evidence.message = "测试已取消，尚未发送请求".into();
+        return evidence;
+    }
+    if kind == TestKind::Speech || config.model.trim().is_empty() {
+        evidence.message = "所选服务不支持这项测试，尚未发送请求".into();
+        return evidence;
+    }
+    let settings = course2md::llm::LlmSettings {
+        enabled: true,
+        provider: course2md::llm::LlmProvider::Codex,
+        model: config.model.clone(),
+        vision: kind == TestKind::Vision,
+        ..Default::default()
+    };
+    match course2md::llm::test_connection(&settings) {
+        Ok(()) => {
+            evidence.outcome = TestOutcome::Passed;
+            evidence.message = "连接测试通过：Codex 登录与模型可用".into();
+            evidence
+                .details
+                .push("仅验证登录态、模型与图文输入路径，不代表所有内容均可校对".into());
+        }
+        Err(error) => {
+            // 登录文件缺失是配置拒绝（阻断补做）；其余为一般性未通过
+            let logged_out = matches!(course2md::login::codex::load_tokens(), Ok(None));
+            evidence.outcome = if logged_out {
+                TestOutcome::AuthenticationRefused
+            } else {
+                TestOutcome::ContractMismatch
+            };
+            let reason = format!("{error:#}");
+            evidence.message = if logged_out {
+                "Codex 登录已失效或尚未连接，请重新连接账号".into()
+            } else {
+                format!("连接测试未通过：{}", reason.chars().take(240).collect::<String>())
+            };
+        }
+    }
+    evidence
 }
 
 struct HttpRequest {

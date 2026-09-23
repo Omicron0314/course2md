@@ -27,6 +27,8 @@ pub enum Error {
     Refused(u16),
     InvalidResponse,
     TooLarge,
+    /// A provider-specific failure with an already sanitized, user-readable message.
+    Custom(String),
     Cancelled,
 }
 
@@ -48,6 +50,7 @@ impl Error {
             }
             Self::InvalidResponse => "未能识别服务返回的模型列表，可手动填写模型 ID".into(),
             Self::TooLarge => "服务返回的模型列表过大，可手动填写模型 ID".into(),
+            Self::Custom(message) => message.clone(),
             Self::Cancelled => "已取消获取模型，可手动填写模型 ID".into(),
         }
     }
@@ -169,6 +172,18 @@ impl State {
             active.cancelled.store(true, Ordering::Release);
         }
         self.status = Status::Idle;
+    }
+    /// Seed choices obtained without HTTP discovery (an account login's own catalog).
+    /// There is no connection to invalidate; the next `invalidate` clears them.
+    pub fn prime(&mut self, models: Vec<String>) {
+        self.invalidate();
+        self.status = Status::Ready(models);
+    }
+    /// Begin an externally driven fetch (no HTTP [`Request`]); complete with
+    /// [`State::prime`] or [`State::reject`]. Gives the shared field its loading state.
+    pub fn begin_external(&mut self) {
+        self.invalidate();
+        self.status = Status::Loading;
     }
     pub fn reject(&mut self, error: Error) {
         self.invalidate();
@@ -460,7 +475,9 @@ pub fn model_field_with_error(
                                 PopupMenuItem::new(model.clone())
                                     .checked(*model == selected)
                                     .on_click(move |_, window, cx| {
-                                        if choices_current.as_ref().is_none_or(|cancelled| {
+                                        // A primed (account-bound) list has no ticket; a
+                                        // cancelled ticket disables an already-open menu.
+                                        if choices_current.as_ref().is_some_and(|cancelled| {
                                             cancelled.load(Ordering::Acquire)
                                         }) {
                                             return;
@@ -637,6 +654,29 @@ mod tests {
             Ok(vec!["current-model".into()])
         ));
         assert_eq!(state.models(), &["current-model"]);
+    }
+
+    #[test]
+    fn primed_catalog_behaves_like_a_ready_list_until_invalidated() {
+        let mut state = State::default();
+        state.prime(vec!["gpt-fixture".into()]);
+        assert_eq!(state.models(), &["gpt-fixture"]);
+        // 无连接票据：候选保持可选（菜单点击守卫只拒绝已取消的票据）
+        assert!(state.active.is_none());
+        state.begin_external();
+        assert!(state.loading());
+        assert!(state.models().is_empty());
+        state.reject(Error::Custom("fixture failure".into()));
+        assert!(matches!(state.status(), Status::Failed(Error::Custom(_))));
+        assert_eq!(
+            state.models().len(),
+            0,
+            "失败状态不提供候选，仍可手动填写"
+        );
+        state.prime(vec!["gpt-fixture".into()]);
+        state.invalidate();
+        assert!(state.models().is_empty());
+        assert!(matches!(state.status(), Status::Idle));
     }
 
     struct FakeTransport {

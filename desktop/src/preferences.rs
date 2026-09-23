@@ -257,13 +257,17 @@ pub enum ServiceProtocol {
     SpeechTranscriptions,
     SpeechChat,
     AiChat,
+    /// 本地 Ollama 服务（OpenAI 兼容方言，无需密钥）
+    OllamaChat,
+    /// OpenAI Codex 订阅登录（ChatGPT 后端 Responses API；凭据由 CLI 令牌文件持有）
+    CodexResponses,
 }
 
 impl ServiceProtocol {
     pub fn purpose(self) -> ServicePurpose {
         match self {
             Self::SpeechTranscriptions | Self::SpeechChat => ServicePurpose::Speech,
-            Self::AiChat => ServicePurpose::Ai,
+            Self::AiChat | Self::OllamaChat | Self::CodexResponses => ServicePurpose::Ai,
         }
     }
 
@@ -272,15 +276,46 @@ impl ServiceProtocol {
             Self::SpeechTranscriptions => "语音转录（/audio/transcriptions）",
             Self::SpeechChat => "音频聊天（/chat/completions）",
             Self::AiChat => "AI 聊天（/chat/completions）",
+            Self::OllamaChat => "Ollama 本地服务（/v1/chat/completions）",
+            Self::CodexResponses => "OpenAI Codex 订阅（/responses）",
         }
     }
 
     pub fn endpoint_suffix(self) -> &'static str {
         match self {
             Self::SpeechTranscriptions => "/audio/transcriptions",
-            Self::SpeechChat | Self::AiChat => "/chat/completions",
+            Self::SpeechChat | Self::AiChat | Self::OllamaChat => "/chat/completions",
+            Self::CodexResponses => "/responses",
         }
     }
+
+    /// 无需 API Key 的服务类型：Ollama 本地服务不鉴权，Codex 由 CLI 令牌文件鉴权。
+    pub fn keyless(self) -> bool {
+        matches!(self, Self::OllamaChat | Self::CodexResponses)
+    }
+
+    /// 该协议对应的 CLI LLM 方言（仅 AI 用途参与映射）。
+    pub fn llm_provider(self) -> course2md::llm::LlmProvider {
+        match self {
+            Self::OllamaChat => course2md::llm::LlmProvider::Ollama,
+            Self::CodexResponses => course2md::llm::LlmProvider::Codex,
+            _ => course2md::llm::LlmProvider::OpenAiCompatible,
+        }
+    }
+}
+
+/// Codex 订阅登录的固定服务地址（CLI 方言端点固定，见 course2md::provider）。
+pub const CODEX_ADDRESS: &str = course2md::provider::CODEX_BASE_URL;
+/// Ollama 本地服务的默认地址（与 CLI 登录一致）。
+pub const OLLAMA_DEFAULT_ADDRESS: &str = "http://localhost:11434";
+
+/// 地址在其协议下归一化后的展示主机名——空服务名称的自动取值来源。
+pub fn service_host(address: &str, protocol: ServiceProtocol) -> Option<String> {
+    let endpoint = normalize_endpoint(address, protocol).ok()?;
+    url::Url::parse(&endpoint)
+        .ok()?
+        .host_str()
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,7 +397,10 @@ impl ServiceDraft {
                 message: "模型 ID 不能包含换行或控制字符".into(),
             });
         }
-        if self.authentication == Authentication::ApiKey && self.credential.is_none() {
+        if !self.protocol.keyless()
+            && self.authentication == Authentication::ApiKey
+            && self.credential.is_none()
+        {
             errors.push(FieldError {
                 field: "api_key",
                 message: "此认证方式需要 API Key".into(),
@@ -389,6 +427,12 @@ impl ServiceDraft {
             .host_str()
             .unwrap_or_default()
             .to_owned();
+        // 无密钥协议（Ollama 本地、Codex 登录态）不持有任何凭据
+        let authentication = if self.protocol.keyless() {
+            Authentication::None
+        } else {
+            self.authentication
+        };
         Ok(ServiceConfiguration {
             name: if self.name.trim().is_empty() {
                 host
@@ -398,13 +442,13 @@ impl ServiceDraft {
             protocol: self.protocol,
             endpoint,
             model: self.model.trim().to_owned(),
-            authentication: self.authentication,
-            credential: if self.authentication == Authentication::ApiKey {
+            authentication,
+            credential: if authentication == Authentication::ApiKey {
                 self.credential.clone()
             } else {
                 None
             },
-            credential_source: if self.authentication == Authentication::ApiKey {
+            credential_source: if authentication == Authentication::ApiKey {
                 self.credential_source.clone()
             } else {
                 None
@@ -1282,6 +1326,7 @@ impl Store {
             if version.config.protocol.purpose() != ServicePurpose::Ai {
                 bail!("所选服务不支持 AI 校对或摘要");
             }
+            config.llm.provider = version.config.protocol.llm_provider();
             config.llm.base_url = version.config.endpoint.clone();
             config.llm.model = version.config.model.clone();
         }
@@ -1639,6 +1684,8 @@ fn clear_service_fields(config: &mut ConfigFile) {
     strip_secrets(config);
     config.asr_api.base_url.clear();
     config.asr_api.model.clear();
+    // 服务绑定未生效时不残留其他服务的方言选择
+    config.llm.provider = course2md::llm::LlmProvider::default();
     config.llm.base_url.clear();
     config.llm.model.clear();
 }
@@ -1672,7 +1719,12 @@ pub fn normalize_endpoint(address: &str, protocol: ServiceProtocol) -> Result<St
         }
     }
     if !path.ends_with(desired) {
-        url.set_path(&format!("{path}{desired}"));
+        // Ollama 接受主机地址或 /v1 基础地址，统一补全到 OpenAI 兼容端点
+        if protocol == ServiceProtocol::OllamaChat && !path.ends_with("/v1") {
+            url.set_path(&format!("{path}/v1{desired}"));
+        } else {
+            url.set_path(&format!("{path}{desired}"));
+        }
     } else {
         let path = path.to_owned();
         url.set_path(&path);
@@ -2030,6 +2082,92 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn ollama_and_codex_endpoints_normalize_to_their_dialects() {
+        // Ollama：主机地址、/v1 基础地址与完整接口地址都归一到 OpenAI 兼容端点
+        for address in [
+            "http://localhost:11434",
+            "http://localhost:11434/",
+            "http://localhost:11434/v1",
+            "http://localhost:11434/v1/chat/completions",
+        ] {
+            assert_eq!(
+                normalize_endpoint(address, ServiceProtocol::OllamaChat).unwrap(),
+                "http://localhost:11434/v1/chat/completions",
+                "address {address}"
+            );
+        }
+        assert!(
+            normalize_endpoint("http://localhost:11434/v1/responses", ServiceProtocol::OllamaChat)
+                .is_err()
+        );
+        // Codex：固定地址归一到 Responses 端点，幂等
+        let endpoint = normalize_endpoint(CODEX_ADDRESS, ServiceProtocol::CodexResponses).unwrap();
+        assert_eq!(endpoint, course2md::provider::CODEX_RESPONSES_URL);
+        assert_eq!(
+            normalize_endpoint(&endpoint, ServiceProtocol::CodexResponses).unwrap(),
+            endpoint
+        );
+        assert!(
+            normalize_endpoint("https://example.test/v1/responses", ServiceProtocol::AiChat)
+                .is_err()
+        );
+        assert!(
+            normalize_endpoint("https://example.test/v1/chat/completions", ServiceProtocol::CodexResponses)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn keyless_services_publish_and_map_to_cli_providers() {
+        for (protocol, address, provider) in [
+            (
+                ServiceProtocol::OllamaChat,
+                "http://localhost:11434",
+                course2md::llm::LlmProvider::Ollama,
+            ),
+            (
+                ServiceProtocol::CodexResponses,
+                CODEX_ADDRESS,
+                course2md::llm::LlmProvider::Codex,
+            ),
+        ] {
+            let (directory, mut store) = isolated();
+            let mut draft = ServiceDraft::new(ServicePurpose::Ai);
+            draft.protocol = protocol;
+            draft.authentication = Authentication::None;
+            draft.address = address.into();
+            draft.model = "fixture-model".into();
+            let draft = store.save_service_draft(draft, None).unwrap();
+            let version = store
+                .publish_service(&draft.id, BindingScope::Defaults)
+                .unwrap();
+            assert_eq!(version.config.protocol, protocol);
+            assert_eq!(version.config.credential, None);
+
+            let mut config = ConfigFile::default();
+            config.llm.enabled = true;
+            let resolved = store
+                .config_for_refs(&config, &store.default_refs())
+                .unwrap();
+            assert_eq!(resolved.llm.provider, provider);
+            assert!(resolved.llm.api_key.is_empty());
+            assert_eq!(resolved.llm.model, "fixture-model");
+            assert!(resolved.llm.base_url.starts_with("http"));
+
+            // 持久化往返：新协议版本在重启后仍完整可用
+            let reopened = Store::open(directory.path(), store.vault());
+            assert_eq!(
+                reopened.version(&version.id).unwrap().config,
+                version.config
+            );
+            let resolved = reopened
+                .config_for_refs(&config, &reopened.default_refs())
+                .unwrap();
+            assert_eq!(resolved.llm.provider, provider);
+        }
     }
 
     #[test]

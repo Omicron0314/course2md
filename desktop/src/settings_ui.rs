@@ -399,6 +399,8 @@ fn service_protocol_label(protocol: ServiceProtocol) -> &'static str {
         ServiceProtocol::SpeechTranscriptions => "语音转录",
         ServiceProtocol::SpeechChat => "音频对话",
         ServiceProtocol::AiChat => "AI 对话",
+        ServiceProtocol::OllamaChat => "Ollama 本地",
+        ServiceProtocol::CodexResponses => "Codex 订阅",
     }
 }
 
@@ -2419,6 +2421,7 @@ impl Desktop {
                 self.preferences
                     .service_retired_in_snapshot(&version.service_id)
             });
+        let draft_protocol = draft.protocol;
         self.settings_ui.editor = Some(ServiceEditor {
             draft,
             models: Default::default(),
@@ -2439,6 +2442,9 @@ impl Desktop {
             test_details_open: false,
             save_failed: false,
         });
+        if draft_protocol == ServiceProtocol::CodexResponses {
+            self.codex_refresh_status(crate::codex_ui::CodexSurface::Editor, cx);
+        }
         if inline {
             self.settings_tab = 1;
             self.navigate(Page::Settings, cx);
@@ -2570,11 +2576,18 @@ impl Desktop {
                 settings_detail_group("service-connection-heading", icons::cloud(), "连接信息")
                     .child(self.setting_field(EditField::Name, "服务名称", cx)),
             )
-            .when(protocol.purpose() == ServicePurpose::Speech, |view| {
-                view.child(
+            .child(
                 v_flex()
                     .gap_2()
-                    .child(setting_label("service-protocol-heading", icons::cloud(), "接口类型"))
+                    .child(setting_label(
+                        "service-protocol-heading",
+                        icons::cloud(),
+                        if protocol.purpose() == ServicePurpose::Speech {
+                            "接口类型"
+                        } else {
+                            "服务类型"
+                        },
+                    ))
                     .child(
                         self.setting_choices("service-protocol", "服务接口类型")
                             .options(
@@ -2582,6 +2595,8 @@ impl Desktop {
                                     ServiceProtocol::SpeechTranscriptions,
                                     ServiceProtocol::SpeechChat,
                                     ServiceProtocol::AiChat,
+                                    ServiceProtocol::OllamaChat,
+                                    ServiceProtocol::CodexResponses,
                                 ]
                                 .into_iter()
                                 .filter(|candidate| candidate.purpose() == protocol.purpose())
@@ -2591,31 +2606,39 @@ impl Desktop {
                             )
                             .selected(protocol.label())
                             .disabled(awaiting_binding)
-                            .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
+                            .on_change(cx.listener(move |this, selected: &SharedString, window, cx| {
                                 let Some(candidate) = [
                                     ServiceProtocol::SpeechTranscriptions,
                                     ServiceProtocol::SpeechChat,
                                     ServiceProtocol::AiChat,
+                                    ServiceProtocol::OllamaChat,
+                                    ServiceProtocol::CodexResponses,
                                 ]
                                 .into_iter()
                                 .find(|candidate| candidate.label() == selected.as_ref()) else {
                                     return;
                                 };
-                                if let Some(editor) = &mut this.settings_ui.editor {
-                                    editor.draft.protocol = candidate;
-                                    editor.models.invalidate();
-                                    editor.errors.clear();
-                                    editor.evidence = None;
-                                    editor.saved_configuration = None;
-                                }
-                                cx.notify();
+                                this.service_protocol_switched(candidate, window, cx);
                             })),
                     ),
-            )
-            })
-            .child(self.setting_field(EditField::Address, "服务地址", cx));
+            );
+        // Codex 端点固定、凭据由登录态持有：不展示地址与认证编辑
+        if protocol != ServiceProtocol::CodexResponses {
+            view = view.child(self.setting_field(EditField::Address, "服务地址", cx));
+        } else {
+            view = view.child(
+                theme::supporting_info(
+                    "service-codex-endpoint",
+                    "请求固定发往 OpenAI Codex 后端；无需服务地址与 API Key。",
+                )
+                .w_full()
+                .min_w_0()
+                .whitespace_normal(),
+            );
+        }
         let address = self.setting_value(EditField::Address, cx);
-        if let Ok(endpoint) = preferences::normalize_endpoint(&address, protocol)
+        if protocol != ServiceProtocol::CodexResponses
+            && let Ok(endpoint) = preferences::normalize_endpoint(&address, protocol)
             && endpoint != address.trim()
         {
             view = view.child(
@@ -2624,7 +2647,8 @@ impl Desktop {
                     .text_color(color(MUTED)),
             );
         }
-        view = view.child(
+        if !protocol.keyless() {
+            view = view.child(
             v_flex()
                 .gap_2()
                 .child(setting_label("service-auth-heading", icons::shield(), "认证方式"))
@@ -2739,6 +2763,15 @@ impl Desktop {
                 .text_sm(),
             );
         }
+        }
+        // Codex 账号连接：登录态决定模型目录与可用性
+        if protocol == ServiceProtocol::CodexResponses {
+            view = view.child(self.codex_account_section(
+                crate::codex_ui::CodexSurface::Editor,
+                awaiting_binding,
+                cx,
+            ));
+        }
         let model_error = editor.errors.iter().find(|error| error.field == "model");
         view = view.child(
             self.reveal_setting(
@@ -2784,7 +2817,7 @@ impl Desktop {
         let mut testing = settings_detail_group("service-test-heading", icons::science(), "检查服务")
             .flex_shrink_0()
             .pt_2();
-        if protocol == ServiceProtocol::AiChat {
+        if protocol.purpose() == ServicePurpose::Ai {
             testing = testing.child(
                 div().w_full().max_w(rems(560. / 14.)).min_w_0().child(
                     self.setting_choices("service-test-purpose", "要测试的服务能力")
@@ -3121,7 +3154,79 @@ impl Desktop {
         Some(draft)
     }
 
+    /// 服务类型切换：无密钥协议收起认证编辑，并按协议预填/替换固定地址。
+    fn service_protocol_switched(
+        &mut self,
+        candidate: ServiceProtocol,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let codex_addresses = [
+            preferences::CODEX_ADDRESS,
+            course2md::provider::CODEX_RESPONSES_URL,
+        ];
+        let current = self.setting_value(EditField::Address, cx);
+        let current = current.trim().trim_end_matches('/').to_string();
+        if let Some(editor) = &mut self.settings_ui.editor {
+            // 派生名称（空或与旧地址主机一致）跟随新类型重新生成；手动命名保留
+            let previous_host = preferences::service_host(&current, editor.draft.protocol);
+            if editor.draft.name.trim().is_empty()
+                || Some(editor.draft.name.trim()) == previous_host.as_deref()
+            {
+                editor.draft.name.clear();
+                self.settings_ui.inputs[&EditField::Name].update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
+            }
+            editor.draft.protocol = candidate;
+            if candidate.keyless() {
+                editor.draft.authentication = Authentication::None;
+            }
+            editor.models.invalidate();
+            editor.errors.clear();
+            editor.evidence = None;
+            editor.saved_configuration = None;
+        }
+        let is_codex_address = codex_addresses.contains(&current.as_str());
+        let next = match candidate {
+            ServiceProtocol::CodexResponses => Some(preferences::CODEX_ADDRESS),
+            ServiceProtocol::OllamaChat if current.is_empty() || is_codex_address => {
+                Some(preferences::OLLAMA_DEFAULT_ADDRESS)
+            }
+            // 离开 Codex 时清掉固定地址（非用户数据），其余输入保留
+            _ if is_codex_address => Some(""),
+            _ => None,
+        };
+        if let Some(next) = next {
+            self.settings_ui.inputs[&EditField::Address].update(cx, |input, cx| {
+                input.set_value(next, window, cx);
+            });
+            // set_value 不触发 Change 事件，草稿在此同步
+            if let Some(editor) = &mut self.settings_ui.editor {
+                editor.draft.address = next.to_string();
+            }
+        }
+        if candidate.keyless() {
+            self.settings_ui.inputs[&EditField::Key].update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
+        if candidate == ServiceProtocol::CodexResponses {
+            self.codex_refresh_status(crate::codex_ui::CodexSurface::Editor, cx);
+        }
+        cx.notify();
+    }
+
     fn fetch_service_models(&mut self, cx: &mut Context<Self>) {
+        if self
+            .settings_ui
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.draft.protocol == ServiceProtocol::CodexResponses)
+        {
+            self.codex_refresh_models(crate::codex_ui::CodexSurface::Editor, cx);
+            return;
+        }
         let Some(draft) = self.live_service_model_draft(cx) else {
             return;
         };
@@ -3173,6 +3278,52 @@ impl Desktop {
         })
         .detach();
         cx.notify();
+    }
+
+    /// codex_ui 的编辑器钩子：仅在编辑器仍在编辑 Codex 服务时落目录/错误。
+    pub(super) fn editor_codex_models_loading(&mut self) -> bool {
+        let Some(editor) = &mut self.settings_ui.editor else {
+            return false;
+        };
+        if editor.draft.protocol != ServiceProtocol::CodexResponses {
+            return false;
+        }
+        editor.models.begin_external();
+        true
+    }
+    pub(super) fn editor_codex_models_failed(&mut self, message: String) {
+        if let Some(editor) = &mut self.settings_ui.editor
+            && editor.draft.protocol == ServiceProtocol::CodexResponses
+        {
+            editor
+                .models
+                .reject(crate::model_discovery::Error::Custom(message));
+        }
+    }
+    pub(super) fn editor_codex_catalog(
+        &mut self,
+        models: Vec<String>,
+        suggested: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.settings_ui.editor
+            && editor.draft.protocol == ServiceProtocol::CodexResponses
+        {
+            // 只补充候选：自动填充仅落到空输入，不改变已保存配置与测试证据
+            editor.models.prime(models);
+            crate::codex_ui::autofill_input(
+                self.settings_ui.inputs[&EditField::Model].clone(),
+                suggested,
+                cx,
+            );
+        }
+    }
+    pub(super) fn editor_codex_logged_out(&mut self) {
+        if let Some(editor) = &mut self.settings_ui.editor
+            && editor.draft.protocol == ServiceProtocol::CodexResponses
+        {
+            editor.models.invalidate();
+        }
     }
 
     fn setting_input_changed(&mut self, field: EditField, cx: &mut Context<Self>) {
@@ -3372,11 +3523,18 @@ impl Desktop {
         editor.test_running = Some(cancel.clone());
         editor.evidence = None;
         editor.status = Some(format!("正在测试{}…", kind.label()));
-        let vault = self.preferences.vault();
-        // 服务测试含同步 Keychain 读取与受限 HTTP；见 crate::spawn_blocking_io 的说明
-        let task = crate::spawn_blocking_io(move || {
-            smol::block_on(service_test::test_service(config, kind, vault, cancel))
-        });
+        // Codex 订阅服务走 CLI 方言（Responses/SSE），而非桌面自带的 chat/completions 测试
+        let task = if config.protocol == ServiceProtocol::CodexResponses {
+            crate::spawn_blocking_io(move || {
+                service_test::test_codex_blocking(&config, kind, &cancel)
+            })
+        } else {
+            let vault = self.preferences.vault();
+            // 服务测试含同步 Keychain 读取与受限 HTTP；见 crate::spawn_blocking_io 的说明
+            crate::spawn_blocking_io(move || {
+                smol::block_on(service_test::test_service(config, kind, vault, cancel))
+            })
+        };
         cx.spawn(async move |this, cx| {
             let Ok(evidence) = task.recv().await else {
                 return;

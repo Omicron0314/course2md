@@ -482,6 +482,23 @@ pub fn authorize_for_desktop() -> Result<Vec<(String, String)>> {
     }))
 }
 
+/// 桌面端使用：用已保存的登录态重新拉取账号可用的模型目录（临期先刷新令牌）。
+/// 与导入来源无关（codex CLI 导入或浏览器授权均可）；未登录时报错。
+pub fn refresh_models_for_desktop() -> Result<Vec<(String, String)>> {
+    let tokens = fresh_tokens()?;
+    fetch_models(&tokens)
+}
+
+/// 桌面端使用：仅删除 course2md 自有的 Codex 凭据副本，不改写 CLI 配置
+/// （桌面端的服务解绑由桌面自己的设置存储负责）。返回是否确有凭据被删除。
+pub fn logout_for_desktop() -> Result<bool> {
+    match std::fs::remove_file(credential_path()) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).context("清除 Codex 登录状态失败 / Could not remove Codex login"),
+    }
+}
+
 pub(super) struct CodexLogin;impl LoginMethod for CodexLogin {
     fn id(&self) -> &'static str {
         "codex"

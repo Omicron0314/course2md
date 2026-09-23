@@ -6,6 +6,7 @@ mod activity;
 mod appearance_ui;
 mod backend;
 mod bounded_http;
+mod codex_ui;
 mod course_library;
 mod credentials;
 mod focus_scroll;
@@ -225,6 +226,7 @@ struct Desktop {
     draft_deadline: Option<Instant>,
     quit_deadline: Option<Instant>,
     account: account_ui::AccountUi,
+    codex: codex_ui::CodexUi,
     online: bool,
     last_source_input: String,
     completed_source: Option<String>,
@@ -597,6 +599,7 @@ impl Desktop {
             show_preview_details: false,
             expanded_subtitle_issue: None,
             account: account_ui::AccountUi::default(),
+            codex: codex_ui::CodexUi::default(),
             library: Default::default(),
             library_root: output,
             library_error: None,
