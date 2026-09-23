@@ -195,16 +195,81 @@ pub fn polish_sections_report(
             note: Some(brief(&format!("{e:#}"))),
         });
     }
+    if attempted == 0 {
+        return Ok(PolishReport::default());
+    }
+    let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let workers = s.concurrency.clamp(1, MAX_CONCURRENCY);
+    // 整个任务共享一个 agent（连接池复用 TCP+TLS），不再每请求新建
+    let agent = chat_agent();
+    let succeeded = std::sync::atomic::AtomicUsize::new(0);
+    let aborted = std::sync::Mutex::new(None::<anyhow::Error>);
+    let first_error = std::sync::Mutex::new(None::<String>);
+
+    if !s.vision {
+        // 纯文本润色：跨 Section 展平，每 BATCH (20) 条语音合并为一个请求，
+        // 彻底杜绝因切片过多导致请求被放大十几倍的严重缺陷。
+        let mut flat: Vec<&mut TranscriptEvent> = sections
+            .iter_mut()
+            .flat_map(|sec| sec.speech.iter_mut())
+            .collect();
+        let total = flat.chunks(BATCH).len();
+        let pb = crate::progress::Bar::new("llm", total as u64)
+            .with_template("{spinner:.green} llm {pos}/{len} [{bar:32.cyan/blue}] {msg}");
+        let queue = std::sync::Mutex::new(flat.chunks_mut(BATCH));
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        if let Err(e) = crate::dispatch::check_control() {
+                            let mut guard = aborted.lock().unwrap_or_else(|p| p.into_inner());
+                            if guard.is_none() {
+                                *guard = Some(e);
+                            }
+                            break;
+                        }
+                        let next = queue.lock().map(|mut it| it.next());
+                        match next {
+                            Ok(Some(chunk)) => {
+                                pb.inc(1);
+                                let count = polish_chunk_refs(
+                                    &agent,
+                                    s,
+                                    chunk,
+                                    None,
+                                    &warned,
+                                    &first_error,
+                                );
+                                succeeded.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            Ok(None) | Err(_) => break,
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(e) = aborted.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            return Err(e);
+        }
+        for sec in sections.iter_mut() {
+            sec.speech.retain(|e| !e.text.trim().is_empty());
+        }
+        pb.finish();
+        let succeeded = succeeded.load(std::sync::atomic::Ordering::Relaxed);
+        return Ok(PolishReport {
+            attempted,
+            succeeded,
+            failed: attempted.saturating_sub(succeeded),
+            note: first_error.lock().unwrap_or_else(|p| p.into_inner()).take(),
+        });
+    }
+
     let total: usize = sections
         .iter()
         .map(|sec| sec.speech.chunks(BATCH).len())
         .sum();
     let pb = crate::progress::Bar::new("llm", total as u64)
         .with_template("{spinner:.green} llm {pos}/{len} [{bar:32.cyan/blue}] {msg}");
-    let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let workers = s.concurrency.clamp(1, MAX_CONCURRENCY);
-    // 整个任务共享一个 agent（连接池复用 TCP+TLS），不再每请求新建
-    let agent = chat_agent();
     // vision：同一 Section 的多 chunk 共用一张截图，只读盘 + base64 一次
     //（数 MB 大，逐 chunk 重复编码太贵）；所需截图不可读的 Section 整体保留原文。
     // 空 Section 不读图也不告警（其 chunks 迭代本就不会产生任务）。
@@ -227,9 +292,6 @@ pub fn polish_sections_report(
             .enumerate()
             .flat_map(|(si, sec)| sec.speech.chunks_mut(BATCH).map(move |chunk| (si, chunk))),
     );
-    let succeeded = std::sync::atomic::AtomicUsize::new(0);
-    let aborted = std::sync::Mutex::new(None::<anyhow::Error>);
-    let first_error = std::sync::Mutex::new(None::<String>);
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
@@ -333,6 +395,23 @@ fn polish_chunk(
     warned: &std::sync::atomic::AtomicBool,
     first_error: &std::sync::Mutex<Option<String>>,
 ) -> usize {
+    let mut refs: Vec<&mut TranscriptEvent> = chunk.iter_mut().collect();
+    polish_chunk_refs(agent, s, &mut refs, image_b64, warned, first_error)
+}
+
+/// 引用版校对：纯文本路径跨 Section 展平后只能拿到 &mut 引用集合，
+/// 与切片版 polish_chunk 共用同一请求/应用/失败记录逻辑。
+fn polish_chunk_refs(
+    agent: &ureq::Agent,
+    s: &LlmSettings,
+    chunk: &mut [&mut TranscriptEvent],
+    image_b64: Option<&str>,
+    warned: &std::sync::atomic::AtomicBool,
+    first_error: &std::sync::Mutex<Option<String>>,
+) -> usize {
+    if chunk.is_empty() {
+        return 0;
+    }
     let items: Vec<(usize, &str)> = chunk
         .iter()
         .enumerate()
@@ -345,7 +424,7 @@ fn polish_chunk(
     );
     match chat(agent, s, &items, image_b64, &description) {
         Ok(polished) => {
-            let mismatched = apply_polish(chunk, &polished);
+            let mismatched = apply_polish_refs(chunk, &polished);
             if mismatched {
                 warn_once(
                     warned,
@@ -399,7 +478,13 @@ fn segment_ids_match(polished: &[(usize, String)], expected: usize) -> bool {
 
 /// 把 (id, 新文本) 应用到一批事件上；空字符串 = 删除该条（由调用方 retain）。
 /// 返回 true = 返回集与输入不匹配（重排/缺项/重复），该批保留原文。
+#[cfg(test)]
 fn apply_polish(chunk: &mut [TranscriptEvent], polished: &[(usize, String)]) -> bool {
+    let mut refs: Vec<&mut TranscriptEvent> = chunk.iter_mut().collect();
+    apply_polish_refs(&mut refs, polished)
+}
+
+fn apply_polish_refs(chunk: &mut [&mut TranscriptEvent], polished: &[(usize, String)]) -> bool {
     if !segment_ids_match(polished, chunk.len()) {
         return true;
     }
@@ -1103,6 +1188,32 @@ mod tests {
         ));
         assert!(apply_polish(&mut chunk, &[]));
         assert_eq!(chunk[0].text, "a", "不匹配时保留原文");
+    }
+
+    #[test]
+    fn apply_polish_refs_updates_text_and_sets_raw() {
+        let mut ev1 = TranscriptEvent {
+            start: 0.0,
+            end: 1.0,
+            text: "原始文本一".into(),
+            raw: None,
+        };
+        let mut ev2 = TranscriptEvent {
+            start: 1.0,
+            end: 2.0,
+            text: "语气词".into(),
+            raw: None,
+        };
+        let mut refs = vec![&mut ev1, &mut ev2];
+        let mismatched = apply_polish_refs(
+            &mut refs,
+            &[(0, "校对文本一".into()), (1, "".into())],
+        );
+        assert!(!mismatched);
+        assert_eq!(ev1.text, "校对文本一");
+        assert_eq!(ev1.raw.as_deref(), Some("原始文本一"));
+        assert_eq!(ev2.text, "");
+        assert_eq!(ev2.raw.as_deref(), Some("语气词"));
     }
 
     #[test]
