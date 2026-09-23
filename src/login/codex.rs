@@ -562,7 +562,27 @@ pub(super) struct CodexLogin;impl LoginMethod for CodexLogin {
         // 导入即验证并取新令牌：过期令牌现场刷新（同时验证 refresh token 可用）
         if needs_refresh(&tokens) {
             save_tokens(&tokens)?; // 刷新互斥的锁内复查需要文件已存在
-            tokens = refresh(&tokens)?;
+            match refresh(&tokens) {
+                Ok(refreshed) => tokens = refreshed,
+                // codex CLI 侧登录已失效（refresh 4xx）：交互终端提供浏览器授权兜底
+                Err(e)
+                    if interactive
+                        && e.chain()
+                            .any(|c| c.downcast_ref::<CodexLoginRequired>().is_some()) =>
+                {
+                    println!("{e:#}");
+                    let browser = dialoguer::Confirm::new()
+                        .with_prompt("codex CLI 的登录已失效。改用浏览器授权登录（ChatGPT 账号）？/ The codex CLI login expired. Authorize in the browser instead?")
+                        .default(true)
+                        .interact_opt()?
+                        .unwrap_or(false);
+                    if !browser {
+                        bail!("已取消登录。/ Login cancelled.");
+                    }
+                    tokens = browser_authorization()?;
+                }
+                Err(e) => return Err(e),
+            }
         }
         save_tokens(&tokens)?;
 
