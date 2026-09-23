@@ -154,22 +154,30 @@ pub fn test_codex_blocking(
                 .push("仅验证登录态、模型与图文输入路径，不代表所有内容均可校对".into());
         }
         Err(error) => {
-            // 登录文件缺失是配置拒绝（阻断补做）；其余为一般性未通过
-            let logged_out = matches!(course2md::login::codex::load_tokens(), Ok(None));
-            evidence.outcome = if logged_out {
-                TestOutcome::AuthenticationRefused
-            } else {
-                TestOutcome::ContractMismatch
-            };
+            let outcome = codex_failure_outcome(&error);
             let reason = format!("{error:#}");
-            evidence.message = if logged_out {
+            evidence.message = if outcome == TestOutcome::AuthenticationRefused {
                 "Codex 登录已失效或尚未连接，请重新连接账号".into()
             } else {
                 format!("连接测试未通过：{}", reason.chars().take(240).collect::<String>())
             };
+            evidence.outcome = outcome;
         }
     }
     evidence
+}
+
+/// Codex 检查失败的分类：登录缺失/失效（含刷新被拒）是配置拒绝，阻断补做；
+/// 其余为一般性未通过。识别根 crate 的 [`course2md::login::codex::CodexLoginRequired`] 标记。
+fn codex_failure_outcome(error: &anyhow::Error) -> TestOutcome {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<course2md::login::codex::CodexLoginRequired>().is_some())
+    {
+        TestOutcome::AuthenticationRefused
+    } else {
+        TestOutcome::ContractMismatch
+    }
 }
 
 struct HttpRequest {
@@ -814,6 +822,29 @@ mod tests {
             &config(),
             &[TestKind::Proofread.contract()]
         ));
+    }
+
+    #[test]
+    fn codex_login_required_maps_to_configuration_refusal() {
+        let expired = anyhow::Error::new(course2md::login::codex::CodexLoginRequired);
+        assert_eq!(
+            codex_failure_outcome(&expired),
+            TestOutcome::AuthenticationRefused,
+            "登录缺失/刷新被拒必须阻断补做"
+        );
+        let wrapped = anyhow::Error::new(course2md::login::codex::CodexLoginRequired)
+            .context("连接失败。请检查服务地址、密钥和模型。");
+        assert_eq!(
+            codex_failure_outcome(&wrapped),
+            TestOutcome::AuthenticationRefused,
+            "错误链中的标记同样生效"
+        );
+        assert_eq!(
+            codex_failure_outcome(&anyhow::anyhow!("网络中断")),
+            TestOutcome::ContractMismatch
+        );
+        // 标记与 CLI 修复文案都不含凭据
+        assert!(!format!("{expired:#}").contains("--login"));
     }
 
     #[test]

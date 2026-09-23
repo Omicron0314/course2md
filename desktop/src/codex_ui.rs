@@ -7,6 +7,17 @@ use crate::theme::*;
 use course2md::login::LoginStatus;
 use gpui_component::button::ButtonVariants as _;
 
+/// Codex 固定端点说明：设置编辑器与首次引导共用同一文案。
+pub(crate) const ENDPOINT_NOTE: &str =
+    "请求固定发往 OpenAI Codex 后端；无需服务地址与 API Key。";
+
+/// 识别根 crate 的登录缺失/失效标记，替换为界面内的连接引导。
+fn login_required(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<course2md::login::codex::CodexLoginRequired>().is_some())
+}
+
 /// Codex 动作的归属界面：异步结果只落回发起时的界面。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CodexSurface {
@@ -28,7 +39,8 @@ pub(crate) struct CodexUi {
     generation: u64,
     pub(crate) status: Option<LoginStatus>,
     working: Option<CodexWork>,
-    pub(crate) notice: Option<String>,
+    /// 最近一次动作的可见结果；bool = 是否为失败（失败用危险色呈现）
+    pub(crate) notice: Option<(String, bool)>,
     surface: Option<CodexSurface>,
 }
 
@@ -45,6 +57,12 @@ impl CodexUi {
     }
     pub(crate) fn busy(&self) -> bool {
         self.working.is_some()
+    }
+    fn fail(&mut self, message: String) {
+        self.notice = Some((message, true));
+    }
+    fn inform(&mut self, message: String) {
+        self.notice = Some((message, false));
     }
 }
 
@@ -96,8 +114,17 @@ impl Desktop {
                 match result {
                     Ok(status) => this.codex.status = Some(status),
                     Err(error) => {
-                        this.codex.notice = Some(format!("暂时无法读取 Codex 登录状态：{error}"))
+                        this.codex.fail(format!("暂时无法读取 Codex 登录状态：{error}"))
                     }
+                }
+                // 已连接的 Codex 界面没有目录时，顺接拉取账号目录（空模型输入自动填首个候选）
+                let needs_catalog = matches!(this.codex.status, Some(LoginStatus::Connected(_)))
+                    && match surface {
+                        CodexSurface::Editor => this.editor_codex_needs_catalog(),
+                        CodexSurface::Onboarding => this.onboarding_codex_needs_catalog(),
+                    };
+                if needs_catalog {
+                    this.codex_refresh_models(surface, cx);
                 }
                 cx.notify();
             });
@@ -129,14 +156,14 @@ impl Desktop {
         &mut self,
         surface: CodexSurface,
         work: CodexWork,
-        action: fn() -> anyhow::Result<Vec<(String, String)>>,
+        action: fn() -> anyhow::Result<course2md::login::codex::DesktopCatalog>,
         cx: &mut Context<Self>,
     ) {
         if self.codex.busy() {
             return;
         }
         let generation = self.codex.begin(surface, work);
-        let task = crate::spawn_blocking_io(move || action().map_err(|error| format!("{error:#}")));
+        let task = crate::spawn_blocking_io(action);
         cx.spawn(async move |this, cx| {
             let Ok(result) = task.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
@@ -147,14 +174,32 @@ impl Desktop {
                 match result {
                     Ok(catalog) => {
                         this.codex.status = Some(LoginStatus::Connected("Codex".into()));
-                        this.codex.notice = Some("已连接 Codex，模型目录已更新。".into());
-                        this.codex_apply_catalog(surface, catalog, cx);
+                        this.codex.inform(if catalog.catalog_is_fallback {
+                            "已连接 Codex。暂时无法获取账号的模型目录，已填入默认模型，可稍后刷新。".into()
+                        } else {
+                            "已连接 Codex，模型目录已更新。".into()
+                        });
+                        this.codex_apply_catalog(surface, catalog.models, cx);
+                        // 重读登录状态，展示账号详情而非通用占位
+                        this.codex_refresh_status(surface, cx);
                     }
                     Err(error) => {
-                        this.codex.notice = Some(match work {
-                            CodexWork::Importing => format!("导入 Codex 登录未完成：{error}"),
-                            _ => format!("浏览器授权未完成：{error}"),
-                        });
+                        let message = if login_required(&error) {
+                            // 登录缺失/失效：引导使用界面内的连接动作，而非 CLI 命令
+                            match work {
+                                CodexWork::Importing => {
+                                    "codex CLI 的登录已失效：请在 codex CLI 重新登录后再导入，或改用浏览器授权。"
+                                        .into()
+                                }
+                                _ => "Codex 登录已失效，请重新连接。".into(),
+                            }
+                        } else {
+                            match work {
+                                CodexWork::Importing => format!("导入 Codex 登录未完成：{error:#}"),
+                                _ => format!("浏览器授权未完成：{error:#}"),
+                            }
+                        };
+                        this.codex.fail(message);
                     }
                 }
                 cx.notify();
@@ -166,19 +211,25 @@ impl Desktop {
 
     /// 用已保存的登录态重新拉取账号可用的模型目录。
     pub(crate) fn codex_refresh_models(&mut self, surface: CodexSurface, cx: &mut Context<Self>) {
-        if self.codex.busy() {
+        // 先让模型字段进入加载状态：即使随后被忙碌守卫拦下，点击也不是静默无响应
+        let armed = match surface {
+            CodexSurface::Editor => self.editor_codex_models_loading(),
+            CodexSurface::Onboarding => self.onboarding_codex_models_loading(),
+        };
+        if !armed {
             return;
         }
-        match surface {
-            CodexSurface::Editor if !self.editor_codex_models_loading() => return,
-            CodexSurface::Onboarding if !self.onboarding_codex_models_loading() => return,
-            _ => {}
+        if self.codex.busy() {
+            let message = "正在处理上一个 Codex 请求，完成后请重试获取模型。".to_string();
+            match surface {
+                CodexSurface::Editor => self.editor_codex_models_failed(message),
+                CodexSurface::Onboarding => self.onboarding_codex_models_failed(message),
+            }
+            cx.notify();
+            return;
         }
         let generation = self.codex.begin(surface, CodexWork::Models);
-        let task = crate::spawn_blocking_io(|| {
-            course2md::login::codex::refresh_models_for_desktop()
-                .map_err(|error| format!("{error:#}"))
-        });
+        let task = crate::spawn_blocking_io(course2md::login::codex::refresh_models_for_desktop);
         cx.spawn(async move |this, cx| {
             let Ok(result) = task.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
@@ -192,7 +243,11 @@ impl Desktop {
                         this.codex_apply_catalog(surface, catalog, cx);
                     }
                     Err(error) => {
-                        let message = format!("暂时无法获取 Codex 模型目录：{error}");
+                        let message = if login_required(&error) {
+                            "Codex 登录已失效，请先连接 Codex 账号。".to_string()
+                        } else {
+                            format!("暂时无法获取 Codex 模型目录：{error:#}")
+                        };
                         match surface {
                             CodexSurface::Editor => this.editor_codex_models_failed(message),
                             CodexSurface::Onboarding => {
@@ -226,7 +281,7 @@ impl Desktop {
                     Ok(_) => {
                         this.codex.status = Some(LoginStatus::Disconnected);
                         let detached = this.codex_detach_default_service();
-                        this.codex.notice = Some(if detached {
+                        this.codex.inform(if detached {
                             "已退出 Codex 登录；默认 AI 服务已解除绑定。".into()
                         } else {
                             "已退出 Codex 登录。".into()
@@ -235,7 +290,7 @@ impl Desktop {
                         this.onboarding_codex_logged_out();
                     }
                     Err(error) => {
-                        this.codex.notice = Some(format!("退出登录尚未完成：{error:#}"));
+                        this.codex.fail(format!("退出登录尚未完成：{error:#}"));
                     }
                 }
                 cx.notify();
@@ -350,13 +405,14 @@ impl Desktop {
                 .whitespace_normal(),
             )
         })
-        .when_some(notice, |view, notice| {
+        .when_some(notice, |view, (message, is_error)| {
             view.child(
-                accessible_text(SharedString::from(format!("{id}-notice")), notice)
+                accessible_text(SharedString::from(format!("{id}-notice")), message)
                     .w_full()
                     .min_w_0()
                     .whitespace_normal()
-                    .text_size(TEXT_AUX),
+                    .text_size(TEXT_AUX)
+                    .text_color(color(if is_error { DANGER } else { MUTED })),
             )
         })
         .child(

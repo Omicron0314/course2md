@@ -66,6 +66,44 @@ fn fetch_models(tokens: &CodexTokens) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// 需要（重新）登录 Codex 的标记错误：桌面端在错误链中识别它并替换为
+/// 界面内的连接引导，CLI 直接展示其双语说明。不含任何凭据内容。
+#[derive(Debug)]
+pub struct CodexLoginRequired;
+
+impl std::fmt::Display for CodexLoginRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Codex 登录缺失或已失效，请重新登录 / Codex login is missing or has expired; log in again")
+    }
+}
+
+impl std::error::Error for CodexLoginRequired {}
+
+/// 桌面端登录动作的模型目录结果。`catalog_is_fallback = true` 表示目录拉取失败、
+/// 已回落默认模型——界面应如实说明，而不是把兜底冒充为账号目录。
+#[derive(Debug, Clone)]
+pub struct DesktopCatalog {
+    pub models: Vec<(String, String)>,
+    pub catalog_is_fallback: bool,
+}
+
+/// 登录成功后的目录：失败回落默认模型并标记，由调用方如实提示。
+fn desktop_catalog(tokens: &CodexTokens) -> DesktopCatalog {
+    match fetch_models(tokens) {
+        Ok(models) => DesktopCatalog {
+            models,
+            catalog_is_fallback: false,
+        },
+        Err(e) => {
+            tracing::warn!("{e:#}");
+            DesktopCatalog {
+                models: vec![(DEFAULT_MODEL.into(), DEFAULT_MODEL.into())],
+                catalog_is_fallback: true,
+            }
+        }
+    }
+}
+
 /// course2md 自有的 codex 凭据副本。
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CodexTokens {
@@ -164,9 +202,9 @@ fn refresh(tokens: &CodexTokens) -> Result<CodexTokens> {
             "refresh_token": tokens.refresh_token,
         }))
         .map_err(|e| match e {
-            ureq::Error::Status(status, _) if (400..500).contains(&status) => anyhow::anyhow!(
-                "Codex 登录已失效，请重新运行 course2md --login codex / Codex login expired; run course2md --login codex again"
-            ),
+            ureq::Error::Status(status, _) if (400..500).contains(&status) => {
+                anyhow::Error::new(CodexLoginRequired)
+            }
             _ => anyhow::anyhow!(
                 "无法连接 OpenAI 认证服务，稍后重试 / Cannot reach the OpenAI auth service; retry later"
             ),
@@ -200,7 +238,7 @@ static REFRESH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 获取可用凭据：临期/过期则在锁内复查后刷新并写回。
 fn fresh_tokens() -> Result<CodexTokens> {
     let Some(tokens) = load_tokens()? else {
-        bail!("未登录 Codex，请先运行 course2md --login codex / Not logged in to Codex; run course2md --login codex first");
+        return Err(CodexLoginRequired.into());
     };
     if !needs_refresh(&tokens) {
         return Ok(tokens);
@@ -208,7 +246,7 @@ fn fresh_tokens() -> Result<CodexTokens> {
     let _guard = REFRESH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // 锁内复查：另一线程可能刚刷新完
     let Some(current) = load_tokens()? else {
-        bail!("Codex 登录状态丢失，请重新登录 / Codex login state lost; log in again");
+        return Err(CodexLoginRequired.into());
     };
     if !needs_refresh(&current) {
         return Ok(current);
@@ -447,7 +485,7 @@ fn browser_authorization() -> Result<CodexTokens> {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 ensure!(
                     std::time::Instant::now() < deadline,
-                    "浏览器授权超时，请重新运行 course2md --login codex / Browser authorization timed out; run course2md --login codex again"
+                    "浏览器授权超时，请重试 / Browser authorization timed out; please retry"
                 );
                 std::thread::sleep(Duration::from_millis(200));
             }
@@ -458,28 +496,22 @@ fn browser_authorization() -> Result<CodexTokens> {
 }
 
 /// 桌面端使用：导入 codex CLI 登录态并保存 course2md 自有副本，返回账号可用
-/// 模型目录（slug, 展示名）。目录拉取失败时回落默认模型；导入失败不写任何文件。
-pub fn import_for_desktop() -> Result<Vec<(String, String)>> {
+/// 模型目录（目录拉取失败时回落默认模型并标记，见 [`DesktopCatalog`]）；导入失败不写任何文件。
+pub fn import_for_desktop() -> Result<DesktopCatalog> {
     let mut tokens = import_from_codex_cli()?;
     if needs_refresh(&tokens) {
         tokens = refresh(&tokens)?;
     }
     save_tokens(&tokens)?;
-    Ok(fetch_models(&tokens).unwrap_or_else(|e| {
-        tracing::warn!("{e:#}");
-        vec![(DEFAULT_MODEL.into(), DEFAULT_MODEL.into())]
-    }))
+    Ok(desktop_catalog(&tokens))
 }
 
 /// 桌面端使用：浏览器 PKCE 授权（无 codex CLI 时），成功后保存并返回模型目录。
 /// 会打开系统浏览器并阻塞等待回调（最长 180 秒）；须在非 UI 线程调用。
-pub fn authorize_for_desktop() -> Result<Vec<(String, String)>> {
+pub fn authorize_for_desktop() -> Result<DesktopCatalog> {
     let tokens = browser_authorization()?;
     save_tokens(&tokens)?;
-    Ok(fetch_models(&tokens).unwrap_or_else(|e| {
-        tracing::warn!("{e:#}");
-        vec![(DEFAULT_MODEL.into(), DEFAULT_MODEL.into())]
-    }))
+    Ok(desktop_catalog(&tokens))
 }
 
 /// 桌面端使用：用已保存的登录态重新拉取账号可用的模型目录（临期先刷新令牌）。

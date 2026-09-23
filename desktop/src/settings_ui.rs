@@ -398,9 +398,8 @@ fn service_protocol_label(protocol: ServiceProtocol) -> &'static str {
     match protocol {
         ServiceProtocol::SpeechTranscriptions => "语音转录",
         ServiceProtocol::SpeechChat => "音频对话",
-        ServiceProtocol::AiChat => "AI 对话",
-        ServiceProtocol::OllamaChat => "Ollama 本地",
-        ServiceProtocol::CodexResponses => "Codex 订阅",
+        // AI 服务类型的唯一文案来源：ServiceProtocol::ai_kind_label
+        ai => ai.ai_kind_label(),
     }
 }
 
@@ -2601,7 +2600,12 @@ impl Desktop {
                                 .into_iter()
                                 .filter(|candidate| candidate.purpose() == protocol.purpose())
                                 .map(|candidate| {
-                                    (candidate.label(), service_protocol_label(candidate))
+                                    let short = if candidate.purpose() == ServicePurpose::Ai {
+                                        candidate.ai_kind_label()
+                                    } else {
+                                        service_protocol_label(candidate)
+                                    };
+                                    (candidate.label(), short)
                                 }),
                             )
                             .selected(protocol.label())
@@ -2627,13 +2631,10 @@ impl Desktop {
             view = view.child(self.setting_field(EditField::Address, "服务地址", cx));
         } else {
             view = view.child(
-                theme::supporting_info(
-                    "service-codex-endpoint",
-                    "请求固定发往 OpenAI Codex 后端；无需服务地址与 API Key。",
-                )
-                .w_full()
-                .min_w_0()
-                .whitespace_normal(),
+                theme::supporting_info("service-codex-endpoint", crate::codex_ui::ENDPOINT_NOTE)
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal(),
             );
         }
         let address = self.setting_value(EditField::Address, cx);
@@ -3178,9 +3179,19 @@ impl Desktop {
                     input.set_value("", window, cx);
                 });
             }
+            let kind_changed = editor.draft.protocol.purpose() == ServicePurpose::Ai
+                && candidate.purpose() == ServicePurpose::Ai
+                && editor.draft.protocol != candidate;
             editor.draft.protocol = candidate;
             if candidate.keyless() {
                 editor.draft.authentication = Authentication::None;
+            }
+            if kind_changed {
+                // 模型 ID 不跨服务类型携带；Codex 连接成功后由账号目录自动填充
+                editor.draft.model.clear();
+                self.settings_ui.inputs[&EditField::Model].update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
             }
             editor.models.invalidate();
             editor.errors.clear();
@@ -3281,6 +3292,13 @@ impl Desktop {
     }
 
     /// codex_ui 的编辑器钩子：仅在编辑器仍在编辑 Codex 服务时落目录/错误。
+    pub(super) fn editor_codex_needs_catalog(&self) -> bool {
+        self.settings_ui.editor.as_ref().is_some_and(|editor| {
+            editor.draft.protocol == ServiceProtocol::CodexResponses
+                && editor.models.models().is_empty()
+                && !editor.models.loading()
+        })
+    }
     pub(super) fn editor_codex_models_loading(&mut self) -> bool {
         let Some(editor) = &mut self.settings_ui.editor else {
             return false;

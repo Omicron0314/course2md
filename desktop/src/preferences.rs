@@ -294,6 +294,16 @@ impl ServiceProtocol {
         matches!(self, Self::OllamaChat | Self::CodexResponses)
     }
 
+    /// AI 服务类型的胶囊选项名：设置编辑器与首次引导共用同一来源。
+    pub fn ai_kind_label(self) -> &'static str {
+        match self {
+            Self::AiChat => "OpenAI 兼容服务",
+            Self::OllamaChat => "Ollama 本地服务",
+            Self::CodexResponses => "OpenAI Codex 订阅",
+            other => other.label(),
+        }
+    }
+
     /// 该协议对应的 CLI LLM 方言（仅 AI 用途参与映射）。
     pub fn llm_provider(self) -> course2md::llm::LlmProvider {
         match self {
@@ -1327,7 +1337,12 @@ impl Store {
                 bail!("所选服务不支持 AI 校对或摘要");
             }
             config.llm.provider = version.config.protocol.llm_provider();
-            config.llm.base_url = version.config.endpoint.clone();
+            // Codex 方言端点固定（provider::endpoint 忽略 base_url）；按 CLI 约定留空
+            config.llm.base_url = if version.config.protocol == ServiceProtocol::CodexResponses {
+                String::new()
+            } else {
+                version.config.endpoint.clone()
+            };
             config.llm.model = version.config.model.clone();
         }
         Ok(config)
@@ -2155,7 +2170,12 @@ mod tests {
             assert_eq!(resolved.llm.provider, provider);
             assert!(resolved.llm.api_key.is_empty());
             assert_eq!(resolved.llm.model, "fixture-model");
-            assert!(resolved.llm.base_url.starts_with("http"));
+            if protocol == ServiceProtocol::CodexResponses {
+                // CLI 约定：Codex 的 base_url 留空（方言端点固定）
+                assert!(resolved.llm.base_url.is_empty());
+            } else {
+                assert!(resolved.llm.base_url.starts_with("http"));
+            }
 
             // 持久化往返：新协议版本在重启后仍完整可用
             let reopened = Store::open(directory.path(), store.vault());

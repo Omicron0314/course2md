@@ -467,7 +467,8 @@ pub fn model_field_with_error(
                     .accessibility_label("从服务返回的候选中选择模型")
                     .disabled(disabled)
                     .dropdown_menu(move |menu, _, _| {
-                        models.iter().fold(menu, |menu, model| {
+                        // 候选可能很多：弹层按共享约定限高并滚动（窗口半高，上限 450px）
+                        models.iter().fold(menu.scrollable(true), |menu, model| {
                             let value = model.clone();
                             let field = field.clone();
                             let choices_current = choices_current.clone();

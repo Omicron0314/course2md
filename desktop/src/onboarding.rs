@@ -1506,12 +1506,12 @@ impl Desktop {
     }
 
     /// 引导的 AI 服务类型切换：无密钥协议收起认证编辑，并按协议预填/替换固定地址。
-    fn setup_ai_kind_switched(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let protocol = match kind {
-            "ollama" => preferences::ServiceProtocol::OllamaChat,
-            "codex" => preferences::ServiceProtocol::CodexResponses,
-            _ => preferences::ServiceProtocol::AiChat,
-        };
+    fn setup_ai_kind_switched(
+        &mut self,
+        protocol: preferences::ServiceProtocol,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         {
             let current = self.onboarding.ai.value(InputField::Address, cx);
             let service = self.onboarding.service_mut(ServicePurpose::Ai);
@@ -1522,10 +1522,18 @@ impl Desktop {
             {
                 service.draft.name.clear();
             }
+            let kind_changed = service.draft.protocol != protocol;
             service.draft.protocol = protocol;
             service.evidence.clear();
             service.errors.clear();
             service.models.invalidate();
+            if kind_changed {
+                // 模型 ID 不跨服务类型携带；Codex 连接成功后由账号目录自动填充
+                service.draft.model.clear();
+                service.inputs[&InputField::Model].update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
+            }
             if protocol.keyless() {
                 service.draft.authentication = Authentication::None;
                 service.inputs[&InputField::Key].update(cx, |input, cx| {
@@ -1564,6 +1572,15 @@ impl Desktop {
     }
 
     /// codex_ui 的引导钩子：仅在 AI 步骤仍在编辑 Codex 服务时落目录/错误。
+    pub(super) fn onboarding_codex_needs_catalog(&self) -> bool {
+        if !self.onboarding.active {
+            return false;
+        }
+        let service = self.onboarding.service(ServicePurpose::Ai);
+        service.draft.protocol == preferences::ServiceProtocol::CodexResponses
+            && service.models.models().is_empty()
+            && !service.models.loading()
+    }
     pub(super) fn onboarding_codex_models_loading(&mut self) -> bool {
         if !self.onboarding.active {
             return false;
@@ -1817,20 +1834,30 @@ impl Desktop {
                         icons::cloud(),
                         SingleChoiceGroup::new("setup-ai-kind", "AI 服务类型")
                             .full_width()
-                            .options([
-                                ("openai", "OpenAI 兼容服务"),
-                                ("ollama", "Ollama 本地服务"),
-                                ("codex", "OpenAI Codex 订阅"),
-                            ])
-                            .selected(match service.draft.protocol {
-                                preferences::ServiceProtocol::OllamaChat => "ollama",
-                                preferences::ServiceProtocol::CodexResponses => "codex",
-                                _ => "openai",
-                            })
+                            .options(
+                                [
+                                    preferences::ServiceProtocol::AiChat,
+                                    preferences::ServiceProtocol::OllamaChat,
+                                    preferences::ServiceProtocol::CodexResponses,
+                                ]
+                                .into_iter()
+                                .map(|candidate| (candidate.label(), candidate.ai_kind_label())),
+                            )
+                            .selected(service.draft.protocol.label())
                             .disabled(busy)
                             .on_change(cx.listener(
                                 |this, value: &SharedString, window, cx| {
-                                    this.setup_ai_kind_switched(value.as_ref(), window, cx)
+                                    let Some(protocol) = [
+                                        preferences::ServiceProtocol::AiChat,
+                                        preferences::ServiceProtocol::OllamaChat,
+                                        preferences::ServiceProtocol::CodexResponses,
+                                    ]
+                                    .into_iter()
+                                    .find(|candidate| candidate.label() == value.as_ref())
+                                    else {
+                                        return;
+                                    };
+                                    this.setup_ai_kind_switched(protocol, window, cx)
                                 },
                             )),
                     ),
@@ -1841,13 +1868,7 @@ impl Desktop {
         if !codex {
             body = body.child(self.setup_input_row(purpose, InputField::Address, "服务地址", cx));
         } else {
-            body = body.child(
-                help(
-                    "setup-codex-endpoint",
-                    "请求固定发往 OpenAI Codex 后端；无需服务地址与 API Key。",
-                )
-                .text_size(TEXT_AUX),
-            );
+            body = body.child(help("setup-codex-endpoint", crate::codex_ui::ENDPOINT_NOTE));
         }
         if !service.draft.protocol.keyless() {
             body = body.child(
