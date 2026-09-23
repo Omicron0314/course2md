@@ -33,7 +33,7 @@ jobs:
       - name: Prepare source dependencies
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+          if [[ "$GITHUB_REF_TYPE" == tag || "$GITHUB_EVENT_NAME" == pull_request ]]; then
             python desktop/scripts/sources.py --locked
           else
             python desktop/scripts/sources.py
